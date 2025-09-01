@@ -1,0 +1,141 @@
+// src/components/Sidebar.jsx
+import React from 'react';
+import { NavLink } from 'react-router-dom';
+import { MdLocalShipping } from 'react-icons/md';
+
+import {
+  Box,
+  VStack,
+  Text,
+  IconButton,
+  Tooltip,
+  HStack,
+  Icon,
+} from '@chakra-ui/react';
+
+import {
+  HamburgerIcon,
+  CloseIcon,
+  ViewIcon,
+  AttachmentIcon,
+  InfoIcon,
+  QuestionIcon,
+  EditIcon,
+  Search2Icon,
+  CheckCircleIcon,
+} from '@chakra-ui/icons';
+
+import { useAuth } from '../context/AuthContext';
+
+// Admin menu
+const adminNavItems = [
+  { path: '/dashboard', label: 'Dashboard', icon: ViewIcon },
+  { path: '/users', label: 'User Management', icon: AttachmentIcon },
+  { path: '/reports', label: 'Upload Ticket', icon: InfoIcon },
+  { path: '/weightreports', label: 'Ticket Records', icon: Search2Icon },
+  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
+  { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
+  { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
+  { path: '/settings', label: 'System Settings', icon: QuestionIcon },
+];
+
+// Weighbridge menu
+const weighbridgeNavItems = [
+  { path: '/dashboard', label: 'Dashboard', icon: ViewIcon },
+  { path: '/weighbridge', label: 'Upload Ticket', icon: AttachmentIcon },
+  { path: '/manual-entry', label: 'Manual Entry', icon: EditIcon },
+  { path: '/weightreports', label: 'Ticket Records', icon: Search2Icon },
+  { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
+];
+
+
+// Outgate Officer menu
+const outgateNavItems = [
+  { path: '/outgate', label: 'Dashboard', icon: ViewIcon },
+  //{ path: '/outgate/search', label: 'Processed Tickets', icon: AttachmentIcon },
+  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
+  { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
+];
+
+// Customs Officer menu
+const customsNavItems = [
+   { path: '/outgate', label: 'Dashboard', icon: ViewIcon },
+  //{ path: '/outgate/search', label: 'Processed Tickets', icon: AttachmentIcon },
+  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
+  { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
+];
+
+
+function Sidebar({ isCollapsed, toggleCollapse }) {
+  const { user } = useAuth();
+
+  // Determine nav items based on user role
+  let navItems;
+  if (user?.role === 'admin') {
+    navItems = adminNavItems;
+  } else if (user?.role === 'weighbridge') {
+    navItems = weighbridgeNavItems;
+  } else if (user?.role === 'outgate') {
+    navItems = outgateNavItems;
+  } else if (user?.role === 'customs') {
+    navItems = customsNavItems;
+  } else {
+    navItems = []; // fallback or generic user menu
+  }
+
+  const activeBg = 'rgba(255, 255, 255, 0.2)';
+
+  return (
+    <Box
+      bg="linear-gradient(90deg, #7B1C1C 0%, #0D1A4B 100%)"
+      color="white"
+      height="100vh"
+      p={4}
+      width={isCollapsed ? '60px' : '288px'}
+      transition="width 0.3s"
+      display="flex"
+      flexDirection="column"
+    >
+      {/* Collapse/Expand Button */}
+      <Box mb={6} display="flex" justifyContent={isCollapsed ? 'center' : 'flex-end'}>
+        <IconButton
+          aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          icon={isCollapsed ? <HamburgerIcon color="white" /> : <CloseIcon color="white" />}
+          size="sm"
+          onClick={toggleCollapse}
+          bg="transparent"
+          _hover={{ bg: 'whiteAlpha.300' }}
+          color="white"
+        />
+      </Box>
+
+      <VStack spacing={3} align={isCollapsed ? 'center' : 'stretch'}>
+        {navItems.map(({ path, label, icon }) => (
+          <Tooltip key={path} label={isCollapsed ? label : ''} placement="right" openDelay={300}>
+            <NavLink
+              to={path}
+              style={({ isActive }) => ({
+                backgroundColor: isActive ? activeBg : 'transparent',
+                padding: isCollapsed ? '10px 0' : '10px',
+                borderRadius: '6px',
+                display: 'block',
+                color: 'white',
+                fontWeight: isActive ? 'bold' : 'normal',
+                textDecoration: 'none',
+                textAlign: isCollapsed ? 'center' : 'left',
+                whiteSpace: 'nowrap',
+              })}
+            >
+              <HStack spacing={isCollapsed ? 0 : 3} justify={isCollapsed ? 'center' : 'flex-start'}>
+                <Icon as={icon} boxSize={5} color="white" />
+                {!isCollapsed && <Text color="white">{label}</Text>}
+              </HStack>
+            </NavLink>
+          </Tooltip>
+        ))}
+      </VStack>
+    </Box>
+  );
+}
+
+export default Sidebar;
