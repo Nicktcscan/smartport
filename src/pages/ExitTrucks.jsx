@@ -177,7 +177,7 @@ export default function ExitTrucks() {
             ticketNo: item.ticket_no,
             gnswTruckNo: item.gnsw_truck_no,
             sadNo: item.sad_no,
-            exitTime: item.submitted_at,
+            exitTime: item.created_at,
             driver: item.driver || item.driver,
             gross: item.gross !== null && item.gross !== undefined ? item.gross : item.gross_weight ?? item.grossWeight ?? null,
             net: item.net !== null && item.net !== undefined ? item.net : item.net ?? item.netWeight ?? null,

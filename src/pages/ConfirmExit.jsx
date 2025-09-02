@@ -533,9 +533,9 @@ export default function ConfirmExit() {
         'SAD No': t.sad_no || '',
         'Container': t.container_no || '',
         'Entry Date': t.date ? formatDate(t.date) : t.submitted_at ? formatDate(t.submitted_at) : '',
-        'Gross': w.gross ?? '',
-        'Tare': w.tare ?? '',
-        'Net': w.net ?? '',
+        'Gross (KG)': w.gross ?? '',
+        'Tare (KG)': w.tare ?? '',
+        'Net (KG)': w.net ?? '',
       };
     });
     if (!rows.length) {
@@ -555,9 +555,9 @@ export default function ConfirmExit() {
         'SAD No': r.sad_no ?? '',
         'Container': r.container_id ?? '',
         'Exit Date': r.created_at ? formatDate(r.created_at) : '',
-        'Gross': w.gross ?? '',
-        'Tare': w.tare ?? '',
-        'Net': w.net ?? '',
+        'Gross (KG)': w.gross ?? '',
+        'Tare (KG)': w.tare ?? '',
+        'Net (KG)': w.net ?? '',
         'Driver': r.driver ?? '',
       };
     });
@@ -579,9 +579,9 @@ export default function ConfirmExit() {
       `SAD: ${selectedTicket.sad_no || '-'}`,
       `Container: ${selectedTicket.container_no || selectedTicket.container_id || '-'}`,
       `Driver: ${selectedTicket.driver || '-'}`,
-      `Gross: ${formatWeight(w.gross)} kg`,
-      `Tare: ${formatWeight(w.tare)} kg`,
-      `Net: ${formatWeight(w.net)} kg`,
+      `Gross (KG): ${formatWeight(w.gross)} kg`,
+      `Tare (KG): ${formatWeight(w.tare)} kg`,
+      `Net (KG): ${formatWeight(w.net)} kg`,
     ].join('\n');
     try {
       await navigator.clipboard.writeText(lines);

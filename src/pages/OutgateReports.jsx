@@ -44,7 +44,7 @@ import {
   ChevronRightIcon,
   DownloadIcon,
 } from '@chakra-ui/icons';
-import { FaFilePdf, FaExternalLinkAlt, FaShareAlt, FaEnvelope } from 'react-icons/fa';
+import { FaFilePdf, FaShareAlt, FaEnvelope } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 
 const ITEMS_PER_PAGE = 5;
@@ -186,8 +186,8 @@ export default function OutgateReports() {
             ticketId: og.ticket_id,
             ticketNo: og.ticket_no || null,
             vehicleNumber: og.vehicle_number || '',
-            outgateDateTime: og.created_at || og.date || null,
-            driverName: og.driver || og.driver_name || null,
+            outgateDateTime: og.created_at || og.created_at || null,
+            driverName: og.driver || og.driver || null,
             destination: og.consignee || og.destination || null,
             remarks: og.remarks || '',
             declaredWeight: og.declared_weight ?? null,
@@ -258,10 +258,10 @@ export default function OutgateReports() {
             ticketNo: ticket.ticket_no,
             date: ticket.date || ticket.submitted_at || exitCandidate || null,
             gnswTruckNo: ticket.gnsw_truck_no || ticket.vehicle_number || ticket.truck_no || null,
-            net: ticket.net ?? ticket.net_weight ?? null,
-            tare: ticket.tare ?? ticket.tare_pt ?? null,
+            net: ticket.net ?? ticket.net ?? null,
+            tare: ticket.tare ?? ticket.tare ?? null,
             gross: ticket.gross ?? null,
-            driver: ticket.driver || ticket.driver_name || 'N/A',
+            driver: ticket.driver || ticket.driver || 'N/A',
             consignee: ticket.consignee,
             operator: ticket.operator,
             containerNo: ticket.container_no || ticket.container_no_supp || null,
@@ -394,7 +394,7 @@ export default function OutgateReports() {
         return `<tr>
         <td>${t.data.sadNo ?? ''}</td>
         <td>${t.data.ticketNo ?? ''}</td>
-        <td>${t.data.date ? new Date(t.data.date).toLocaleString() : ''}</td>
+        <td>${t.data.created_at ? new Date(t.data.created_at).toLocaleString() : ''}</td>
         <td>${t.data.gnswTruckNo ?? ''}</td>
         <td style="text-align:right">${gross != null ? Number(gross).toLocaleString() : ''}</td>
         <td style="text-align:right">${tare != null ? Number(tare).toLocaleString() : ''}</td>
@@ -718,9 +718,9 @@ export default function OutgateReports() {
                 <Th>Ticket No</Th>
                 <Th>Date & Time</Th>
                 <Th>Truck No</Th>
-                <Th isNumeric>Gross</Th>
-                <Th isNumeric>Tare</Th>
-                <Th isNumeric>Net</Th>
+                <Th isNumeric>Gross (KG)</Th>
+                <Th isNumeric>Tare (KG)</Th>
+                <Th isNumeric>Net (KG)</Th>
                 <Th>Status</Th>
                 <Th>Actions</Th>
               </Tr>
@@ -732,11 +732,11 @@ export default function OutgateReports() {
                   <Tr key={t.ticketId}>
                     <Td>{t.data.sadNo}</Td>
                     <Td>{t.data.ticketNo}</Td>
-                    <Td>{t.data.date ? new Date(t.data.date).toLocaleString() : 'N/A'}</Td>
+                    <Td>{t.data.created_at ? new Date(t.data.date).toLocaleString() : 'N/A'}</Td>
                     <Td>{t.data.gnswTruckNo}</Td>
-                    <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'}</Td>
-                    <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'}</Td>
-                    <Td isNumeric>{net != null ? Number(net).toLocaleString() : '—'}</Td>
+                    <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'} KG</Td>
+                    <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'} KG</Td>
+                    <Td isNumeric>{net != null ? Number(net).toLocaleString() : '—'} KG</Td>
                     <Td>
                       <Badge colorScheme={(t.data.status === 'Exited') ? 'green' : (t.data.status === 'Pending') ? 'yellow' : 'gray'}>
                         {t.data.status}
@@ -818,9 +818,9 @@ export default function OutgateReports() {
                   <Th>Truck</Th>
                   <Th>Exit Date & Time</Th>
                   <Th>Driver</Th>
-                  <Th isNumeric>Gross</Th>
-                  <Th isNumeric>Tare</Th>
-                  <Th isNumeric>Net</Th>
+                  <Th isNumeric>Gross (KG)</Th>
+                  <Th isNumeric>Tare (KG)</Th>
+                  <Th isNumeric>Net (KG)</Th>
                   <Th>Status</Th>
                   <Th>Actions</Th>
                 </Tr>
@@ -915,9 +915,9 @@ export default function OutgateReports() {
                     const { gross, tare, net } = computeWeights(selectedReport);
                     return (
                       <>
-                        <Text><b>Gross:</b> {formatWeight(gross)}</Text>
-                        <Text><b>Tare:</b> {formatWeight(tare)}</Text>
-                        <Text><b>Net:</b> {formatWeight(net)}</Text>
+                        <Text><b>Gross (KG):</b> {formatWeight(gross)}</Text>
+                        <Text><b>Tare (KG):</b> {formatWeight(tare)}</Text>
+                        <Text><b>Net (KG):</b> {formatWeight(net)}</Text>
                       </>
                     );
                   })()}
