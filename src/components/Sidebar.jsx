@@ -32,6 +32,7 @@ const adminNavItems = [
   { path: '/dashboard', label: 'Dashboard', icon: ViewIcon },
   { path: '/users', label: 'User Management', icon: AttachmentIcon },
   { path: '/reports', label: 'Upload Ticket', icon: InfoIcon },
+  { path: '/manual-entry', label: 'Manual Entry', icon: EditIcon },
   { path: '/weightreports', label: 'Ticket Records', icon: Search2Icon },
   { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
