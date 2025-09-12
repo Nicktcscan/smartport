@@ -66,6 +66,11 @@ const customsNavItems = [
   { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
 ];
 
+// Customs Officer menu
+const agentNavItems = [
+   { path: '/agent', label: 'Reports', icon: ViewIcon },
+];
+
 
 function Sidebar({ isCollapsed, toggleCollapse }) {
   const { user } = useAuth();
@@ -80,6 +85,8 @@ function Sidebar({ isCollapsed, toggleCollapse }) {
     navItems = outgateNavItems;
   } else if (user?.role === 'customs') {
     navItems = customsNavItems;
+  } else if (user?.role === 'agent') {
+    navItems = agentNavItems;
   } else {
     navItems = []; // fallback or generic user menu
   }

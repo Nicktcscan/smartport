@@ -30,6 +30,9 @@ export const AuthProvider = ({ children }) => {
         case 'customs':
           navigate('/customs');
           break;
+        case 'agent':
+          navigate('/agent');
+          break;
         case 'outgate':
           navigate('/outgate');
           break;
@@ -135,13 +138,13 @@ export const AuthProvider = ({ children }) => {
             const { error: insertError } = await supabase.from('users').insert({
               id: currentUser.id,
               email: currentUser.email,
-              role: 'user', // default role
+              role: 'agent', // default role can now be 'agent'
             });
 
             if (insertError) {
               console.error('Error inserting user into users table:', insertError.message);
             } else {
-              setUserOnly({ ...currentUser, role: 'user' });
+              setUserOnly({ ...currentUser, role: 'agent' });
             }
           } else if (userData?.role) {
             setUserOnly({ ...currentUser, role: userData.role });

@@ -269,6 +269,7 @@ function UsersPage() {
                   <option value="weighbridge">Weighbridge</option>
                   <option value="outgate">Outgate</option>
                   <option value="customs">Customs</option>
+                  <option value="agent">Agent</option>
                 </Select>
                 <FormErrorMessage>{errors.role}</FormErrorMessage>
               </FormControl>

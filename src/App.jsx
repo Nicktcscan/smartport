@@ -37,6 +37,7 @@ import MovementLogs from './pages/customs/MovementLogs';
 import AuditTrail from './pages/customs/AuditTrail';
 import CustomsNotifications from './pages/customs/CustomsNotifications';
 import OCRComponent from './components/OCRComponent';
+import AgentDashboard from './pages/AgentDashboard';
 
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
@@ -52,6 +53,8 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
         return <Navigate to="/outgate" replace />;
       case 'weighbridge':
         return <Navigate to="/weighbridge" replace />;
+      case 'agent':
+        return <Navigate to="/agent" replace />;
       default:
         return <Navigate to="/login" replace />;
     }
@@ -106,6 +109,8 @@ function App() {
               <Navigate to="/outgate" replace />
             ) : user.role === 'weighbridge' ? (
               <Navigate to="/weighbridge" replace />
+            ) : user.role === 'agent' ? (
+              <Navigate to="/agent" replace />
             ) : (
               <Navigate to="/dashboard" replace />
             )
@@ -127,17 +132,17 @@ function App() {
         />
 
         <Route
-  path="/ocr"
-  element={
-    <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-      <Layout>
-        <Box as="main" p={4} bg="gray.50">
-          <OCRComponent />
-        </Box>
-      </Layout>
-    </ProtectedRoute>
-  }
-/>
+          path="/ocr"
+          element={
+            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+              <Layout>
+                <Box as="main" p={4} bg="gray.50">
+                  <OCRComponent />
+                </Box>
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
 
         <Route
           path="/dashboard"
@@ -450,6 +455,19 @@ function App() {
               <Layout>
                 <Box as="main" p={4} bg="gray.50">
                   <GateOperationsPage />
+                </Box>
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/agent"
+          element={
+            <ProtectedRoute allowedRoles={['admin', 'agent']}>
+              <Layout>
+                <Box as="main" p={4} bg="gray.50">
+                  <AgentDashboard />
                 </Box>
               </Layout>
             </ProtectedRoute>
