@@ -71,7 +71,7 @@ import {
 
 const MotionModalContent = motion.create(ModalContent);
 
-// PDF styles
+// PDF styles (unchanged)
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 18,
@@ -276,11 +276,17 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
   );
 }
 
- 
 export default function WeightReports() {
+  // Search states
   const [searchSAD, setSearchSAD] = useState('');
-  const [filteredTickets, setFilteredTickets] = useState([]);
-  const [originalTickets, setOriginalTickets] = useState([]);
+  const [searchDriver, setSearchDriver] = useState('');
+  const [searchTruck, setSearchTruck] = useState('');
+
+  // Ticket arrays
+  const [originalTickets, setOriginalTickets] = useState([]); // full set returned for current SAD
+  const [filteredTickets, setFilteredTickets] = useState([]); // derived after filters (driver/truck/date/time)
+
+  // modal + editing + loading states
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pdfGenerating, setPdfGenerating] = useState(false);
@@ -374,82 +380,7 @@ export default function WeightReports() {
     }
   };
 
-  const handleGenerateReport = async () => {
-    if (!searchSAD.trim()) {
-      toast({ title: 'SAD No Required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
-      return;
-    }
-    setLoading(true);
-    const { data, error } = await supabase
-      .from('tickets')
-      .select('*')
-      .ilike('sad_no', `%${searchSAD.trim()}%`)
-      .order('date', { ascending: true });
-
-    if (error) {
-      toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
-      setLoading(false);
-      return;
-    }
-
-    const mappedTickets = (data || []).map((ticket) => ({
-      ticketId: ticket.ticket_id || ticket.id?.toString() || `${Math.random()}`,
-      data: {
-        sadNo: ticket.sad_no,
-        ticketNo: ticket.ticket_no,
-        date: ticket.date,
-        gnswTruckNo: ticket.gnsw_truck_no,
-        net: ticket.net ?? ticket.net_weight ?? null,
-        tare: ticket.tare ?? ticket.tare_pt ?? null,
-        gross: ticket.gross ?? null,
-        driver: ticket.driver || ticket.driver || 'N/A',
-        consignee: ticket.consignee,
-        operator: ticket.operator,
-        status: ticket.status,
-        consolidated: ticket.consolidated,
-        containerNo: ticket.container_no,
-        passNumber: ticket.pass_number,
-        scaleName: ticket.scale_name,
-        anpr: ticket.truck_on_wb,
-        fileUrl: ticket.file_url || null,
-      },
-    }));
-
-    setOriginalTickets(mappedTickets);
-    setFilteredTickets(mappedTickets);
-    setDateFrom('');
-    setDateTo('');
-    setTimeFrom('');
-    setTimeTo('');
-    setReportMeta({
-      dateRangeText: mappedTickets.length > 0 ? (mappedTickets[0].data.date ? new Date(mappedTickets[0].data.date).toLocaleDateString() : '') : '',
-      startTimeLabel: '',
-      endTimeLabel: '',
-      sad: searchSAD.trim(),
-    });
-    setLoading(false);
-  };
-
-  const cumulativeNetWeight = useMemo(() => {
-    return filteredTickets.reduce((total, ticket) => {
-      const computed = computeWeightsFromObj({
-        gross: ticket.data.gross,
-        tare: ticket.data.tare,
-        net: ticket.data.net,
-      });
-      const net = computed.netValue || 0;
-      return total + net;
-    }, 0);
-  }, [filteredTickets]);
-
-  const openModalWithTicket = (ticket) => {
-    setSelectedTicket(ticket);
-    setIsEditing(false);
-    setEditData({});
-    setEditErrors({});
-    onOpen();
-  };
-
+  // Utility: parse time to minutes
   const parseTimeToMinutes = (timeStr) => {
     if (!timeStr) return null;
     const parts = timeStr.split(':');
@@ -471,16 +402,48 @@ export default function WeightReports() {
     return dt;
   };
 
-  const applyRange = () => {
-    if (!originalTickets || originalTickets.length === 0) return;
-    const tfMinutes = parseTimeToMinutes(timeFrom);
-    const ttMinutes = parseTimeToMinutes(timeTo);
+  // Centralized filtering pipeline:
+  // Start with originalTickets (set after SAD search), then apply driver/truck filters, then date/time filters.
+  const computeFilteredTickets = () => {
+    if (!originalTickets || originalTickets.length === 0) {
+      setFilteredTickets([]);
+      return;
+    }
+
+    let arr = [...originalTickets];
+
+    // Driver filter (case-insensitive substring)
+    if (searchDriver && searchDriver.trim()) {
+      const q = searchDriver.trim().toLowerCase();
+      arr = arr.filter((t) => {
+        const drv = (t.data.driver || '').toString().toLowerCase();
+        return drv.includes(q);
+      });
+    }
+
+    // Truck filter (case-insensitive substring across columns)
+    if (searchTruck && searchTruck.trim()) {
+      const q = searchTruck.trim().toLowerCase();
+      arr = arr.filter((t) => {
+        const trucks = [
+          (t.data.gnswTruckNo || ''),
+          (t.data.truckOnWb || ''),
+          (t.data.anpr || ''),
+          (t.data.truckNo || ''),
+        ].map((s) => s.toString().toLowerCase());
+        return trucks.some((s) => s.includes(q));
+      });
+    }
+
+    // Date/time filtering (if present)
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
+    const tfMinutes = parseTimeToMinutes(timeFrom);
+    const ttMinutes = parseTimeToMinutes(timeTo);
     const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
     const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
 
-    const filtered = originalTickets.filter((ticket) => {
+    arr = arr.filter((ticket) => {
       const raw = ticket.data.date;
       const ticketDate = parseTicketDate(raw);
       if (!ticketDate) return false;
@@ -511,22 +474,154 @@ export default function WeightReports() {
       return true;
     });
 
-    setFilteredTickets(filtered);
+    setFilteredTickets(arr);
 
+    // Update report meta (date range labels unchanged)
     const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
     const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
-
     let dateRangeText = '';
     if (dateFrom && dateTo) dateRangeText = `${dateFrom} → ${dateTo}`;
     else if (dateFrom) dateRangeText = dateFrom;
     else if (dateTo) dateRangeText = dateTo;
 
-    setReportMeta({
-      dateRangeText: dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.date ? new Date(originalTickets[0].data.date).toLocaleDateString() : ''),
-      startTimeLabel: startLabel || '',
-      endTimeLabel: endLabel || '',
-      sad: searchSAD.trim(),
-    });
+    setReportMeta((prev) => ({
+      ...prev,
+      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.date ? new Date(originalTickets[0].data.date).toLocaleDateString() : ''),
+      startTimeLabel: startLabel || prev.startTimeLabel || '',
+      endTimeLabel: endLabel || prev.endTimeLabel || '',
+    }));
+  };
+
+  // Initial SAD-only fetch. Driver/Truck filters are intentionally client-side and only shown after SAD search.
+  const handleGenerateReport = async () => {
+    if (!searchSAD.trim()) {
+      toast({ title: 'SAD required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*')
+        .ilike('sad_no', `%${searchSAD.trim()}%`)
+        .order('date', { ascending: true });
+
+      if (error) {
+        toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
+        setLoading(false);
+        return;
+      }
+
+      const mappedTickets = (data || []).map((ticket) => ({
+        ticketId: ticket.ticket_id || ticket.id?.toString() || `${Math.random()}`,
+        data: {
+          sadNo: ticket.sad_no,
+          ticketNo: ticket.ticket_no,
+          date: ticket.date,
+          gnswTruckNo: ticket.gnsw_truck_no,
+          truckOnWb: ticket.truck_on_wb,
+          net: ticket.net ?? ticket.net_weight ?? null,
+          tare: ticket.tare ?? ticket.tare_pt ?? null,
+          gross: ticket.gross ?? null,
+          driver: ticket.driver || 'N/A',
+          consignee: ticket.consignee,
+          operator: ticket.operator,
+          status: ticket.status,
+          consolidated: ticket.consolidated,
+          containerNo: ticket.container_no,
+          passNumber: ticket.pass_number,
+          scaleName: ticket.scale_name,
+          anpr: ticket.truck_on_wb,
+          truckNo: ticket.truck_no, // possible additional field
+          fileUrl: ticket.file_url || null,
+        },
+      }));
+
+      // Set originalTickets and clear previous filters except report meta (we'll update it)
+      setOriginalTickets(mappedTickets);
+      // Reset date/time filters when performing a new SAD fetch (but keep driver/truck state if you want - here we keep them so user can continue)
+      // setDateFrom(''); setDateTo(''); setTimeFrom(''); setTimeTo('');
+      // Build report meta summary
+      setReportMeta({
+        dateRangeText: mappedTickets.length > 0 ? (mappedTickets[0].data.date ? new Date(mappedTickets[0].data.date).toLocaleDateString() : '') : '',
+        startTimeLabel: '',
+        endTimeLabel: '',
+        sad: `SAD: ${searchSAD.trim()}`,
+      });
+
+      // Compute filteredTickets from pipeline (respects any existing driver/truck/date/time filters)
+      // Wait a tick to ensure originalTickets updated — but since setState is async, compute from mappedTickets directly:
+      // create temporary pipeline
+      let arr = [...mappedTickets];
+      if (searchDriver && searchDriver.trim()) {
+        const q = searchDriver.trim().toLowerCase();
+        arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
+      }
+      if (searchTruck && searchTruck.trim()) {
+        const q = searchTruck.trim().toLowerCase();
+        arr = arr.filter((t) => {
+          const trucks = [
+            (t.data.gnswTruckNo || ''),
+            (t.data.truckOnWb || ''),
+            (t.data.anpr || ''),
+            (t.data.truckNo || ''),
+          ].map((s) => s.toString().toLowerCase());
+          return trucks.some((s) => s.includes(q));
+        });
+      }
+
+      // Apply date/time filter if set
+      const hasDateRange = !!(dateFrom || dateTo);
+      const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
+      const tfMinutes = parseTimeToMinutes(timeFrom);
+      const ttMinutes = parseTimeToMinutes(timeTo);
+      const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
+      const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
+
+      arr = arr.filter((ticket) => {
+        const raw = ticket.data.date;
+        const ticketDate = parseTicketDate(raw);
+        if (!ticketDate) return false;
+
+        if (hasDateRange) {
+          let start = startDate ? startOfDay(startDate) : new Date(-8640000000000000);
+          let end = endDate ? endOfDay(endDate) : new Date(8640000000000000);
+
+          if (timeFrom) {
+            const tf = parseTimeToMinutes(timeFrom);
+            if (tf !== null) start.setHours(Math.floor(tf / 60), tf % 60, 0, 0);
+          }
+          if (timeTo) {
+            const tt = parseTimeToMinutes(timeTo);
+            if (tt !== null) end.setHours(Math.floor(tt / 60), tt % 60, 59, 999);
+          }
+
+          return ticketDate >= start && ticketDate <= end;
+        }
+
+        if (hasTimeRangeOnly) {
+          const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+          const fromM = tfMinutes !== null ? tfMinutes : 0;
+          const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
+          return ticketMinutes >= fromM && ticketMinutes <= toM;
+        }
+
+        return true;
+      });
+
+      setFilteredTickets(arr);
+    } catch (err) {
+      console.error('fetch error', err);
+      toast({ title: 'Error', description: err?.message || 'Unexpected error', status: 'error', duration: 4000 });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Date/time apply -> recompute pipeline
+  const applyRange = () => {
+    computeFilteredTickets();
   };
 
   const resetRange = () => {
@@ -534,8 +629,57 @@ export default function WeightReports() {
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
-    setFilteredTickets(originalTickets);
+    computeFilteredTickets();
     setReportMeta((prev) => ({ ...prev, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
+  };
+
+  // Driver/Truck apply -> recompute pipeline
+  const applyDriverTruckFilter = () => {
+    computeFilteredTickets();
+    // Update reportMeta.sad to include active filters
+    const driverSummary = searchDriver ? `, Driver: ${searchDriver}` : '';
+    const truckSummary = searchTruck ? `, Truck: ${searchTruck}` : '';
+    setReportMeta((prev) => ({ ...prev, sad: `SAD: ${searchSAD}${driverSummary}${truckSummary}` }));
+  };
+
+  const clearDriverTruckFilters = () => {
+    setSearchDriver('');
+    setSearchTruck('');
+    computeFilteredTickets();
+    setReportMeta((prev) => ({ ...prev, sad: `SAD: ${searchSAD}` }));
+  };
+
+  const clearAll = () => {
+    setSearchSAD('');
+    setSearchDriver('');
+    setSearchTruck('');
+    setOriginalTickets([]);
+    setFilteredTickets([]);
+    setReportMeta({});
+    setDateFrom('');
+    setDateTo('');
+    setTimeFrom('');
+    setTimeTo('');
+  };
+
+  const cumulativeNetWeight = useMemo(() => {
+    return filteredTickets.reduce((total, ticket) => {
+      const computed = computeWeightsFromObj({
+        gross: ticket.data.gross,
+        tare: ticket.data.tare,
+        net: ticket.data.net,
+      });
+      const net = computed.netValue || 0;
+      return total + net;
+    }, 0);
+  }, [filteredTickets]);
+
+  const openModalWithTicket = (ticket) => {
+    setSelectedTicket(ticket);
+    setIsEditing(false);
+    setEditData({});
+    setEditErrors({});
+    onOpen();
   };
 
   // PDF utilities
@@ -653,23 +797,23 @@ export default function WeightReports() {
       toast({ title: 'Cannot edit', description: "This ticket has status 'Exited' and cannot be edited", status: 'warning', duration: 3000 });
       return;
     }
-const d = selectedTicket.data || {};
+    const d = selectedTicket.data || {};
 
-// Optional: clean up driver/operator names
-const operator = d.operator ? d.operator.replace(/^-+/, "").trim() : '';
-const driverName = d.driver ? d.driver.replace(/^-+/, "").trim() : '';
+    // Optional: clean up driver/operator names
+    const operator = d.operator ? d.operator.replace(/^-+/, "").trim() : '';
+    const driverName = d.driver ? d.driver.replace(/^-+/, "").trim() : '';
 
-setEditData({
-  consignee: d.consignee ?? '',
-  containerNo: d.containerNo ?? '',
-  operator: operator || '',
-  driver: driverName || '',
-  gross: d.gross ?? '',
-  tare: d.tare ?? '',
-  net: d.net ?? '',
-});
-setEditErrors({});
-setIsEditing(true);
+    setEditData({
+      consignee: d.consignee ?? '',
+      containerNo: d.containerNo ?? '',
+      operator: operator || '',
+      driver: driverName || '',
+      gross: d.gross ?? '',
+      tare: d.tare ?? '',
+      net: d.net ?? '',
+    });
+    setEditErrors({});
+    setIsEditing(true);
   };
 
   const cancelEditing = () => {
@@ -994,25 +1138,89 @@ setIsEditing(true);
       </Flex>
 
       <Box mb={4}>
-        <ChakraInput
-          placeholder="Type SAD No"
-          value={searchSAD}
-          onChange={(e) => setSearchSAD(e.target.value)}
-          mb={3}
-          isDisabled={loading || pdfGenerating}
-        />
-        <Button colorScheme="teal" onClick={handleGenerateReport} isLoading={loading} loadingText="Loading">
-          Generate Report
-        </Button>
-        <Button ml={3} size="sm" leftIcon={<FaRedo />} onClick={() => { setSearchSAD(''); setOriginalTickets([]); setFilteredTickets([]); setReportMeta({}); }}>
-          Clear
-        </Button>
+        <SimpleGrid columns={[1, 3]} spacing={3} mb={3}>
+          <ChakraInput
+            placeholder="Type SAD No"
+            value={searchSAD}
+            onChange={(e) => setSearchSAD(e.target.value)}
+            isDisabled={loading || pdfGenerating}
+          />
+          {/* Driver & Truck inputs are shown ONLY after SAD search results exist */}
+          {originalTickets.length > 0 ? (
+            <>
+              <ChakraInput
+                placeholder="Driver Name (filter)"
+                value={searchDriver}
+                onChange={(e) => setSearchDriver(e.target.value)}
+                isDisabled={loading || pdfGenerating}
+              />
+              <ChakraInput
+                placeholder="Truck No (filter)"
+                value={searchTruck}
+                onChange={(e) => setSearchTruck(e.target.value)}
+                isDisabled={loading || pdfGenerating}
+              />
+            </>
+          ) : (
+            <>
+              <Box />
+              <Box />
+            </>
+          )}
+        </SimpleGrid>
+
+        <Flex gap={3} align="center">
+          <Button
+            colorScheme="teal"
+            onClick={handleGenerateReport}
+            isLoading={loading}
+            loadingText="Searching..."
+            isDisabled={pdfGenerating}
+          >
+            Generate Report
+          </Button>
+
+          {/* Apply driver/truck filter only if driver/truck inputs visible */}
+          {originalTickets.length > 0 && (
+            <>
+              <Button
+                size="sm"
+                onClick={applyDriverTruckFilter}
+                isDisabled={loading || pdfGenerating}
+              >
+                Search by Driver or Truck 
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={clearDriverTruckFilters}
+                isDisabled={loading || pdfGenerating}
+              >
+                Clear Filters
+              </Button>
+            </>
+          )}
+
+          <Button
+            ml={3}
+            size="sm"
+            leftIcon={<FaRedo />}
+            onClick={clearAll}
+            isDisabled={loading || pdfGenerating}
+          >
+            Clear
+          </Button>
+
+          <Text ml="auto" fontSize="sm" color="gray.600">
+            Search SAD first — then you can filter by Driver or Truck. Results persist until you clear the whole search. Contact App Support for Assistance
+          </Text>
+        </Flex>
       </Box>
 
       {filteredTickets.length > 0 ? (
         <Box mt={6}>
           <Text fontSize="lg" fontWeight="bold" mb={2}>
-            Report for SAD: {searchSAD}
+            Report: {reportMeta?.sad || `SAD: ${searchSAD}`}
           </Text>
 
           <Box mb={4} border="1px solid" borderColor="gray.100" p={3} borderRadius="md">
@@ -1020,25 +1228,25 @@ setIsEditing(true);
             <SimpleGrid columns={[1, 4]} spacing={3} alignItems="end">
               <Box>
                 <Text fontSize="sm" mb={1}>Date From</Text>
-                <ChakraInput type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+                <ChakraInput type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} isDisabled={loading || pdfGenerating} />
               </Box>
               <Box>
                 <Text fontSize="sm" mb={1}>Date To</Text>
-                <ChakraInput type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+                <ChakraInput type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} isDisabled={loading || pdfGenerating} />
               </Box>
               <Box>
                 <Text fontSize="sm" mb={1}>Time From</Text>
-                <ChakraInput type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
+                <ChakraInput type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} isDisabled={loading || pdfGenerating} />
               </Box>
               <Box>
                 <Text fontSize="sm" mb={1}>Time To</Text>
-                <ChakraInput type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
+                <ChakraInput type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} isDisabled={loading || pdfGenerating} />
               </Box>
             </SimpleGrid>
 
             <Flex mt={3} gap={2} align="center">
-              <Button size="sm" colorScheme="blue" onClick={applyRange}>Apply Range</Button>
-              <Button size="sm" variant="ghost" onClick={resetRange}>Reset Range</Button>
+              <Button size="sm" colorScheme="blue" onClick={applyRange} isDisabled={loading || pdfGenerating}>Apply Range</Button>
+              <Button size="sm" variant="ghost" onClick={resetRange} isDisabled={loading || pdfGenerating}>Reset Range</Button>
 
               <HStack ml="auto" spacing={2}>
                 <Button leftIcon={<FaDownload />} colorScheme="gray" size="sm" onClick={handleDownloadPdf} isLoading={pdfGenerating}>
@@ -1074,56 +1282,62 @@ setIsEditing(true);
                 <Th>Actions</Th>
               </Tr>
             </Thead>
-<Tbody>
-  {filteredTickets.map((ticket) => {
-    const computed = computeWeightsFromObj({
-      gross: ticket.data.gross,
-      tare: ticket.data.tare,
-      net: ticket.data.net,
-    });
+            <Tbody>
+              {filteredTickets.map((ticket) => {
+                const computed = computeWeightsFromObj({
+                  gross: ticket.data.gross,
+                  tare: ticket.data.tare,
+                  net: ticket.data.net,
+                });
 
-    // Correct driver reference
-    const displayDriver = ticket.data.driver || 'N/A';
+                // driver fallback and truck fallback across columns
+                const displayDriver = ticket.data.driver || 'N/A';
+                const displayTruck =
+                  ticket.data.gnswTruckNo ||
+                  ticket.data.truckOnWb ||
+                  ticket.data.anpr ||
+                  ticket.data.truckNo ||
+                  'N/A';
 
-    return (
-      <Tr key={ticket.ticketId} _hover={{ bg: 'teal.50', cursor: 'pointer' }}>
-        <Td>{ticket.data.sadNo}</Td>
-        <Td>{ticket.data.ticketNo}</Td>
-        <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
-        <Td>{ticket.data.gnswTruckNo}</Td>
-        <Td>{computed.grossDisplay || '0'}</Td>
-        <Td>{computed.tareDisplay || '0'}</Td>
-        <Td>{computed.netDisplay || '0'}</Td>
-        <Td>{displayDriver}</Td>
-        <Td>
-          <Flex gap={2} align="center">
-            <Button
-              size="sm"
-              colorScheme="teal"
-              variant="outline"
-              onClick={() => openModalWithTicket(ticket)}
-              leftIcon={<ArrowForwardIcon />}
-            >
-              View More
-            </Button>
+                return (
+                  <Tr key={ticket.ticketId} _hover={{ bg: 'teal.50', cursor: 'pointer' }}>
+                    <Td>{ticket.data.sadNo}</Td>
+                    <Td>{ticket.data.ticketNo}</Td>
+                    <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
+                    <Td>{displayTruck}</Td>
+                    <Td>{computed.grossDisplay || '0'}</Td>
+                    <Td>{computed.tareDisplay || '0'}</Td>
+                    <Td>{computed.netDisplay || '0'}</Td>
+                    <Td>{displayDriver}</Td>
+                    <Td>
+                      <Flex gap={2} align="center">
+                        <Button
+                          size="sm"
+                          colorScheme="teal"
+                          variant="outline"
+                          onClick={() => openModalWithTicket(ticket)}
+                          leftIcon={<ArrowForwardIcon />}
+                        >
+                          View More
+                        </Button>
 
-            {ticket.data.fileUrl ? (
-              <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
-                Open Ticket
-              </Button>
-            ) : null}
-          </Flex>
-        </Td>
-      </Tr>
-    );
-  })}
-  <Tr fontWeight="bold" bg="teal.100">
-    <Td colSpan={6}>Cumulative Net Weight</Td>
-    <Td>{formatNumber(cumulativeNetWeight) || '0'} kg</Td>
-    <Td colSpan={2}></Td>
-  </Tr>
-</Tbody>
+                        {ticket.data.fileUrl ? (
+                          <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
+                            Open Ticket
+                          </Button>
+                        ) : null}
+                      </Flex>
+                    </Td>
+                  </Tr>
+                );
+              })}
 
+              <Tr fontWeight="bold" bg="teal.100">
+                <Td colSpan={6}>Cumulative Net Weight</Td>
+                <Td>{formatNumber(cumulativeNetWeight) || '0'} kg</Td>
+                <Td colSpan={2}></Td>
+              </Tr>
+            </Tbody>
           </Table>
 
           {/* Audit logs panel */}
@@ -1172,343 +1386,348 @@ setIsEditing(true);
         </Box>
       ) : (
         !loading &&
-        searchSAD && (
+        (searchSAD || searchDriver || searchTruck) && (
           <Text mt={6} fontStyle="italic">
-            No records found for SAD: {searchSAD}
+            No records found for:
+            <Text as="span" fontWeight="bold"> {reportMeta?.sad || [searchSAD, searchDriver, searchTruck].filter(Boolean).join(', ')}</Text>
           </Text>
         )
       )}
 
-{/* Ticket Details Modal */}
-<Modal
-  isOpen={isOpen}
-  onClose={() => {
-    onClose();
-    setIsEditing(false);
-    setEditData({});
-    setEditErrors({});
-  }}
-  size="lg"
-  scrollBehavior="inside"
-  isCentered
->
-  <ModalOverlay />
-  <AnimatePresence>
-    {isOpen && (
-      <MotionModalContent
-        ref={modalRef}
-        borderRadius="lg"
-        p={4}
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: 30 }}
-        transition={{ duration: 0.25 }}
+      {/* Ticket Details Modal */}
+      <Modal
+        isOpen={isOpen}
+        onClose={() => {
+          onClose();
+          setIsEditing(false);
+          setEditData({});
+          setEditErrors({});
+        }}
+        size="lg"
+        scrollBehavior="inside"
+        isCentered
       >
-        <ModalHeader>
-          <Flex align="center" gap={3}>
-            <Icon as={FaFileInvoice} color="teal.500" boxSize={5} />
-            <Box>
-              <Text fontWeight="bold">Ticket Details</Text>
-              <Text fontSize="sm" fontWeight="normal" color="gray.500">
-                {selectedTicket?.ticketId} •{' '}
-                {selectedTicket?.data?.date
-                  ? new Date(selectedTicket.data.date).toLocaleString()
-                  : ''}
-              </Text>
-            </Box>
-          </Flex>
-        </ModalHeader>
-        <ModalCloseButton />
-        <ModalBody>
-          {selectedTicket ? (
-            <Stack spacing={3} fontSize="sm">
-              <HStack>
-                <Icon as={FaTruck} />
-                <Text>
-                  <b>Truck No:</b> {selectedTicket.data.gnswTruckNo}
-                </Text>
-              </HStack>
-
-              {isEditing ? (
-                <>
-                  <FormControl isInvalid={!!editErrors.operator}>
-                    <FormLabel>
-                      <Icon as={FaUserTie} mr={2} /> Operator
-                    </FormLabel>
-                    <ChakraInput
-                      value={editData.operator ?? ''}
-                      onChange={(e) => handleEditChange('operator', e.target.value)}
-                    />
-                    <FormErrorMessage>{editErrors.operator}</FormErrorMessage>
-                  </FormControl>
-
-                  <FormControl>
-                    <FormLabel>
-                      <Icon as={FaBox} mr={2} /> Consignee
-                    </FormLabel>
-                    <ChakraInput
-                      value={editData.consignee ?? ''}
-                      onChange={(e) => handleEditChange('consignee', e.target.value)}
-                    />
-                  </FormControl>
-
-                  <FormControl>
-                    <FormLabel>
-                      <Icon as={FaBox} mr={2} /> Container No
-                    </FormLabel>
-                    <ChakraInput
-                      value={editData.containerNo ?? ''}
-                      onChange={(e) => handleEditChange('containerNo', e.target.value)}
-                    />
-                  </FormControl>
-
-                  <SimpleGrid columns={[1, 3]} spacing={3}>
-                    <FormControl isInvalid={!!editErrors.gross}>
-                      <FormLabel>
-                        <Icon as={FaBalanceScale} mr={2} /> Gross (kg)
-                      </FormLabel>
-                      <ChakraInput
-                        value={editData.gross ?? ''}
-                        onChange={(e) => handleEditChange('gross', e.target.value)}
-                      />
-                      <FormErrorMessage>{editErrors.gross}</FormErrorMessage>
-                    </FormControl>
-                    <FormControl isInvalid={!!editErrors.tare}>
-                      <FormLabel>
-                        <Icon as={FaBalanceScale} mr={2} /> Tare (kg)
-                      </FormLabel>
-                      <ChakraInput
-                        value={editData.tare ?? ''}
-                        onChange={(e) => handleEditChange('tare', e.target.value)}
-                      />
-                      <FormErrorMessage>{editErrors.tare}</FormErrorMessage>
-                    </FormControl>
-                    <FormControl isInvalid={!!editErrors.net}>
-                      <FormLabel>
-                        <Icon as={FaBalanceScale} mr={2} /> Net (kg)
-                      </FormLabel>
-                      <ChakraInput
-                        value={
-                          editData.net ??
-                          (numericValue(editData.gross) !== null &&
-                          numericValue(editData.tare) !== null
-                            ? String(
-                                numericValue(editData.gross) - numericValue(editData.tare)
-                              )
-                            : '')
-                        }
-                        onChange={(e) => handleEditChange('net', e.target.value)}
-                      />
-                      <FormErrorMessage>{editErrors.net}</FormErrorMessage>
-                    </FormControl>
-                  </SimpleGrid>
-                </>
-              ) : (
-                <>
-                  <HStack>
-                    <Icon as={FaUserTie} />
-                    <Text>
-                      <b>Operator:</b> {operatorName || selectedTicket.data.operator || 'N/A'}
+        <ModalOverlay />
+        <AnimatePresence>
+          {isOpen && (
+            <MotionModalContent
+              ref={modalRef}
+              borderRadius="lg"
+              p={4}
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 30 }}
+              transition={{ duration: 0.25 }}
+            >
+              <ModalHeader>
+                <Flex align="center" gap={3}>
+                  <Icon as={FaFileInvoice} color="teal.500" boxSize={5} />
+                  <Box>
+                    <Text fontWeight="bold">Ticket Details</Text>
+                    <Text fontSize="sm" fontWeight="normal" color="gray.500">
+                      {selectedTicket?.ticketId} •{' '}
+                      {selectedTicket?.data?.date
+                        ? new Date(selectedTicket.data.date).toLocaleString()
+                        : ''}
                     </Text>
-                  </HStack>
+                  </Box>
+                </Flex>
+              </ModalHeader>
+              <ModalCloseButton />
+              <ModalBody>
+                {selectedTicket ? (
+                  <Stack spacing={3} fontSize="sm">
+                    <HStack>
+                      <Icon as={FaTruck} />
+                      <Text>
+                        <b>Truck No:</b>{' '}
+                        {selectedTicket.data.gnswTruckNo ||
+                         selectedTicket.data.truckOnWb ||
+                         selectedTicket.data.anpr ||
+                         selectedTicket.data.truckNo ||
+                         'N/A'}
+                      </Text>
+                    </HStack>
 
-                  <HStack>
-                    <Icon as={FaBox} />
-                    <Text>
-                      <b>Consignee:</b> {selectedTicket.data.consignee}
-                    </Text>
-                  </HStack>
+                    {isEditing ? (
+                      <>
+                        <FormControl isInvalid={!!editErrors.operator}>
+                          <FormLabel>
+                            <Icon as={FaUserTie} mr={2} /> Operator
+                          </FormLabel>
+                          <ChakraInput
+                            value={editData.operator ?? ''}
+                            onChange={(e) => handleEditChange('operator', e.target.value)}
+                          />
+                          <FormErrorMessage>{editErrors.operator}</FormErrorMessage>
+                        </FormControl>
 
-                  {(() => {
-                    const computed = computeWeightsFromObj({
-                      gross: selectedTicket.data.gross,
-                      tare: selectedTicket.data.tare,
-                      net: selectedTicket.data.net,
-                    });
-                    return (
+                        <FormControl>
+                          <FormLabel>
+                            <Icon as={FaBox} mr={2} /> Consignee
+                          </FormLabel>
+                          <ChakraInput
+                            value={editData.consignee ?? ''}
+                            onChange={(e) => handleEditChange('consignee', e.target.value)}
+                          />
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel>
+                            <Icon as={FaBox} mr={2} /> Container No
+                          </FormLabel>
+                          <ChakraInput
+                            value={editData.containerNo ?? ''}
+                            onChange={(e) => handleEditChange('containerNo', e.target.value)}
+                          />
+                        </FormControl>
+
+                        <SimpleGrid columns={[1, 3]} spacing={3}>
+                          <FormControl isInvalid={!!editErrors.gross}>
+                            <FormLabel>
+                              <Icon as={FaBalanceScale} mr={2} /> Gross (kg)
+                            </FormLabel>
+                            <ChakraInput
+                              value={editData.gross ?? ''}
+                              onChange={(e) => handleEditChange('gross', e.target.value)}
+                            />
+                            <FormErrorMessage>{editErrors.gross}</FormErrorMessage>
+                          </FormControl>
+                          <FormControl isInvalid={!!editErrors.tare}>
+                            <FormLabel>
+                              <Icon as={FaBalanceScale} mr={2} /> Tare (kg)
+                            </FormLabel>
+                            <ChakraInput
+                              value={editData.tare ?? ''}
+                              onChange={(e) => handleEditChange('tare', e.target.value)}
+                            />
+                            <FormErrorMessage>{editErrors.tare}</FormErrorMessage>
+                          </FormControl>
+                          <FormControl isInvalid={!!editErrors.net}>
+                            <FormLabel>
+                              <Icon as={FaBalanceScale} mr={2} /> Net (kg)
+                            </FormLabel>
+                            <ChakraInput
+                              value={
+                                editData.net ??
+                                (numericValue(editData.gross) !== null &&
+                                numericValue(editData.tare) !== null
+                                  ? String(
+                                      numericValue(editData.gross) - numericValue(editData.tare)
+                                    )
+                                  : '')
+                              }
+                              onChange={(e) => handleEditChange('net', e.target.value)}
+                            />
+                            <FormErrorMessage>{editErrors.net}</FormErrorMessage>
+                          </FormControl>
+                        </SimpleGrid>
+                      </>
+                    ) : (
                       <>
                         <HStack>
-                          <Icon as={FaBalanceScale} />
+                          <Icon as={FaUserTie} />
                           <Text>
-                            <b>Gross Weight:</b> {computed.grossDisplay || '0'} kg
+                            <b>Operator:</b> {operatorName || selectedTicket.data.operator || 'N/A'}
                           </Text>
                         </HStack>
+
                         <HStack>
-                          <Icon as={FaBalanceScale} />
+                          <Icon as={FaBox} />
                           <Text>
-                            <b>Tare Weight:</b> {computed.tareDisplay || '0'} kg
+                            <b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}
                           </Text>
                         </HStack>
-                        <HStack>
-                          <Icon as={FaBalanceScale} />
-                          <Text>
-                            <b>Net Weight:</b> {computed.netDisplay || '0'} kg
-                          </Text>
-                        </HStack>
+
+                        {(() => {
+                          const computed = computeWeightsFromObj({
+                            gross: selectedTicket.data.gross,
+                            tare: selectedTicket.data.tare,
+                            net: selectedTicket.data.net,
+                          });
+                          return (
+                            <>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text>
+                                  <b>Gross Weight:</b> {computed.grossDisplay || '0'} kg
+                                </Text>
+                              </HStack>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text>
+                                  <b>Tare Weight:</b> {computed.tareDisplay || '0'} kg
+                                </Text>
+                              </HStack>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text>
+                                  <b>Net Weight:</b> {computed.netDisplay || '0'} kg
+                                </Text>
+                              </HStack>
+                            </>
+                          );
+                        })()}
                       </>
-                    );
-                  })()}
-                </>
-              )}
+                    )}
 
-              <HStack>
-                <Icon as={FaBox} />
-                <Text>
-                  <b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}
-                </Text>
-              </HStack>
-              <HStack>
-                <Text>
-                  <b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}
-                </Text>
-              </HStack>
-              <HStack>
-                <Text>
-                  <b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}
-                </Text>
-              </HStack>
-              <HStack>
-                <Text>
-                  <b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}
-                </Text>
-              </HStack>
-              <HStack>
-                <Text>
-                  <b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}
-                </Text>
-              </HStack>
+                    <HStack>
+                      <Icon as={FaBox} />
+                      <Text>
+                        <b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}
+                      </Text>
+                    </HStack>
 
-              {/* Open Ticket PDF Button */}
-              {selectedTicket.data.fileUrl && (
-                <Box pt={2}>
-                  <Button
-                    size="sm"
-                    colorScheme="blue"
-                    onClick={() =>
-                      window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')
-                    }
-                    leftIcon={<FaExternalLinkAlt />}
-                  >
-                    Open Stored Ticket PDF
-                  </Button>
-                </Box>
-              )}
-            </Stack>
-          ) : (
-            <Text>No data</Text>
-          )}
-        </ModalBody>
-        <ModalFooter>
-          {/* Admin-only Edit/Delete controls */}
-          {selectedTicket && !isEditing && (
-            <>
-              {isAdmin ? (
-                isTicketEditable(selectedTicket) ? (
-                  <Button
-                    leftIcon={<FaEdit />}
-                    colorScheme="yellow"
-                    mr={2}
-                    onClick={startEditing}
-                  >
-                    Edit
-                  </Button>
+                    {/* Open Ticket PDF Button */}
+                    {selectedTicket.data.fileUrl && (
+                      <Box pt={2}>
+                        <Button
+                          size="sm"
+                          colorScheme="blue"
+                          onClick={() =>
+                            window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')
+                          }
+                          leftIcon={<FaExternalLinkAlt />}
+                        >
+                          Open Stored Ticket PDF
+                        </Button>
+                      </Box>
+                    )}
+                  </Stack>
                 ) : (
-                  <Tooltip label="Cannot edit tickets with status 'Exited'">
-                    <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>
-                      Edit
+                  <Text>No data</Text>
+                )}
+              </ModalBody>
+              <ModalFooter>
+                {/* Admin-only Edit/Delete controls */}
+                {selectedTicket && !isEditing && (
+                  <>
+                    {isAdmin ? (
+                      isTicketEditable(selectedTicket) ? (
+                        <Button
+                          leftIcon={<FaEdit />}
+                          colorScheme="yellow"
+                          mr={2}
+                          onClick={startEditing}
+                        >
+                          Edit
+                        </Button>
+                      ) : (
+                        <Tooltip label="Cannot edit tickets with status 'Exited'">
+                          <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>
+                            Edit
+                          </Button>
+                        </Tooltip>
+                      )
+                    ) : (
+                      <Tooltip label="Admin only">
+                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>
+                          Edit
+                        </Button>
+                      </Tooltip>
+                    )}
+
+                    {isAdmin ? (
+                      <Button
+                        leftIcon={<FaTrashAlt />}
+                        colorScheme="red"
+                        mr={2}
+                        onClick={confirmDelete}
+                      >
+                        Delete
+                      </Button>
+                    ) : (
+                      <Tooltip label="Admin only">
+                        <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>
+                          Delete
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </>
+                )}
+
+                {isEditing && (
+                  <>
+                    <Button
+                      leftIcon={<FaCheck />}
+                      colorScheme="green"
+                      mr={2}
+                      onClick={saveEdits}
+                      isLoading={savingEdit}
+                    >
+                      Save
                     </Button>
-                  </Tooltip>
-                )
-              ) : (
-                <Tooltip label="Admin only">
-                  <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>
-                    Edit
-                  </Button>
-                </Tooltip>
-              )}
+                    <Button variant="ghost" mr={2} onClick={cancelEditing}>
+                      Cancel
+                    </Button>
+                  </>
+                )}
 
-              {isAdmin ? (
                 <Button
-                  leftIcon={<FaTrashAlt />}
-                  colorScheme="red"
-                  mr={2}
-                  onClick={confirmDelete}
+                  onClick={() => {
+                    onClose();
+                    setIsEditing(false);
+                    setEditData({});
+                    setEditErrors({});
+                  }}
                 >
-                  Delete
+                  Close
                 </Button>
-              ) : (
-                <Tooltip label="Admin only">
-                  <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>
-                    Delete
-                  </Button>
-                </Tooltip>
-              )}
-            </>
+              </ModalFooter>
+            </MotionModalContent>
           )}
+        </AnimatePresence>
+      </Modal>
 
-          {isEditing && (
-            <>
-              <Button
-                leftIcon={<FaCheck />}
-                colorScheme="green"
-                mr={2}
-                onClick={saveEdits}
-                isLoading={savingEdit}
-              >
-                Save
-              </Button>
-              <Button variant="ghost" mr={2} onClick={cancelEditing}>
+      {/* Delete confirmation AlertDialog */}
+      <AlertDialog
+        isOpen={isDeleteOpen}
+        leastDestructiveRef={cancelRef}
+        onClose={onDeleteClose}
+        isCentered
+      >
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">
+              Delete Ticket
+            </AlertDialogHeader>
+
+            <AlertDialogBody>
+              Are you sure you want to delete ticket <b>{selectedTicket?.ticketId}</b>? It will be
+              removed from the list and scheduled for deletion. You can undo for a few seconds.
+            </AlertDialogBody>
+
+            <AlertDialogFooter>
+              <Button ref={cancelRef} onClick={onDeleteClose} isDisabled={deleting}>
                 Cancel
               </Button>
-            </>
-          )}
-
-          <Button
-            onClick={() => {
-              onClose();
-              setIsEditing(false);
-              setEditData({});
-              setEditErrors({});
-            }}
-          >
-            Close
-          </Button>
-        </ModalFooter>
-      </MotionModalContent>
-    )}
-  </AnimatePresence>
-</Modal>
-
-{/* Delete confirmation AlertDialog */}
-<AlertDialog
-  isOpen={isDeleteOpen}
-  leastDestructiveRef={cancelRef}
-  onClose={onDeleteClose}
-  isCentered
->
-  <AlertDialogOverlay>
-    <AlertDialogContent>
-      <AlertDialogHeader fontSize="lg" fontWeight="bold">
-        Delete Ticket
-      </AlertDialogHeader>
-
-      <AlertDialogBody>
-        Are you sure you want to delete ticket <b>{selectedTicket?.ticketId}</b>? It will be
-        removed from the list and scheduled for deletion. You can undo for a few seconds.
-      </AlertDialogBody>
-
-      <AlertDialogFooter>
-        <Button ref={cancelRef} onClick={onDeleteClose} isDisabled={deleting}>
-          Cancel
-        </Button>
-        <Button colorScheme="red" onClick={performDelete} ml={3} isLoading={deleting}>
-          Delete
-        </Button>
-      </AlertDialogFooter>
-    </AlertDialogContent>
-  </AlertDialogOverlay>
-</AlertDialog>
-
+              <Button colorScheme="red" onClick={performDelete} ml={3} isLoading={deleting}>
+                Delete
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
     </Box>
   );
 }
