@@ -540,8 +540,6 @@ export default function WeightReports() {
 
       // Set originalTickets and clear previous filters except report meta (we'll update it)
       setOriginalTickets(mappedTickets);
-      // Reset date/time filters when performing a new SAD fetch (but keep driver/truck state if you want - here we keep them so user can continue)
-      // setDateFrom(''); setDateTo(''); setTimeFrom(''); setTimeTo('');
       // Build report meta summary
       setReportMeta({
         dateRangeText: mappedTickets.length > 0 ? (mappedTickets[0].data.date ? new Date(mappedTickets[0].data.date).toLocaleDateString() : '') : '',
@@ -551,8 +549,6 @@ export default function WeightReports() {
       });
 
       // Compute filteredTickets from pipeline (respects any existing driver/truck/date/time filters)
-      // Wait a tick to ensure originalTickets updated — but since setState is async, compute from mappedTickets directly:
-      // create temporary pipeline
       let arr = [...mappedTickets];
       if (searchDriver && searchDriver.trim()) {
         const q = searchDriver.trim().toLowerCase();
@@ -1188,7 +1184,7 @@ export default function WeightReports() {
                 onClick={applyDriverTruckFilter}
                 isDisabled={loading || pdfGenerating}
               >
-                Search by Driver or Truck 
+                Apply Driver/Truck Filter
               </Button>
               <Button
                 size="sm"
@@ -1196,7 +1192,7 @@ export default function WeightReports() {
                 onClick={clearDriverTruckFilters}
                 isDisabled={loading || pdfGenerating}
               >
-                Clear Filters
+                Clear Driver/Truck Filters
               </Button>
             </>
           )}
@@ -1212,7 +1208,7 @@ export default function WeightReports() {
           </Button>
 
           <Text ml="auto" fontSize="sm" color="gray.600">
-            Search SAD first — then you can filter by Driver or Truck. Results persist until you clear the whole search. Contact App Support for Assistance
+            Search SAD first — then you can filter by Driver or Truck. Results persist until you clear.
           </Text>
         </Flex>
       </Box>
@@ -1221,6 +1217,11 @@ export default function WeightReports() {
         <Box mt={6}>
           <Text fontSize="lg" fontWeight="bold" mb={2}>
             Report: {reportMeta?.sad || `SAD: ${searchSAD}`}
+          </Text>
+
+          {/* Total transactions display */}
+          <Text fontSize="sm" color="gray.600" mb={3}>
+            Total Transactions: <b>{filteredTickets.length}</b>
           </Text>
 
           <Box mb={4} border="1px solid" borderColor="gray.100" p={3} borderRadius="md">
