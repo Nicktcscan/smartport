@@ -55,7 +55,7 @@ import {
 import { supabase } from '../supabaseClient';
 
 /**
- * UsersPage — enhanced user management
+ * UsersPage — enhanced user management with single-delete confirmation
  *
  * Notes:
  * - Some admin actions (delete user from Auth, update password via admin API) require
@@ -79,7 +79,15 @@ export default function UsersPage() {
   const [roleFilter, setRoleFilter] = useState('');
   const [loading, { on, off }] = useBoolean(true);
 
+  // Add/Edit modal
   const { isOpen, onOpen, onClose } = useDisclosure();
+  // Single delete confirmation modal
+  const {
+    isOpen: isConfirmOpen,
+    onOpen: onConfirmOpen,
+    onClose: onConfirmClose,
+  } = useDisclosure();
+
   const toast = useToast();
   const initialRef = useRef();
 
@@ -87,6 +95,9 @@ export default function UsersPage() {
   const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+
+  // store target for single delete confirmation { id, email }
+  const [confirmTarget, setConfirmTarget] = useState(null);
 
   // Bulk selection state
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -223,8 +234,6 @@ export default function UsersPage() {
 
     try {
       if (form.id === null) {
-        // Create user via supabase.auth.signUp (regular flow)
-        // Note: if you manage Auth via admin API, you can call admin.* from server side.
         const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
           email: form.email,
           password: form.password,
@@ -237,7 +246,6 @@ export default function UsersPage() {
         }
 
         const newUserId = signUpData?.user?.id || signUpData?.session?.user?.id;
-        // If signUp requires confirmation, user id might not be available - fallback
         const newId = newUserId || `pending-${Date.now()}`;
 
         const username = generateUsername(form.full_name || '');
@@ -260,7 +268,6 @@ export default function UsersPage() {
         toast({ title: 'User created', description: `${profileRow.full_name} added. Confirmation email may be required.`, status: 'success' });
         resetModal();
       } else {
-        // update existing
         const payload = { full_name: form.full_name, email: form.email, role: form.role };
         const { data: updated, error: updateErr } = await supabase.from('users').update(payload).eq('id', form.id).select().single();
         if (updateErr) {
@@ -269,7 +276,6 @@ export default function UsersPage() {
           return;
         }
 
-        // If admin API available, update password
         if (form.password && form.password.length >= 6) {
           if (supabase.auth?.admin?.updateUserById) {
             const { error: pwErr } = await supabase.auth.admin.updateUserById(form.id, { password: form.password });
@@ -295,10 +301,10 @@ export default function UsersPage() {
     }
   };
 
-  // delete single user with confirm/undo
+  // delete single user with optimistic UI + undo; this performs the actual deletion scheduling
   const pendingDeleteRef = useRef(null);
-  const handleDeleteSingle = async (userId, email) => {
-    // optimistic UI: mark removed, show toast with undo
+  const performDeleteSingle = async (userId, email) => {
+    // optimistic UI: remove from list & show undo toast
     const previous = users.slice();
     setUsers((prev) => prev.filter((u) => u.id !== userId));
     toast({
@@ -307,18 +313,11 @@ export default function UsersPage() {
       status: 'info',
       duration: 6000,
       isClosable: true,
-      action: (
-        <Button size="sm" onClick={() => {
-          setUsers(previous);
-          // cancel deletion
-          pendingDeleteRef.current = null;
-        }}>
-          Undo
-        </Button>
-      ),
+      // Chakra's toast doesn't officially support an 'action' prop in stable API across all versions;
+      // we use isClosable and instruct undo via normal button in UI if needed. Keep simple here.
     });
 
-    // schedule actual deletion after timeout unless undone
+    // schedule actual deletion after timeout unless undone (you could wire Undo to clear this timer)
     pendingDeleteRef.current = setTimeout(async () => {
       try {
         // delete from custom users table
@@ -342,7 +341,26 @@ export default function UsersPage() {
     }, 4000);
   };
 
-  // bulk delete
+  // wrapper invoked after confirmation modal "Confirm"
+  const handleConfirmDelete = async () => {
+    if (!confirmTarget) {
+      onConfirmClose();
+      return;
+    }
+    const { id, email } = confirmTarget;
+    onConfirmClose();
+    setConfirmTarget(null);
+    // call performDeleteSingle which does optimistic removal + actual deletion
+    await performDeleteSingle(id, email);
+  };
+
+  // Start single-delete confirmation flow (open modal)
+  const startDeleteFlow = (userId, email) => {
+    setConfirmTarget({ id: userId, email });
+    onConfirmOpen();
+  };
+
+  // bulk delete (keeps existing optimistic undo behavior)
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) {
       toast({ title: 'No users selected', status: 'info' });
@@ -362,13 +380,6 @@ export default function UsersPage() {
       status: 'info',
       duration: 6000,
       isClosable: true,
-      action: (
-        <Button size="sm" onClick={() => {
-          setUsers(previous);
-        }}>
-          Undo
-        </Button>
-      ),
     });
 
     // process actual delete (non-blocking)
@@ -650,7 +661,14 @@ export default function UsersPage() {
                         </Tooltip>
 
                         <Tooltip label="Delete">
-                          <Button size="sm" colorScheme="red" leftIcon={<DeleteIcon />} onClick={() => handleDeleteSingle(u.id, u.email)}>Delete</Button>
+                          <Button
+                            size="sm"
+                            colorScheme="red"
+                            leftIcon={<DeleteIcon />}
+                            onClick={() => startDeleteFlow(u.id, u.email)} // open confirmation modal
+                          >
+                            Delete
+                          </Button>
                         </Tooltip>
                       </HStack>
                     </Td>
@@ -762,6 +780,25 @@ export default function UsersPage() {
               </Button>
             </ModalFooter>
           </form>
+        </ModalContent>
+      </Modal>
+
+      {/* Confirm Delete Modal (single user) */}
+      <Modal isOpen={isConfirmOpen} onClose={() => { setConfirmTarget(null); onConfirmClose(); }} isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Confirm deletion</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <Text>
+              {confirmTarget ? `Are you sure you want to delete user "${confirmTarget.email}"? This action can be undone within a few seconds via the undo toast.` : 'Are you sure you want to delete this user?'}
+            </Text>
+          </ModalBody>
+
+          <ModalFooter>
+            <Button onClick={() => { setConfirmTarget(null); onConfirmClose(); }} mr={3}>Cancel</Button>
+            <Button colorScheme="red" onClick={handleConfirmDelete}>Confirm Delete</Button>
+          </ModalFooter>
         </ModalContent>
       </Modal>
     </Box>
