@@ -487,7 +487,31 @@ function handleExtract(rawText) {
       String(found.gross || ""),
       (found.wb_id || "").replace(/^WB/i, ""),
     ].filter(Boolean));
-    const candidate = found._ticket_candidates.find((n) => !exclude.has(n));
+
+    // new: filter out candidates that appear inside the date substring
+    const candidate = found._ticket_candidates.find((n) => {
+      // Exclude SAD/weights/WB
+      if (exclude.has(n)) return false;
+
+      // Exclude numbers that are clearly part of the date/time substring
+      if (found.date) {
+        const dateIdx = full.indexOf(found.date);
+        if (dateIdx >= 0) {
+          // if n occurs inside the date substring, skip it
+          let pos = full.indexOf(n, 0);
+          while (pos !== -1) {
+            if (pos >= dateIdx && pos < dateIdx + found.date.length) return false;
+            pos = full.indexOf(n, pos + 1);
+          }
+        }
+      }
+
+      // Exclude numbers that look like time-only values (hhmm or hhmmss)
+      if (/^(?:[01]?\d|2[0-3])[0-5]\d(?:[0-5]\d)?$/.test(n)) return false;
+
+      return true;
+    });
+
     if (candidate) found.ticket_no = candidate;
     delete found._ticket_candidates;
   }
@@ -566,7 +590,6 @@ function handleExtract(rawText) {
     isClosable: true,
   });
 }
-
 
   // Initial empty form
   const EMPTY_FORM = {
