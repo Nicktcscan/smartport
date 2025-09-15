@@ -177,8 +177,6 @@ export function OCRComponent({ onComplete }) {
     }
   };
 
-  
-
   return (
     <Box border="1px" borderColor="gray.300" borderRadius="md" p={4} mb={4}>
       <FormControl>
@@ -204,7 +202,7 @@ function parseExtractedText(text) {
     .map((line) => {
       const match = line.match(/^(.+?)\s*:\s*(.+)$/);
       if (!match) return null;
-      let [key, value] = match;
+      let [, key, value] = match;
       key = key
         .toLowerCase()
         .split(' ')
@@ -216,6 +214,25 @@ function parseExtractedText(text) {
     .filter(Boolean);
 }
 
+
+// --------------------------
+// Condensed pagination helper (added)
+// --------------------------
+function getCondensedPages(current, total, edge = 1, around = 2) {
+  // show first `edge`, last `edge`, and `around` pages around current
+  const pages = new Set();
+  for (let i = 1; i <= Math.min(edge, total); i++) pages.add(i);
+  for (let i = Math.max(1, current - around); i <= Math.min(total, current + around); i++) pages.add(i);
+  for (let i = Math.max(1, total - edge + 1); i <= total; i++) pages.add(i);
+  const arr = Array.from(pages).sort((a,b) => a-b);
+
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (i > 0 && arr[i] !== arr[i-1] + 1) out.push("...");
+    out.push(arr[i]);
+  }
+  return out;
+}
 
 // Main Page
 function WeighbridgeManagementPage() {
@@ -248,160 +265,308 @@ function WeighbridgeManagementPage() {
   const debouncedOcrText = useDebounce(ocrText, 500);
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
 
+/**
+ * Updated handleExtract: stricter label-first extraction with safer fallbacks,
+ * numeric heuristics, and normalization (fixed to pick up ticket_no, correct scale,
+ * avoid concatenated weight numbers, and keep driver/operator clean).
+ */
 function handleExtract(rawText) {
   if (!rawText) {
     setExtractedPairs([]);
     return;
   }
 
-  // --- Pre-clean OCR noise ---
-  rawText = rawText
-    .replace(/[\|~]+/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\r?\n/g, '\n');
+  // Normalize and split lines
+  const lines = String(rawText || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(/\u00A0/g, " ")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
 
-  const patterns = {
-    ticket_no: /Ticket\s*(?:No\.?|#)?\s*[:\-]?\s*([\w\d\s]+)/i,
-    manual: /MANUAL\s*[:\-]?\s*([FALSEfalse]+)/i,
-    gnsw_truck_no: /GNSW\s*Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9]+)/i,
-    anpr: /ANPR\s*[:\-]?\s*([YESNOyesno]+)/i,
-    wb_id: /(?:WB|Weighbridge)\s*Id\s*[:\-]?\s*(WB\d+)/i,
-    consignee: /Consignee\s*[:\-]?\s*([\s\S]*?)(?=\s*Tare:|$)/i,
-    operation: /Operation\s*[:\-]?\s*([A-Z]+)/i,
-    consolidated: /Consolidated\s*[:\-]?\s*([YESNOyesno]+)/i,
-    driver: /Driver\s*[:\-]?\s*([^\n\r]+)/i,
-    truck_on_wb: /Truck\s*on\s*WB\s*[:\-]?\s*([\w\d]+)/i,
-    gross: /Gross\s*[:\-]?\s*([\d\s\w,]+)/i,
-    tare: /Tare:\s*\(PT\)\s*([\d,]+)\s*kg/i,
-    net: /Net\s*[:\-]?\s*([\d,]+)\s*kg/i,
-    sad_no: /SAD\s*No\.?\s*[:\-]?\s*(\d+)/i,
-    container_no: /Container\s*(?:No\.?|#)?\s*[:\-]?\s*([\w\d]+)/i,
-    material: /Material\s*[:\-]?\s*([^\n\r]+)/i,
-    pass_number: /Pass\s*Number\s*[:\-]?\s*(\d*)/i,
-    date: /(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i,
-    scale_name: /Scale\s*Name\s*[:\-]?\s*([A-Z0-9]+)/i,
-    operator: /Operator\s*[:\-]?\s*([^\n\r]+)/i,
-    axles: /Axles\s*[:\-]?\s*([\d.,\s]+kg)/i,
+  const full = lines.join("\n");
+  const found = {};
+
+  const onlyDigits = (s) => {
+    const m = String(s || "").match(/\d+/);
+    return m ? m[0] : null;
   };
 
-  const extractedPairs = [];
+  const extractLabelLine = (labelRegex) =>
+    lines.find((l) => labelRegex.test(l)) || null;
 
-  for (const [key, regex] of Object.entries(patterns)) {
-    let val;
-    const match = rawText.match(regex);
+  // Parse a sensible weight from a line:
+  // - prefer the first 3-6 digit chunk (common for weights)
+  // - return null if none found
+  const parseWeightFromLine = (line) => {
+    if (!line) return null;
+    const matches = Array.from(line.matchAll(/\b(\d{3,6})\b/g)).map((m) => m[1]);
+    if (matches.length === 0) return null;
+    // Choose the first reasonable one (usually the first 3-6 digit number on the line)
+    const num = Number(matches[0].replace(/,/g, ""));
+    return Number.isFinite(num) ? num : null;
+  };
 
-    if (match && match[1]) {
-      val = match[1].trim();
+  // Helper: find all distinct 3-6 digit numbers in doc (used for ticket fallback)
+  const allSmallNumbers = () =>
+    Array.from(full.matchAll(/\b(\d{3,6})\b/g)).map((m) => m[1]);
 
-      // --- Clean up messy OCR for weights ---
-    if (['gross', 'tare', 'net', 'weight'].includes(key)) {
-  const numMatch = String(val).match(/[\d,.]+/);
-  if (numMatch) val = parseFloat(numMatch[0].replace(/,/g, ''));
-}
+  // 1) Ticket No — look for many label variants (Ticket No, Ticket#, Tkt, Pass Number)
+  const ticketLine =
+    extractLabelLine(/\bTicket\s*(?:No\.?|#)?\b/i) ||
+    extractLabelLine(/\bTkt\b/i) ||
+    extractLabelLine(/\bTicket#\b/i) ||
+    extractLabelLine(/\bPass\s*Number\b/i);
 
-if (key === 'operator') {
-  // Grab last word only, which should be the operator's name
-  const parts = val.split(/\s+/);
-  val = parts[parts.length - 1].trim();
-}
-
-extractedPairs.forEach(pair => {
-  if (pair.key === 'scale_name') {
-    pair.value = 'WBRIDGE1'; // override whatever was detected
+  if (ticketLine) {
+    const m =
+      ticketLine.match(/\b(?:Ticket|Tkt|Pass\s*Number)\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{3,6})/i) ||
+      ticketLine.match(/\b(\d{3,6})\b/);
+    if (m && m[1]) {
+      found.ticket_no = m[1];
+    }
   }
-});
+  // fallback: prefer the first 4-6 digit number that is not SAD (we'll capture SAD later)
+  if (!found.ticket_no) {
+    const numbers = allSmallNumbers();
+    if (numbers.length) {
+      // We'll postpone final choice until we know SAD / weights; tentatively pick first:
+      found._ticket_candidates = numbers;
+    }
+  }
 
-// Force manual to always be false
-const manualIndex = extractedPairs.findIndex(p => p.key === 'manual');
-if (manualIndex > -1) {
-  extractedPairs[manualIndex].value = false;
-} else {
-  extractedPairs.push({ key: 'manual', value: false });
-}
-
-// After extracting all fields
-const grossPair = extractedPairs.find(p => p.key === 'gross');
-if (grossPair) {
-  const weightPairIndex = extractedPairs.findIndex(p => p.key === 'weight');
-  if (weightPairIndex > -1) {
-    extractedPairs[weightPairIndex].value = grossPair.value;
+  // 2) GNSW Truck No — prefer explicit label, else plate-like pattern
+  const gnswLine =
+    extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
+  if (gnswLine) {
+    const m =
+      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i) ||
+      gnswLine.match(/Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i);
+    if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
   } else {
-    extractedPairs.push({ key: 'weight', value: grossPair.value });
+    // fallback: plate-like pattern (letters+digits). Avoid picking pure numeric tokens.
+    const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
+    if (plateMatch && plateMatch[1]) {
+      found.gnsw_truck_no = plateMatch[1].toUpperCase();
+    }
   }
-}
 
-      // --- Clean up ticket_no specifically ---
-      if (key === 'ticket_no') {
-        const fallback = rawText.match(/Ticket\s*(?:No\.?|#)?\s*[:\-]?\s*(.*)\nDate\s*Time/i);
-        if (fallback && fallback[1]) {
-          const numMatch = fallback[1].trim().match(/\d+/); // only first number
-          if (numMatch) val = numMatch[0];
-        }
-      }
+  // 3) Driver — label-first, strip leading dashes and trailing "Truck..." junk
+  const driverLine = extractLabelLine(/\bDriver\b/i);
+  if (driverLine) {
+    let drv = driverLine.replace(/Driver\s*[:\-]?\s*/i, "").trim();
+    drv = drv.replace(/^[-:]+/, "").trim();
+    drv = drv.replace(/\bTruck\b.*$/i, "").trim();
+    // remove parentheses content like (PT) etc
+    drv = drv.replace(/\(.*?\)/g, "").trim();
+    found.driver = drv || null;
+  }
 
-// --- Guaranteed Date extraction ---
-if (!extractedPairs.find(p => p.key === 'date')) {
-  const fallback = rawText.match(
-    /Date\s*Time\s*[:\-]?\s*[\r\n]*\s*([\d]{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i
+  // 4) Scale Name — explicit label else WBRIDGE\d fallback
+  const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
+  if (scaleLine) {
+    const m = scaleLine.match(/Scale\s*Name\s*[:\-]?\s*([A-Z0-9\-_]+)/i) || scaleLine.match(/Scale\s*[:\-]?\s*([A-Z0-9\-_]+)/i);
+    if (m && m[1]) {
+      const cand = String(m[1]).toUpperCase();
+      // ignore generic "WEIGHT" if possible — prefer WBRIDGE if present later
+      if (!/WEIGHT/i.test(cand)) found.scale_name = cand;
+      else found.scale_name = cand; // keep for now, may be overridden by WBRIDGE below
+    }
+  }
+  if (!found.scale_name || /WEIGHT/i.test(found.scale_name)) {
+    const wb = full.match(/\b(WBRIDGE\d+)\b/i);
+    if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
+  }
+
+  // 5) Gross / Tare / Net — strict label parsing; parse only 3-6 digit groups per line
+  const grossLine = extractLabelLine(/\bGross\b/i);
+  if (grossLine) found.gross = parseWeightFromLine(grossLine);
+
+  const tareLine = extractLabelLine(/\bTare\b/i);
+  if (tareLine) found.tare = parseWeightFromLine(tareLine);
+  else {
+    // sometimes "Tare: (PT) 20740 kg" sits on same line as consignee — check full
+    const mt = full.match(/Tare\s*[:\-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{3,6})/i);
+    if (mt && mt[1]) found.tare = Number(mt[1]);
+  }
+
+  const netLine = extractLabelLine(/\bNet\b/i);
+  if (netLine) found.net = parseWeightFromLine(netLine);
+  else {
+    const mn = full.match(/Net\s*[:\-]?\s*(\d{3,6})/i);
+    if (mn && mn[1]) found.net = Number(mn[1]);
+  }
+
+  // 6) SAD No
+  const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
+  if (sadLine) {
+    const m = sadLine.match(/SAD\s*No\.?\s*[:\-]?\s*(\d{3,6})/i) || sadLine.match(/SAD\s*[:\-]?\s*(\d{3,6})/i);
+    if (m && m[1]) found.sad_no = m[1];
+  } else {
+    const sadFb = full.match(/\bSAD\s*No\.?\s*[:\-]?\s*(\d{3,6})/i) || full.match(/\bSAD\s*[:\-]?\s*(\d{3,6})/i);
+    if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
+  }
+
+  // 7) Container / Consignee / Material
+  const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
+  if (containerLine) {
+    const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]+)/i);
+    if (m && m[1]) found.container_no = String(m[1]).trim();
+  } else {
+    // fallback: look for known tokens like BULK on its own line
+    const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
+    if (bulkLine) found.container_no = "BULK";
+  }
+
+  const consigneeLine = extractLabelLine(/Consignee\b/i);
+  if (consigneeLine) {
+    let c = consigneeLine.replace(/Consignee\s*[:\-]?\s*/i, "").trim();
+    c = c.split(/\bTare\b/i)[0].trim();
+    c = c.replace(/\b\d{3,6}\s*kg\b/i, "").trim();
+    found.consignee = c || null;
+  }
+
+  const materialLine = extractLabelLine(/Material\b/i);
+  if (materialLine) {
+    const m = materialLine.match(/Material\s*[:\-]?\s*(.+)/i);
+    if (m && m[1]) found.material = m[1].trim();
+  }
+
+  // 8) WB ID
+  const wbIdLine = extractLabelLine(/\bWB\s*(?:Id|ID)\b/i);
+  if (wbIdLine) {
+    const m = wbIdLine.match(/\b(WB\d{1,9})\b/i);
+    if (m && m[1]) found.wb_id = m[1].toUpperCase();
+  }
+
+  // 9) Date
+  const dateMatch = full.match(
+    /(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i
   );
-  if (fallback && fallback[1]) {
-    extractedPairs.push({ key: 'date', value: fallback[1].trim() });
-  }
-}
+  if (dateMatch && dateMatch[1]) found.date = dateMatch[1].trim();
 
-      // --- Clean up driver specifically ---
-      if (key === 'driver') {
-        val = val.replace(/\s*Truck\s*on\s*WB:.*$/i, '').trim();
-      }
-
-      // --- Clean up messy OCR for other text fields ---
-      if (['consignee', 'container_no', 'material', 'operator', 'scale_name', 'wb_id'].includes(key)) {
-        val = String(val).split(/~~|\n/)[0].trim();
-      }
-
-      // Automatic numeric normalization
-      const numericVal = val.toString().replace(/,/g, '').replace(/\s*kg/i, '').trim();
-      if (!isNaN(numericVal) && numericVal !== '') val = parseFloat(numericVal);
-
-      // Automatic boolean normalization
-      const boolCandidate = val.toString().toUpperCase();
-      if (['YES', 'NO'].includes(boolCandidate)) val = boolCandidate;
-
-      if (val !== '') extractedPairs.push({ key, value: val });
-    }
-
-    // --- Fallbacks for critical fields ---
-    if (!match || val === '' || val == null) {
-      if (key === 'ticket_no') {
-        const fallback = rawText.match(/Ticket\s*(?:No\.?|#)?\s*[:\-]?\s*(.*)\nDate\s*Time/i);
-        if (fallback && fallback[1]) {
-          const numMatch = fallback[1].trim().match(/\d+/);
-          if (numMatch) extractedPairs.push({ key, value: numMatch[0] });
-        }
-      }
-      if (key === 'driver') {
-        const fallback = rawText.match(/Driver\s*[:\-]?\s*([^\n]+)/i);
-        if (fallback && fallback[1]) extractedPairs.push({ key, value: fallback[1].trim().replace(/\s*Truck\s*on\s*WB:.*$/i, '') });
-      }
+  // 10) Operator — prefer label; if label present but no clean name afterwards, fall back to literal "Operator"
+  const opLine = extractLabelLine(/\bOperator\b/i);
+  if (opLine) {
+    let op = opLine.replace(/Operator\s*[:\-]?\s*/i, "").trim();
+    // strip timestamps / WB / weight tokens and boolean flags
+    op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
+    op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
+    op = op.replace(/\bWBRIDGE\d+\b/gi, "");
+    op = op.replace(/\b\d{3,6}\s*kg\b/gi, "");
+    op = op.replace(/\b(true|false)\b/ig, "");
+    op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
+    if (op) {
+      const opMatch = op.match(/[A-Za-z][A-Za-z\.\s'\-]{0,40}/);
+      found.operator = opMatch ? opMatch[0].trim() : op;
+    } else {
+      // label existed but no clear name — keep the label as placeholder
+      found.operator = "Operator";
     }
   }
 
-  setExtractedPairs(extractedPairs);
+  // --- Post-processing heuristics ---
 
-  // Fully adaptive form filling
-  const newFormData = { ...formData };
-  extractedPairs.forEach(({ key, value }) => {
-    newFormData[key] = value;
+  // If we have tare AND net, compute gross = tare + net (this is the most reliable)
+  if (Number.isFinite(found.tare) && Number.isFinite(found.net)) {
+    found.gross = Number(found.tare) + Number(found.net);
+  } else {
+    // If gross is parsed but extremely large or clearly concatenated ( > 1e6 ), discard it
+    if (found.gross && Number(found.gross) > 1_000_000) {
+      found.gross = null;
+    }
+  }
+
+  // If ticket_no not set, pick a candidate from small numbers that isn't SAD or weights or WB id
+  if (!found.ticket_no && found._ticket_candidates && found._ticket_candidates.length) {
+    const exclude = new Set([
+      String(found.sad_no || ""),
+      String(found.tare || ""),
+      String(found.net || ""),
+      String(found.gross || ""),
+      (found.wb_id || "").replace(/^WB/i, ""),
+    ].filter(Boolean));
+    const candidate = found._ticket_candidates.find((n) => !exclude.has(n));
+    if (candidate) found.ticket_no = candidate;
+    delete found._ticket_candidates;
+  }
+
+  // Normalize: ticket numeric-only
+  if (found.ticket_no) found.ticket_no = onlyDigits(found.ticket_no);
+
+  // Normalize scale_name uppercase & avoid noisy "WEIGHT" if we found a valid WBRIDGE
+  if (found.scale_name) {
+    const s = String(found.scale_name).toUpperCase();
+    if (/WEIGHT/i.test(s) && full.match(/\b(WBRIDGE\d+)\b/i)) {
+      const wb = full.match(/\b(WBRIDGE\d+)\b/i);
+      if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
+      else found.scale_name = s;
+    } else {
+      found.scale_name = s;
+    }
+  }
+
+  // Trim and remove stray leading characters from driver
+  if (found.driver) {
+    found.driver = String(found.driver).replace(/^[-:\s]+/, "").trim();
+    if (found.driver === "") found.driver = null;
+  }
+
+  // Ensure weights are numbers or null
+  ["gross", "tare", "net"].forEach((k) => {
+    if (found[k] !== undefined && found[k] !== null) {
+      const n = Number(found[k]);
+      found[k] = Number.isFinite(n) ? n : null;
+    } else {
+      found[k] = null;
+    }
   });
-  setFormData(newFormData);
+
+  // Build ordered pairs for UI
+  const orderedKeys = [
+    "ticket_no",
+    "gnsw_truck_no",
+    "container_no",
+    "driver",
+    "scale_name",
+    "gross",
+    "tare",
+    "net",
+    "sad_no",
+    "consignee",
+    "material",
+    "date",
+    "operator",
+    "wb_id",
+  ];
+
+  const pairs = [];
+  orderedKeys.forEach((k) => {
+    if (found[k] !== undefined && found[k] !== null) pairs.push({ key: k, value: found[k] });
+  });
+
+  // Set state
+  setExtractedPairs(pairs);
+
+  // Merge into formData only if empty
+  const nextForm = { ...formData };
+  pairs.forEach(({ key, value }) => {
+    const existing = nextForm[key];
+    const isEmpty = existing === null || existing === undefined || existing === "" || existing === false;
+    if (isEmpty) nextForm[key] = value;
+  });
+  setFormData(nextForm);
 
   toast({
-    title: 'Form populated from OCR',
-    status: 'success',
+    title: "Form populated from OCR",
+    description: "Fields cleaned and normalized where possible.",
+    status: "success",
     duration: 3000,
     isClosable: true,
   });
 }
+
 
   // Initial empty form
   const EMPTY_FORM = {
@@ -436,31 +601,25 @@ if (!extractedPairs.find(p => p.key === 'date')) {
   const normalizeEmpty = (val) => (val === '' || val === undefined || val === null ? null : val);
 
   const uploadFileToSupabase = async (file) => {
-  if (!(file instanceof File)) {
-    throw new Error("uploadFileToSupabase: file must be a File object");
-  }
+    if (!(file instanceof File)) {
+      throw new Error("uploadFileToSupabase: file must be a File object");
+    }
 
-  // Generate unique file name
-  const fileExt = file.name.split(".").pop();
-  const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
-  const filePath = `uploads/${fileName}`;
+    // Generate unique file name
+    const fileExt = file.name.split(".").pop();
+    const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
+    const filePath = `uploads/${fileName}`;
 
-  // Upload file to Supabase storage
-  const { error: uploadError } = await supabase
-    .storage
-    .from("tickets")
-    .upload(filePath, file, {
-      cacheControl: "3600",
-      upsert: false, // prevent overwriting existing files
-    });
+    // Upload file to Supabase storage
+    const { error: uploadError } = await supabase
+      .storage
+      .from("tickets")
+      .upload(filePath, file, {
+        cacheControl: "3600",
+        upsert: false, // prevent overwriting existing files
+      });
 
-  if (uploadError) throw uploadError;
-
-// Remove the erroneous insert here; file upload should not insert into "tickets"
-// The actual ticket insert is handled in saveTicket
-
-// No insert here; just upload file and return file info
-
+    if (uploadError) throw uploadError;
 
     const { data: publicData } = supabase
       .storage
@@ -609,11 +768,20 @@ if (!extractedPairs.find(p => p.key === 'date')) {
     setCurrentPage(1);
   };
 
-  // number buttons array
+  // number buttons array (left for compatibility; not used in condensed UI)
   const pageNumbers = [];
   for (let i = 1; i <= Math.max(1, Math.ceil(totalTickets / pageSize)); i++) {
     pageNumbers.push(i);
   }
+
+  // condensed pagination items (added)
+  const pageItems = getCondensedPages(currentPage, totalPages);
+
+  // simple click handler for condensed buttons
+  const handlePageClick = (n) => {
+    if (n === "...") return;
+    setCurrentPage(n);
+  };
 
   // Handle view ticket modal
   const handleView = (ticket) => {
@@ -638,102 +806,101 @@ if (!extractedPairs.find(p => p.key === 'date')) {
 
   // ---------------------------
   // Save ticket (computes missing weights before insert and maps fields)
-  // (kept unchanged — existing implementation)
   // ---------------------------
 
   const normalizeEmptyLocal = (val) => (val === '' || val === undefined || val === null ? null : val);
 
-const saveTicket = async (data) => {
-  // define submissionData right at the top
-  const submissionData = { ...data };
+  const saveTicket = async (data) => {
+    // define submissionData right at the top
+    const submissionData = { ...data };
 
-  try {
-    // --- Step 1: Upload PDF if exists ---
-    if (ocrFile) {
-      const { file_name, file_url } = await uploadFileToSupabase(
-        ocrFile instanceof File ? ocrFile : new File([ocrFile], 'ticket.pdf', { type: 'application/pdf' })
-      );
-      submissionData.file_name = file_name;
-      submissionData.file_url = file_url;
-    } else {
-      submissionData.file_name = null;
-      submissionData.file_url = null;
+    try {
+      // --- Step 1: Upload PDF if exists ---
+      if (ocrFile) {
+        const { file_name, file_url } = await uploadFileToSupabase(
+          ocrFile instanceof File ? ocrFile : new File([ocrFile], 'ticket.pdf', { type: 'application/pdf' })
+        );
+        submissionData.file_name = file_name;
+        submissionData.file_url = file_url;
+      } else {
+        submissionData.file_name = null;
+        submissionData.file_url = null;
+      }
+
+      // --- Step 2: Compute weights ---
+      const computed = computeWeightsFromObj({
+        gross: submissionData.gross,
+        tare: submissionData.tare ?? submissionData.tare,
+        net: submissionData.net ?? submissionData.net,
+        weight: submissionData.weight,
+      });
+
+      submissionData.gross = computed.grossValue ?? normalizeEmptyLocal(submissionData.gross);
+      submissionData.tare = computed.tareValue ?? normalizeEmptyLocal(submissionData.tare ?? submissionData.tare);
+      submissionData.net = computed.netValue ?? normalizeEmptyLocal(submissionData.net ?? submissionData.net);
+
+      submissionData.gross = normalizeEmptyLocal(submissionData.gross) ?? normalizeEmptyLocal(submissionData.weight);
+
+      numericFields.forEach((field) => {
+        let value = normalizeEmptyLocal(submissionData[field]);
+        if (value !== null) {
+          const num = Number(value);
+          value = isNaN(num) ? null : num;
+        }
+        submissionData[field] = value;
+      });
+
+      const gross = submissionData.gross;
+      const tare = submissionData.tare;
+      submissionData.total_weight =
+        typeof gross === "number" && typeof tare === "number" ? gross - tare : null;
+
+      // --- Step 3: Insert into Supabase ---
+      const { error } = await supabase.from("tickets").insert([submissionData]);
+
+      if (error) {
+        if (error.message?.toLowerCase().includes('tickets_ticket_no_key')) {
+          toast({
+            title: "Duplicate Ticket",
+            description: "This Ticket has already been processed. Kindly upload a new one, or contact App Support Team.",
+            status: "error",
+            duration: 7000,
+            isClosable: true,
+          });
+          return;
+        }
+
+        if (error.message?.toLowerCase().includes('row-level')) {
+          throw new Error(`${error.message}. Check your RLS policy or insert using a service role key.`);
+        }
+
+        throw error;
+      }
+
+      // --- Step 4: Refresh & reset ---
+      await fetchTickets();
+      setFormData(EMPTY_FORM);
+      setExtractedPairs([]);
+      setOcrText('');
+      setOcrFile(null);
+
+      toast({
+        title: "Ticket saved",
+        description: "Your extracted ticket was saved successfully.",
+        status: "success",
+        duration: 3000,
+        isClosable: true,
+      });
+    } catch (err) {
+      toast({
+        title: "Error saving ticket",
+        description: err?.message || "An unexpected error occurred.",
+        status: "error",
+        duration: 7000,
+        isClosable: true,
+      });
     }
-
-    // --- Step 2: Compute weights ---
-    const computed = computeWeightsFromObj({
-      gross: submissionData.gross,
-      tare: submissionData.tare ?? submissionData.tare,
-      net: submissionData.net ?? submissionData.net,
-      weight: submissionData.weight,
-    });
-
-    submissionData.gross = computed.grossValue ?? normalizeEmptyLocal(submissionData.gross);
-    submissionData.tare = computed.tareValue ?? normalizeEmptyLocal(submissionData.tare ?? submissionData.tare);
-    submissionData.net = computed.netValue ?? normalizeEmptyLocal(submissionData.net ?? submissionData.net);
-
-    submissionData.gross = normalizeEmptyLocal(submissionData.gross) ?? normalizeEmptyLocal(submissionData.weight);
-
-    numericFields.forEach((field) => {
-      let value = normalizeEmptyLocal(submissionData[field]);
-      if (value !== null) {
-        const num = Number(value);
-        value = isNaN(num) ? null : num;
-      }
-      submissionData[field] = value;
-    });
-
-    const gross = submissionData.gross;
-    const tare = submissionData.tare;
-    submissionData.total_weight =
-      typeof gross === "number" && typeof tare === "number" ? gross - tare : null;
-
-    // --- Step 3: Insert into Supabase ---
-    const { error } = await supabase.from("tickets").insert([submissionData]);
-
-    if (error) {
-      if (error.message?.toLowerCase().includes('tickets_ticket_no_key')) {
-        toast({
-          title: "Duplicate Ticket",
-          description: "This Ticket has already been processed. Kindly upload a new one, or contact App Support Team.",
-          status: "error",
-          duration: 7000,
-          isClosable: true,
-        });
-        return;
-      }
-
-      if (error.message?.toLowerCase().includes('row-level')) {
-        throw new Error(`${error.message}. Check your RLS policy or insert using a service role key.`);
-      }
-
-      throw error;
-    }
-
-    // --- Step 4: Refresh & reset ---
-    await fetchTickets();
-    setFormData(EMPTY_FORM);
-    setExtractedPairs([]);
-    setOcrText('');
-    setOcrFile(null);
-
-    toast({
-      title: "Ticket saved",
-      description: "Your extracted ticket was saved successfully.",
-      status: "success",
-      duration: 3000,
-      isClosable: true,
-    });
-  } catch (err) {
-    toast({
-      title: "Error saving ticket",
-      description: err?.message || "An unexpected error occurred.",
-      status: "error",
-      duration: 7000,
-      isClosable: true,
-    });
-  }
-};
+  };
 
 
   const clearExtractedData = () => {
@@ -826,7 +993,7 @@ const saveTicket = async (data) => {
                 {extractedPairs.map(({ key, value }) => (
                   <Tr key={key}>
                     <Td>{key}</Td>
-                    <Td>{value}</Td>
+                    <Td>{value?.toString?.() ?? String(value)}</Td>
                   </Tr>
                 ))}
               </Tbody>
@@ -845,6 +1012,7 @@ const saveTicket = async (data) => {
             >
               Submit Extracted Ticket
             </Button>
+            <Button size="sm" variant="outline" onClick={clearExtractedData}>Clear</Button>
           </Flex>
         </Box>
       )}
@@ -946,9 +1114,9 @@ const saveTicket = async (data) => {
               </Tbody>
             </Table>
 
-            {/* Pagination controls */}
+            {/* Pagination controls - responsive */}
             <Flex justifyContent="space-between" alignItems="center" mt={4} gap={3} flexWrap="wrap">
-              <Flex gap={2} align="center">
+              <Flex gap={2} align="center" flexWrap="wrap">
                 <Button
                   size="sm"
                   onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
@@ -957,17 +1125,18 @@ const saveTicket = async (data) => {
                   Previous
                 </Button>
 
-                {/* Numbered page buttons */}
-                <HStack spacing={1} ml={2}>
-                  {pageNumbers.map((n) => (
+                {/* Condensed numbered page buttons */}
+                <HStack spacing={1} ml={2} wrap="wrap">
+                  {pageItems.map((it, idx) => (
                     <Button
-                      key={n}
+                      key={`${it}-${idx}`}
                       size="sm"
-                      onClick={() => setCurrentPage(n)}
-                      colorScheme={n === currentPage ? 'teal' : 'gray'}
-                      variant={n === currentPage ? 'solid' : 'outline'}
+                      onClick={() => handlePageClick(it)}
+                      colorScheme={it === currentPage ? 'teal' : 'gray'}
+                      variant={it === currentPage ? 'solid' : 'outline'}
+                      isDisabled={it === "..."}
                     >
-                      {n}
+                      {it}
                     </Button>
                   ))}
                 </HStack>
