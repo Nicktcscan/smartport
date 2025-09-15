@@ -1,4 +1,4 @@
-// ManualEntry.jsx
+// src/pages/ManualEntry.jsx
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
   Box,
@@ -25,6 +25,13 @@ import {
   Badge,
   HStack,
   Checkbox,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+  Progress,
 } from '@chakra-ui/react';
 import { ViewIcon, ExternalLinkIcon } from '@chakra-ui/icons';
 import { supabase } from '../supabaseClient';
@@ -66,17 +73,12 @@ function computeWeights(rowData) {
   let T = Number.isFinite(t0) ? t0 : null;
   let N = Number.isFinite(n0) ? n0 : null;
 
-  // If gross missing but tare and net present -> gross = net + tare
   if ((G === null || G === undefined) && T !== null && N !== null) {
     G = N + T;
   }
-
-  // If net missing but gross and tare present -> net = gross - tare
   if ((N === null || N === undefined) && G !== null && T !== null) {
     N = G - T;
   }
-
-  // If tare missing but gross and net present -> tare = gross - net
   if ((T === null || T === undefined) && G !== null && N !== null) {
     T = G - N;
   }
@@ -93,7 +95,6 @@ function computeWeights(rowData) {
 
 /* NumericInput: shows formatted value but reports unformatted (digits+dot) to parent.
    Implements caret preservation by counting numeric characters left of caret.
-   Accepts inputProps to allow custom Chakra Input props (e.g. borderColor).
 */
 function NumericInput({
   name,
@@ -163,6 +164,24 @@ function NumericInput({
 }
 
 /* -----------------------
+   Condensed pagination helper (same as WeighbridgeManagementPage)
+   ----------------------- */
+function getCondensedPages(current, total, edge = 1, around = 2) {
+  const pages = new Set();
+  for (let i = 1; i <= Math.min(edge, total); i++) pages.add(i);
+  for (let i = Math.max(1, current - around); i <= Math.min(total, current + around); i++) pages.add(i);
+  for (let i = Math.max(1, total - edge + 1); i <= total; i++) pages.add(i);
+  const arr = Array.from(pages).sort((a,b) => a-b);
+
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (i > 0 && arr[i] !== arr[i-1] + 1) out.push("...");
+    out.push(arr[i]);
+  }
+  return out;
+}
+
+/* -----------------------
    Main Component
    ----------------------- */
 export default function ManualEntry() {
@@ -176,7 +195,6 @@ export default function ManualEntry() {
   const toast = useToast();
   const firstInputRef = useRef(null);
 
-  // raw numeric strings for numeric fields (gross/tare/net)
   const [formData, setFormData] = useState({
     truckOnWb: '',
     consignee: '',
@@ -189,66 +207,49 @@ export default function ManualEntry() {
     net: '',
   });
 
-  // keep a ref to latest formData so stable callbacks can read it without depending on it
   const formDataRef = useRef(formData);
-  useEffect(() => {
-    formDataRef.current = formData;
-  }, [formData]);
+  useEffect(() => { formDataRef.current = formData; }, [formData]);
 
   const [errors, setErrors] = useState({});
   const [history, setHistory] = useState([]);
   const [viewTicket, setViewTicket] = useState(null);
 
-  // pagination
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
 
-  // operator info
   const [operatorName, setOperatorName] = useState('');
   const [operatorId, setOperatorId] = useState(null);
 
-  // submission guard
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // tare automation states
-  const [isTareAuto, setIsTareAuto] = useState(false); // whether tare was auto-filled from DB
-  const [tareRecordExists, setTareRecordExists] = useState(false); // whether a tare record exists for truck
-  const [saveTare, setSaveTare] = useState(false); // whether user wants to save the current tare for the truck
+  const [isTareAuto, setIsTareAuto] = useState(false);
+  const [tareRecordExists, setTareRecordExists] = useState(false);
+  const [saveTare, setSaveTare] = useState(false);
   const [fetchingTare, setFetchingTare] = useState(false);
   const truckFetchTimerRef = useRef(null);
 
-  // extended tare/history states
-  const [vehicleSummary, setVehicleSummary] = useState(null); // {tare, avg_tare, entry_count, updated_at}
-  const [lastTares, setLastTares] = useState([]); // [{tare, recorded_at}, ...]
+  const [vehicleSummary, setVehicleSummary] = useState(null);
+  const [lastTares, setLastTares] = useState([]);
   const [selectedSuggestedTare, setSelectedSuggestedTare] = useState('');
 
-  // track which truck we've already auto-filled for, to avoid repeated auto-fill & toast loops
   const lastAutoFilledTruckRef = useRef('');
 
-  /* Stable validateAll that reads latest formData via formDataRef */
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
     const newErrors = {};
 
-    // Required field presence
     REQUIRED_FIELDS.forEach((f) => {
       if (!fd[f] || String(fd[f]).trim() === '') {
         newErrors[f] = 'This field is required';
       }
     });
 
-    // compute weights
-    const computed = computeWeights({
-      gross: fd.gross,
-      tare: fd.tare,
-      net: fd.net,
-    });
+    const computed = computeWeights({ gross: fd.gross, tare: fd.tare, net: fd.net });
 
     if (computed.grossValue === null) newErrors.gross = newErrors.gross || 'Invalid or missing gross';
     if (computed.tareValue === null) newErrors.tare = newErrors.tare || 'Invalid or missing tare';
     if (computed.netValue === null) newErrors.net = newErrors.net || 'Invalid or missing net';
 
-    // gross must be strictly greater than tare
     if (computed.grossValue !== null && computed.tareValue !== null) {
       if (!(computed.grossValue > computed.tareValue)) {
         newErrors.gross = 'Gross must be greater than Tare';
@@ -256,7 +257,6 @@ export default function ManualEntry() {
       }
     }
 
-    // only update errors state if changed (shallow compare)
     setErrors((prev) => {
       const prevKeys = Object.keys(prev).sort();
       const newKeys = Object.keys(newErrors).sort();
@@ -272,16 +272,13 @@ export default function ManualEntry() {
   const handleChange = (field, value) => {
     const next = { ...formDataRef.current, [field]: value };
     setFormData(next);
-    // run validation against next
     validateAll(next);
   };
 
-  /* updateNumericField: called by NumericInput with raw numeric string (digits and dot) */
   const updateNumericField = (fieldName, rawString) => {
     setFormData((prev) => {
       const next = { ...prev, [fieldName]: rawString };
 
-      // Live recalculation: when gross or tare are changed, if both numeric then autocalc net = gross - tare
       if (fieldName === 'gross' || fieldName === 'tare') {
         const g = numericValue(fieldName === 'gross' ? rawString : prev.gross);
         const t = numericValue(fieldName === 'tare' ? rawString : prev.tare);
@@ -293,14 +290,12 @@ export default function ManualEntry() {
         }
       }
 
-      // If user manually edits tare, we should allow them to save it
       if (fieldName === 'tare') {
         if (!tareRecordExists) setSaveTare(true);
         if (isTareAuto) setIsTareAuto(false);
       }
 
-      // validate using the computed next object (live)
-      setTimeout(() => validateAll(next), 0); // schedule after state update
+      setTimeout(() => validateAll(next), 0);
       return next;
     });
   };
@@ -310,7 +305,6 @@ export default function ManualEntry() {
   ----------------------- */
   const getNextTicketNoFromDB = useCallback(async (localHistory = []) => {
     try {
-      // fetch up to 1000 recent ticket_no that look like M-<digits>
       const { data, error } = await supabase
         .from('tickets')
         .select('ticket_no')
@@ -338,7 +332,6 @@ export default function ManualEntry() {
       return `M-${String(next).padStart(4, '0')}`;
     } catch (err) {
       console.error('getNextTicketNoFromDB error', err);
-      // fallback
       let maxNum = 0;
       const re = /^M-(\d+)$/i;
       for (const h of localHistory) {
@@ -358,7 +351,6 @@ export default function ManualEntry() {
     let attempt = 0;
     while (attempt < retryLimit) {
       attempt += 1;
-      // compute next ticket number from DB (use current history snapshot as fallback)
       const nextTicketNo = await getNextTicketNoFromDB(history);
       insertData.ticket_no = nextTicketNo;
       insertData.ticket_id = nextTicketNo;
@@ -368,30 +360,24 @@ export default function ManualEntry() {
         return { data, error: null, ticketNo: nextTicketNo };
       }
 
-      // if error appears to be unique-violation on ticket_no, retry (concurrent writer)
       const msg = String(error?.message || '').toLowerCase();
       if (msg.includes('duplicate') || msg.includes('unique')) {
         console.warn(`ticket_no collision on attempt ${attempt} (${nextTicketNo}), retrying...`);
-        // small backoff
         await new Promise((res) => setTimeout(res, 120 * attempt));
         continue;
       }
 
-      // non-duplicate error -> abort
       return { data: null, error, ticketNo: null };
     }
 
     return { data: null, error: new Error('Too many retries generating ticket number'), ticketNo: null };
   }, [getNextTicketNoFromDB, history]);
 
-  /* Fetch tare for truck (debounced) - stable and avoids no-op setState.
-     IMPORTANT: we only auto-fill & toast once per truck value (tracked by lastAutoFilledTruckRef)
-  */
+  /* Fetch tare for truck (debounced) */
   const fetchTareForTruck = useCallback(async (truckNo) => {
     if (!truckNo) return;
     setFetchingTare(true);
     try {
-      // fetch summary from vehicle_tares (may contain tare, avg_tare, entry_count, updated_at)
       const { data: summaryData, error: summaryErr } = await supabase
         .from('vehicle_tares')
         .select('truck_no, tare, avg_tare, entry_count, updated_at')
@@ -402,7 +388,6 @@ export default function ManualEntry() {
         console.warn('Error fetching vehicle_tares summary', summaryErr);
       }
 
-      // fetch last 5 history entries for this truck
       const { data: histData, error: histErr } = await supabase
         .from('vehicle_tare_history')
         .select('tare, recorded_at')
@@ -414,7 +399,6 @@ export default function ManualEntry() {
         console.warn('Error fetching vehicle_tare_history', histErr);
       }
 
-      // Set local states for UI (avoid no-op updates)
       setVehicleSummary((prev) => {
         const newSummary = summaryData || null;
         if (JSON.stringify(prev) === JSON.stringify(newSummary)) return prev;
@@ -427,33 +411,25 @@ export default function ManualEntry() {
         return arr;
       });
 
-      // If we have a summary tare, auto-fill only if we haven't already auto-filled for this truck value
       if (summaryData && summaryData.tare !== undefined && summaryData.tare !== null) {
-        // Prevent repeated auto-fill & toast for the same truck value
         if (lastAutoFilledTruckRef.current !== truckNo) {
           const newTareStr = String(summaryData.tare);
 
-          // Only update formData.tare if it actually differs (prevents loops)
           setFormData((prev) => {
             if (prev.tare === newTareStr) return prev;
             const next = { ...prev, tare: newTareStr };
             const g = numericValue(next.gross);
             const t = numericValue(next.tare);
             if (g !== null && t !== null) next.net = String(g - t);
-            // run validation after setting
             setTimeout(() => validateAll(next), 0);
             return next;
           });
 
-          // set flags (only set if they change)
           setIsTareAuto(true);
           setTareRecordExists(true);
           setSaveTare(false);
-
-          // mark that we've auto-filled for this truck so subsequent runs don't repeat
           lastAutoFilledTruckRef.current = truckNo;
 
-          // show toast once
           toast({
             title: 'Tare auto-filled',
             description: `Last tare: ${formatNumber(String(summaryData.tare))} kg${summaryData.avg_tare ? ` | Avg: ${formatNumber(String(summaryData.avg_tare))} (${summaryData.entry_count || 1} entries)` : ''}`,
@@ -463,11 +439,9 @@ export default function ManualEntry() {
           });
         }
       } else if (Array.isArray(histData) && histData.length > 0) {
-        // no summary row but history exists -> show history but don't auto-fill
         setIsTareAuto(false);
         setTareRecordExists(true);
       } else {
-        // no record found
         setIsTareAuto(false);
         setTareRecordExists(false);
       }
@@ -480,17 +454,14 @@ export default function ManualEntry() {
     }
   }, [validateAll, toast]);
 
-  // Clear lastAutoFilledTruckRef when truck input changes (so a new truck can be auto-filled)
   useEffect(() => {
     lastAutoFilledTruckRef.current = '';
   }, [formData.truckOnWb]);
 
-  // debounce truck input and fetch tare
   useEffect(() => {
     if (truckFetchTimerRef.current) clearTimeout(truckFetchTimerRef.current);
     const truck = (formData.truckOnWb || '').trim();
     if (!truck) {
-      // only update when necessary
       setIsTareAuto(false);
       setTareRecordExists(false);
       setSaveTare(false);
@@ -502,7 +473,6 @@ export default function ManualEntry() {
     }
 
     truckFetchTimerRef.current = setTimeout(() => {
-      // pass current truck (capture value at debounce time)
       fetchTareForTruck(truck);
     }, 600);
 
@@ -511,7 +481,6 @@ export default function ManualEntry() {
     };
   }, [formData.truckOnWb, fetchTareForTruck]);
 
-  /* Suggested tare / anomaly detection */
   const predictedTare = useMemo(() => {
     if (vehicleSummary && vehicleSummary.avg_tare) return Number(vehicleSummary.avg_tare);
     if (lastTares && lastTares.length > 0) return Number(lastTares[0].tare);
@@ -523,11 +492,9 @@ export default function ManualEntry() {
     const pred = predictedTare;
     const entered = enteredTareNumeric;
     if (!pred || entered === null) return false;
-    // anomaly threshold: 5% deviation (configurable)
     return Math.abs(entered - pred) / pred > 0.05;
   }, [predictedTare, enteredTareNumeric]);
 
-  /* handle pick from suggested tares (avg or history) */
   const handlePickSuggestedTare = useCallback((val) => {
     setSelectedSuggestedTare(val || '');
     if (!val) return;
@@ -573,13 +540,11 @@ export default function ManualEntry() {
 
   /* -----------------------
      Load tickets and operator at mount
-     (This was missing — explains empty table)
   ----------------------- */
   useEffect(() => {
     let mounted = true;
     async function load() {
       try {
-        // load tickets history (large sample; adjust limit as needed)
         const { data, error } = await supabase
           .from('tickets')
           .select('*')
@@ -590,16 +555,17 @@ export default function ManualEntry() {
           console.warn('Error loading tickets', error);
           toast({ title: 'Error loading tickets', description: error.message || String(error), status: 'error', duration: 5000, isClosable: true });
         } else if (Array.isArray(data)) {
-          // Map rows defensively in case column names differ
           const mapped = data.map((item, idx) => {
-            // ticket id fallback: ticket_id || id || ticket_no || generated
             const ticketId = item.ticket_id ?? item.id ?? item.ticket_no ?? `unknown-${idx}-${Date.now()}`;
+
+            // NOTE: prefer gnsw_truck_no first (canonical source)
+            const truck = item.gnsw_truck_no ?? item.truck_on_wb ?? item.truckOnWb ?? '';
 
             return {
               ticketId,
               data: {
                 ticketNo: item.ticket_no ?? ticketId,
-                truckOnWb: item.truck_on_wb ?? item.gnsw_truck_no ?? item.truckOnWb ?? '',
+                truckOnWb: truck,
                 consignee: item.consignee ?? '',
                 operation: item.operation ?? '',
                 driver: item.driver ?? '',
@@ -623,7 +589,6 @@ export default function ManualEntry() {
           }
         }
 
-        // get logged-in user info
         try {
           let currentUser = null;
           if (supabase.auth?.getUser) {
@@ -634,7 +599,6 @@ export default function ManualEntry() {
           }
 
           if (currentUser) {
-            // try fetch from users table
             const { data: userRow } = await supabase.from('users').select('full_name, username').eq('id', currentUser.id).maybeSingle();
             setOperatorName((userRow && (userRow.full_name || userRow.username)) || currentUser.email || '');
             setOperatorId(currentUser.id);
@@ -648,18 +612,14 @@ export default function ManualEntry() {
     }
 
     load();
-
-    return () => {
-      mounted = false;
-    };
-    // run once on mount
+    return () => { mounted = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /* Submit form (optimistic UI + DB) */
   const handleSubmit = async () => {
-    if (isSubmitting) return; // guard against double clicks
-    setIsSubmitting(true); // lock immediately
+    if (isSubmitting) return;
+    setIsSubmitting(true);
 
     const ok = validateAll();
     if (!ok) {
@@ -674,14 +634,12 @@ export default function ManualEntry() {
       return;
     }
 
-    // compute final numeric values from the ref snapshot
     const computed = computeWeights({
       gross: formDataRef.current.gross,
       tare: formDataRef.current.tare,
       net: formDataRef.current.net,
     });
 
-    // create optimistic (temporary) ticket
     const tempId = `tmp-${Date.now()}`;
     const tempTicket = {
       ticketId: tempId,
@@ -705,12 +663,15 @@ export default function ManualEntry() {
       __optimistic: true,
     };
 
-    // add optimistic ticket immediately
     setHistory((prev) => [tempTicket, ...prev]);
 
+    // canonical truck value (we store it to gnsw_truck_no)
+    const truck = formDataRef.current.truckOnWb || null;
+
     const insertData = {
-      truck_on_wb: formDataRef.current.truckOnWb || null,
-      gnsw_truck_no: formDataRef.current.truckOnWb || null,
+      // prefer gnsw_truck_no as canonical truck column
+      truck_on_wb: null,
+      gnsw_truck_no: truck,
       consignee: formDataRef.current.consignee || null,
       operation: formDataRef.current.operation || null,
       driver: formDataRef.current.driver || null,
@@ -733,7 +694,6 @@ export default function ManualEntry() {
     try {
       const { data, error, ticketNo } = await insertTicketWithRetry(insertData, 5);
       if (error) {
-        // rollback optimistic
         setHistory((prev) => prev.filter((r) => r.ticketId !== tempId));
         toast({ title: 'Submit failed', description: error.message || String(error), status: 'error', duration: 5000, isClosable: true });
         setIsSubmitting(false);
@@ -742,11 +702,9 @@ export default function ManualEntry() {
 
       const newTicketNo = ticketNo || (data && data[0] && data[0].ticket_no) || 'M-0001';
 
-      // === NEW: always record tare into vehicle_tare_history (if we have a measured tare)
-      const truck = formDataRef.current.truckOnWb;
+      // record tare history
       if (truck && computed.tareValue !== null) {
         try {
-          // 1) insert into history
           await supabase.from('vehicle_tare_history').insert([
             {
               truck_no: truck,
@@ -759,7 +717,6 @@ export default function ManualEntry() {
         }
 
         try {
-          // 2) recompute summary avg and entry_count from history (could be optimized with a db view/function)
           const { data: allHist, error: allErr } = await supabase
             .from('vehicle_tare_history')
             .select('tare')
@@ -771,7 +728,6 @@ export default function ManualEntry() {
             const avg = tares.length > 0 ? sum / tares.length : computed.tareValue;
             const entryCount = tares.length;
 
-            // 3) upsert summary row (keeps your existing 'tare' column as last measured)
             await supabase.from('vehicle_tares').upsert(
               [
                 {
@@ -785,7 +741,6 @@ export default function ManualEntry() {
               { onConflict: 'truck_no' }
             );
           } else {
-            // no history found? still upsert last-measured tare as a fallback
             await supabase.from('vehicle_tares').upsert(
               [
                 {
@@ -804,7 +759,6 @@ export default function ManualEntry() {
         }
       }
 
-      // replace optimistic ticket with real ticket info
       const saved = {
         ticketId: newTicketNo,
         data: {
@@ -853,12 +807,11 @@ export default function ManualEntry() {
 
       onClose();
     } catch (err) {
-      // rollback optimistic
       setHistory((prev) => prev.filter((r) => r.ticketId !== tempId));
       console.error(err);
       toast({ title: 'Submit error', description: err?.message || 'Unexpected error', status: 'error', duration: 5000, isClosable: true });
     } finally {
-      setIsSubmitting(false); // always unlock
+      setIsSubmitting(false);
     }
   };
 
@@ -874,7 +827,7 @@ export default function ManualEntry() {
 
   const filteredHistory = useMemo(() => {
     const q = (searchQuery || '').toLowerCase();
-    return history.filter((r) => {
+    const arr = history.filter((r) => {
       const matchesSearch =
         (r.data.ticketNo || '').toLowerCase().includes(q) ||
         (r.data.truckOnWb || '').toLowerCase().includes(q) ||
@@ -883,13 +836,31 @@ export default function ManualEntry() {
       const matchesStatus = statusFilter ? r.data.status === statusFilter : true;
       return matchesSearch && matchesStatus;
     });
+
+    // explicit sort newest -> oldest by submittedAt
+    arr.sort((a, b) => {
+      const da = new Date(a.submittedAt).getTime ? new Date(a.submittedAt).getTime() : 0;
+      const db = new Date(b.submittedAt).getTime ? new Date(b.submittedAt).getTime() : 0;
+      return db - da;
+    });
+
+    return arr;
   }, [history, searchQuery, statusFilter]);
 
   useEffect(() => setPage(1), [searchQuery, statusFilter, history, pageSize]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredHistory.length / pageSize));
+  const totalTickets = filteredHistory.length;
+  const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
   const startIndex = (page - 1) * pageSize;
   const pagedHistory = filteredHistory.slice(startIndex, startIndex + pageSize);
+
+  // condensed pagination items
+  const pageItems = getCondensedPages(page, totalPages);
+
+  const handlePageClick = (n) => {
+    if (n === '...') return;
+    setPage(n);
+  };
 
   /* -----------------------
      Render
@@ -915,7 +886,6 @@ export default function ManualEntry() {
           <ModalCloseButton isDisabled={isSubmitting} />
           <ModalBody>
             <SimpleGrid columns={[1, 2]} spacing={4}>
-              {/* Truck on WB (required) */}
               <FormControl isRequired isInvalid={!!errors.truckOnWb}>
                 <FormLabel>
                   Truck Number <Text as="span" color="red">*</Text>
@@ -924,13 +894,12 @@ export default function ManualEntry() {
                   ref={firstInputRef}
                   value={formData.truckOnWb}
                   onChange={(e) => handleChange('truckOnWb', e.target.value)}
-                  placeholder="Enter Truck on WB"
+                  placeholder="Enter Truck (GNSW plate)"
                   isDisabled={isSubmitting}
                 />
                 <FormErrorMessage>{errors.truckOnWb}</FormErrorMessage>
               </FormControl>
 
-              {/* SAD No (required) */}
               <FormControl isRequired isInvalid={!!errors.sadNo}>
                 <FormLabel>
                   SAD Number <Text as="span" color="red">*</Text>
@@ -939,7 +908,6 @@ export default function ManualEntry() {
                 <FormErrorMessage>{errors.sadNo}</FormErrorMessage>
               </FormControl>
 
-              {/* Operation (required dropdown) */}
               <FormControl isRequired isInvalid={!!errors.operation}>
                 <FormLabel>
                   Operation <Text as="span" color="red">*</Text>
@@ -951,25 +919,21 @@ export default function ManualEntry() {
                 <FormErrorMessage>{errors.operation}</FormErrorMessage>
               </FormControl>
 
-              {/* Container No (optional) */}
               <FormControl>
                 <FormLabel>Container Number</FormLabel>
                 <Input value={formData.containerNo} onChange={(e) => handleChange('containerNo', e.target.value)} placeholder="Container No (optional)" isDisabled={isSubmitting} />
               </FormControl>
 
-              {/* Consignee (optional) */}
               <FormControl>
                 <FormLabel>Consignee</FormLabel>
                 <Input value={formData.consignee} onChange={(e) => handleChange('consignee', e.target.value)} placeholder="Consignee (optional)" isDisabled={isSubmitting} />
               </FormControl>
 
-              {/* Driver (optional) */}
               <FormControl>
                 <FormLabel>Driver Name</FormLabel>
                 <Input value={formData.driver} onChange={(e) => handleChange('driver', e.target.value)} placeholder="Driver name (optional)" isDisabled={isSubmitting} />
               </FormControl>
 
-              {/* Numeric fields row: Gross (required) */}
               <FormControl isRequired isInvalid={!!errors.gross}>
                 <FormLabel>
                   Gross Weight<Text as="span" color="red">*</Text>
@@ -984,7 +948,6 @@ export default function ManualEntry() {
                 <FormErrorMessage>{errors.gross}</FormErrorMessage>
               </FormControl>
 
-              {/* Tare (required) */}
               <FormControl isRequired isInvalid={!!errors.tare}>
                 <HStack justify="space-between">
                   <FormLabel>
@@ -1014,7 +977,6 @@ export default function ManualEntry() {
                   }}
                 />
 
-                {/* Inline suggested tare badges (average + up to 3 recent) */}
                 {(vehicleSummary || (lastTares && lastTares.length > 0)) && (
                   <Box mt={2}>
                     <Text fontSize="sm" color="gray.600" mb={1}>
@@ -1062,7 +1024,6 @@ export default function ManualEntry() {
                   </Box>
                 )}
 
-                {/* If there is no tare record for this truck, offer to save it */}
                 {!isTareAuto && (formData.truckOnWb || '').trim() && !tareRecordExists && (
                   <HStack mt={2} align="center">
                     <Checkbox size="sm" isChecked={saveTare} onChange={(e) => setSaveTare(e.target.checked)} isDisabled={isSubmitting}>
@@ -1075,7 +1036,6 @@ export default function ManualEntry() {
                 <FormErrorMessage>{errors.tare}</FormErrorMessage>
               </FormControl>
 
-              {/* Net (required, read-only) */}
               <FormControl isRequired isInvalid={!!errors.net}>
                 <FormLabel>
                   Net Weight <Text as="span" color="red">*</Text>
@@ -1117,75 +1077,85 @@ export default function ManualEntry() {
         </FormControl>
       </Box>
 
-      {/* History table (paginated) */}
+      {/* History table */}
       {filteredHistory.length === 0 ? (
         <Text>No tickets found.</Text>
       ) : (
         <>
-          <Box borderWidth="1px" borderRadius="md" overflow="hidden">
-            <Box display="grid" gridTemplateColumns="120px 140px 140px 1fr 120px 120px 100px" bg="gray.50" px={3} py={2} fontWeight="semibold">
-              <Text>Ticket No</Text>
-              <Text>Truck No</Text>
-              <Text>SAD No</Text>
-              <Text>Gross (kg)</Text>
-              <Text>Tare (kg)</Text>
-              <Text>Net (kg)</Text>
-              <Text>Action</Text>
-            </Box>
-
-            {pagedHistory.map(({ ticketId, data, submittedAt }) => (
-              <Box
-                key={ticketId}
-                display="grid"
-                gridTemplateColumns="120px 140px 140px 1fr 120px 120px 100px"
-                alignItems="center"
-                px={3}
-                py={2}
-                borderBottom="1px solid"
-                borderColor="gray.100"
-                bg={data.__optimistic ? 'gray.50' : 'white'}
-              >
-                <Text isTruncated>{data.ticketNo}</Text>
-                <Text isTruncated>{data.truckOnWb}</Text>
-                <Text isTruncated>{data.sadNo}</Text>
-                <Text isTruncated>{data.gross}</Text>
-                <Text isTruncated>{data.tare}</Text>
-                <Text isTruncated>{data.net}</Text>
-                <Box>
-                  {data.fileUrl && (
-                    <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" mr={2} onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
-                  )}
-                  <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
-                </Box>
-              </Box>
-            ))}
-          </Box>
-
-          {/* Pagination */}
-          <Box mt={4} display="flex" alignItems="center" gap={3} flexWrap="wrap">
-            <Button size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} isDisabled={page === 1}>Previous</Button>
-
-            <Flex align="center" gap={2}>
-              {Array.from({ length: Math.min(7, totalPages) }, (_, i) => {
-                const pageNum = i + 1;
+          <Table variant="striped" colorScheme="teal" size="sm">
+            <Thead>
+              <Tr>
+                <Th>Ticket No</Th>
+                <Th>Truck No</Th>
+                <Th>SAD No</Th>
+                <Th>Gross (KG)</Th>
+                <Th>Tare (KG)</Th>
+                <Th>Net (KG)</Th>
+                <Th>View</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {pagedHistory.map(({ ticketId, data, submittedAt }) => {
+                const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
                 return (
-                  <Button key={pageNum} size="sm" onClick={() => setPage(pageNum)} colorScheme={pageNum === page ? 'teal' : 'gray'} variant={pageNum === page ? 'solid' : 'outline'}>
-                    {pageNum}
-                  </Button>
+                  <Tr key={ticketId}>
+                    <Td>{data.ticketNo}</Td>
+                    <Td>{data.truckOnWb}</Td>
+                    <Td>{data.sadNo}</Td>
+                    <Td>{computed.grossDisplay}</Td>
+                    <Td>{computed.tareDisplay}</Td>
+                    <Td>{computed.netDisplay}</Td>
+                    <Td>
+                      <HStack>
+                        {data.fileUrl && (
+                          <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
+                        )}
+                        <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
+                      </HStack>
+                    </Td>
+                  </Tr>
                 );
               })}
+            </Tbody>
+          </Table>
+
+          {/* Pagination (condensed) */}
+          <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
+            <Flex gap={2} align="center" flexWrap="wrap">
+              <Button size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} isDisabled={page === 1}>Previous</Button>
+
+              <HStack spacing={1} ml={2} wrap="wrap">
+                {pageItems.map((it, idx) => (
+                  <Button
+                    key={`${it}-${idx}`}
+                    size="sm"
+                    onClick={() => handlePageClick(it)}
+                    colorScheme={it === page ? 'teal' : 'gray'}
+                    variant={it === page ? 'solid' : 'outline'}
+                    isDisabled={it === '...'}
+                  >
+                    {it}
+                  </Button>
+                ))}
+              </HStack>
+
+              <Button size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} isDisabled={page === totalPages}>Next</Button>
             </Flex>
 
-            <Button size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} isDisabled={page === totalPages}>Next</Button>
+            <Text>Page {page} of {totalPages} ({totalTickets} tickets)</Text>
 
-            <Box ml="auto" display="flex" alignItems="center" gap={2}>
-              <Text>Rows per page:</Text>
-              <Select size="sm" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} width="80px">
-                <option value={10}>10</option>
-                <option value={20}>20</option>
-                <option value={50}>50</option>
-              </Select>
+            <Box>
+              <Text fontSize="sm" color="gray.600">{/* empty placeholder */}</Text>
             </Box>
+          </Flex>
+
+          <Box mt={3} display="flex" justifyContent="flex-end" gap={2} alignItems="center">
+            <Text>Rows per page:</Text>
+            <Select size="sm" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} width="80px">
+              <option value={10}>10</option>
+              <option value={20}>20</option>
+              <option value={50}>50</option>
+            </Select>
           </Box>
         </>
       )}
