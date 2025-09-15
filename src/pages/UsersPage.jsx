@@ -1,172 +1,199 @@
 // src/pages/UsersPage.jsx
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  Box, Heading, Table, Thead, Tbody, Tr, Th, Td, Input, InputGroup,
-  InputLeftElement, Icon, Button, Flex, Modal, ModalOverlay, ModalContent,
-  ModalHeader, ModalFooter, ModalBody, ModalCloseButton, FormControl,
-  FormLabel, FormErrorMessage, Select, useDisclosure, useToast, Spinner,
-  Fade, Avatar, Checkbox, HStack, Text, Tooltip, Menu, MenuButton, MenuItem, MenuList
+  Box,
+  Heading,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+  Input,
+  InputGroup,
+  InputLeftElement,
+  InputRightElement,
+  Icon,
+  Button,
+  Flex,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalFooter,
+  ModalBody,
+  ModalCloseButton,
+  FormControl,
+  FormLabel,
+  FormErrorMessage,
+  Select,
+  useDisclosure,
+  useToast,
+  Spinner,
+  Fade,
+  useBoolean,
+  Avatar,
+  Checkbox,
+  Tooltip,
+  HStack,
+  Text,
+  Stack,
+  Menu,
+  MenuButton,
+  MenuList,
+  MenuItem,
 } from '@chakra-ui/react';
+import {
+  SearchIcon,
+  ViewIcon,
+  ViewOffIcon,
+  DeleteIcon,
+  EditIcon,
+  DownloadIcon,
+  ChevronDownIcon,
+} from '@chakra-ui/icons';
 import { supabase } from '../supabaseClient';
-import { SearchIcon, ViewIcon, ViewOffIcon, DownloadIcon } from '@chakra-ui/icons';
 
 /**
- * UsersPage with enhanced management features:
- * - bulk actions
- * - role filter
- * - pagination and sorting
- * - CSV export
- * - password reset/resend confirmation (best-effort)
- * - activity log display
- * - optimistic updates + undo for delete
- * - permission gating (admin-only actions)
+ * UsersPage — enhanced user management
  *
- * NOTE: adapt admin auth calls to your Supabase SDK version if necessary:
- * - supabase.auth.admin.* methods may require service role key or server side functions.
+ * Notes:
+ * - Some admin actions (delete user from Auth, update password via admin API) require
+ *   a Supabase client instantiated with the service_role key on server-side or an RPC.
+ *   The UI calls supabase.auth.admin.* where previously used — ensure your runtime supports it.
  */
 
-function UsersPage() {
+function useDebounced(value, delay = 300) {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return v;
+}
+
+export default function UsersPage() {
   const [users, setUsers] = useState([]);
   const [search, setSearch] = useState('');
+  const debouncedSearch = useDebounced(search, 300);
   const [roleFilter, setRoleFilter] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [loading, { on, off }] = useBoolean(true);
 
-  const { isOpen, onOpen, onClose } = useDisclosure(); // modal for add/edit
-  const { isOpen: isActivityOpen, onOpen: onActivityOpen, onClose: onActivityClose } = useDisclosure(); // activity modal
+  const { isOpen, onOpen, onClose } = useDisclosure();
   const toast = useToast();
   const initialRef = useRef();
 
-  // form state for add/edit
   const [form, setForm] = useState({ id: null, full_name: '', email: '', role: '', password: '' });
   const [errors, setErrors] = useState({});
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [pendingDeleteId, setPendingDeleteId] = useState(null);
 
-  // selection & bulk
+  // Bulk selection state
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [selectAllOnPage, setSelectAllOnPage] = useState(false);
 
-  // sorting
-  const [sortBy, setSortBy] = useState('created_at'); // default
-  const [sortDir, setSortDir] = useState('desc');
+  // Sorting
+  const [sortKey, setSortKey] = useState('created_at');
+  const [sortDir, setSortDir] = useState('desc'); // 'asc' | 'desc'
 
-  // pagination (server-side)
+  // Pagination
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(25);
-  const [totalCount, setTotalCount] = useState(0);
+  const [pageSize, setPageSize] = useState(15);
 
-  // current user / permissions
-  const [currentUserProfile, setCurrentUserProfile] = useState(null);
+  // local UI state for modal mode (add/edit)
+  const [isEditMode, setIsEditMode] = useState(false);
 
-  // activity log
-  const [activityRows, setActivityRows] = useState([]);
-  const [activityUser, setActivityUser] = useState(null);
-
-  // local cache for undo after delete
-  const deletedCacheRef = useRef([]);
-
-  // fetch current user profile to know role (permission)
+  // skeleton loading on first mount
   useEffect(() => {
     let mounted = true;
-    async function fetchProfile() {
+    const load = async () => {
       try {
-        // Try to get auth user
-        let currentUser = null;
-        if (supabase.auth?.getUser) {
-          const { data: ud } = await supabase.auth.getUser();
-          currentUser = ud?.user ?? null;
-        } else if (supabase.auth?.user) {
-          currentUser = supabase.auth.user();
+        on();
+        const { data, error } = await supabase.from('users').select('*').order('created_at', { ascending: false }).limit(2000);
+        if (error) {
+          toast({ title: 'Error loading users', description: error.message || String(error), status: 'error', duration: 5000, isClosable: true });
+        } else if (mounted) {
+          setUsers(Array.isArray(data) ? data : []);
         }
-        if (!currentUser) return;
-
-        // fetch profile from 'users' table
-        const { data: profile } = await supabase.from('users').select('id, full_name, role').eq('id', currentUser.id).maybeSingle();
-        if (mounted) setCurrentUserProfile(profile || null);
       } catch (err) {
-        console.warn('Could not fetch current user profile', err);
+        console.error('fetch users', err);
+        toast({ title: 'Error', description: 'Could not fetch users', status: 'error' });
+      } finally {
+        off();
       }
-    }
-    fetchProfile();
+    };
+    load();
     return () => { mounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // fetch users page
-  useEffect(() => {
-    let mounted = true;
-    async function loadPage() {
-      setLoading(true);
-      try {
-        // server side: use range and count
-        const start = (page - 1) * pageSize;
-        const end = page * pageSize - 1;
+  // derived filtered and sorted users (memoized)
+  const filteredSorted = useMemo(() => {
+    const q = (debouncedSearch || '').trim().toLowerCase();
+    let arr = users.filter((u) => {
+      const matchesSearch =
+        !q ||
+        (u.full_name || '').toLowerCase().includes(q) ||
+        (u.email || '').toLowerCase().includes(q) ||
+        (u.username || '').toLowerCase().includes(q);
+      const matchesRole = !roleFilter || (u.role === roleFilter);
+      return matchesSearch && matchesRole;
+    });
 
-        // Build base query
-        let query = supabase.from('users').select('*', { count: 'exact' }).order(sortBy || 'created_at', { ascending: sortDir === 'asc' });
-
-        // filter by role on server if provided
-        if (roleFilter) query = query.eq('role', roleFilter);
-
-        // apply search server-side by ilike on multiple fields
-        if (search && search.trim() !== '') {
-          const s = `%${search.trim()}%`;
-          // Supabase doesn't support OR across columns easily with client api in a single call; use filter via or
-          query = query.or(`full_name.ilike.${s},email.ilike.${s},username.ilike.${s}`, { foreignTable: null });
-        }
-
-        const { data, error, count } = await query.range(start, end);
-
-        if (error) {
-          throw error;
-        }
-        const rows = data || [];
-        // Map fields defensively
-        const mapped = rows.map((u) => ({
-          id: u.id,
-          full_name: u.full_name,
-          email: u.email,
-          role: u.role,
-          created_at: u.created_at,
-          last_sign_in_at: u.last_sign_in_at ?? u.last_login ?? null,
-          username: u.username ?? null,
-          status: u.status ?? null,
-        }));
-
-        if (mounted) {
-          setUsers(mapped);
-          setTotalCount(Number.isFinite(count) ? count : mapped.length);
-          // clear selection when page changes
-          setSelectedIds(new Set());
-          setSelectAllOnPage(false);
-        }
-      } catch (err) {
-        console.error('Error loading users', err);
-        toast({ title: 'Error loading users', description: err.message || String(err), status: 'error', duration: 6000 });
-      } finally {
-        if (mounted) setLoading(false);
+    const compare = (a, b) => {
+      let va = a[sortKey];
+      let vb = b[sortKey];
+      if (va === undefined) va = '';
+      if (vb === undefined) vb = '';
+      // attempt date numeric compare if looks like date
+      const da = new Date(va);
+      const db = new Date(vb);
+      if (!isNaN(da) && !isNaN(db)) {
+        return da.getTime() - db.getTime();
       }
-    }
+      // fallback to string
+      return String(va).localeCompare(String(vb));
+    };
 
-    loadPage();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, roleFilter, search, sortBy, sortDir]);
+    arr.sort((a, b) => {
+      const cmp = compare(a, b);
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
 
+    return arr;
+  }, [users, debouncedSearch, roleFilter, sortKey, sortDir]);
+
+  // pagination
+  const total = filteredSorted.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  useEffect(() => {
+    if (page > totalPages) setPage(1);
+  }, [totalPages, page]);
+
+  const pageItems = filteredSorted.slice((page - 1) * pageSize, page * pageSize);
+
+  // helpers
   const validate = () => {
     const errs = {};
-    if (!form.full_name.trim()) errs.full_name = 'Full name is required';
-    if (!form.email.trim()) errs.email = 'Email is required';
-    else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = 'Email is invalid';
+    if (!form.full_name || !form.full_name.trim()) errs.full_name = 'Full name is required';
+    if (!form.email || !form.email.trim()) errs.email = 'Email is required';
+    else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = 'Invalid email';
     if (!form.role) errs.role = 'Role is required';
-    if (!form.password && form.id === null) errs.password = 'Password is required';
-    else if (form.password && form.password.length < 6) errs.password = 'Password must be at least 6 characters';
+    if (form.id === null && (!form.password || form.password.length < 6)) errs.password = 'Password is required (min 6 chars)';
+    if (form.password && form.password.length > 0 && form.password.length < 6) errs.password = 'Password must be at least 6 characters';
     setErrors(errs);
     return Object.keys(errs).length === 0;
   };
 
-  const isAdmin = currentUserProfile?.role === 'admin';
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+    setErrors((prev) => ({ ...prev, [name]: undefined }));
+  };
 
+  // modal openers
   const openAddUser = () => {
+    setIsEditMode(false);
     setForm({ id: null, full_name: '', email: '', role: '', password: '' });
     setErrors({});
     setShowPassword(false);
@@ -174,323 +201,255 @@ function UsersPage() {
   };
 
   const openEditUser = (user) => {
+    setIsEditMode(true);
     setForm({ id: user.id, full_name: user.full_name || '', email: user.email || '', role: user.role || '', password: '' });
     setErrors({});
     setShowPassword(false);
     onOpen();
   };
 
-  const handleCloseModal = () => {
-    if (isSubmitting) return;
+  const resetModal = () => {
     setForm({ id: null, full_name: '', email: '', role: '', password: '' });
     setErrors({});
     setShowPassword(false);
     onClose();
   };
 
-  const handleChange = (e) => {
-    setForm({ ...form, [e.target.name]: e.target.value });
-    setErrors(prev => ({ ...prev, [e.target.name]: undefined }));
-  };
-
-  // Create or update user
+  // create / update user
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validate()) return;
     setIsSubmitting(true);
 
     try {
-      if (!form.id) {
-        // create user via auth.signUp
-        const { data: signupData, error: signupError } = await supabase.auth.signUp({
+      if (form.id === null) {
+        // Create user via supabase.auth.signUp (regular flow)
+        // Note: if you manage Auth via admin API, you can call admin.* from server side.
+        const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
           email: form.email,
           password: form.password,
         });
 
-        if (signupError) {
-          throw signupError;
+        if (signUpError) {
+          toast({ title: 'Signup failed', description: signUpError.message || String(signUpError), status: 'error' });
+          setIsSubmitting(false);
+          return;
         }
 
-        const userId = signupData?.user?.id || signupData?.session?.user?.id;
-        if (!userId) {
-          // Email confirmation flow could be in effect; in that case profile must be created after email confirm
-          toast({ title: 'Signup initiated', description: 'Confirmation required. Please confirm via email before profile is active.', status: 'info', duration: 6000 });
+        const newUserId = signUpData?.user?.id || signUpData?.session?.user?.id;
+        // If signUp requires confirmation, user id might not be available - fallback
+        const newId = newUserId || `pending-${Date.now()}`;
+
+        const username = generateUsername(form.full_name || '');
+
+        const { data: profileRow, error: insertError } = await supabase.from('users').insert([{
+          id: newId,
+          full_name: form.full_name,
+          email: form.email,
+          role: form.role,
+          username,
+        }]).select().single();
+
+        if (insertError) {
+          toast({ title: 'Failed to add user profile', description: insertError.message || String(insertError), status: 'error' });
+          setIsSubmitting(false);
+          return;
         }
 
-        // create profile row
-        const generatedUsername = (form.full_name || '').split(/\s+/).map(Boolean).map((p,i)=> i===0? p[0].toUpperCase():p.toLowerCase()).join('').slice(0,12);
-        const { data, error } = await supabase.from('users').insert([{ id: userId, full_name: form.full_name, email: form.email, role: form.role, username: generatedUsername }]).select().single();
-
-        if (error) throw error;
-
-        // optimistic: append to table and refetch total
-        setUsers((prev) => [data, ...prev]);
-        toast({ title: 'User added', description: `${data.full_name} was added`, status: 'success', duration: 4000 });
-        handleCloseModal();
+        setUsers((prev) => [profileRow, ...prev]);
+        toast({ title: 'User created', description: `${profileRow.full_name} added. Confirmation email may be required.`, status: 'success' });
+        resetModal();
       } else {
-        // update user profile
+        // update existing
         const payload = { full_name: form.full_name, email: form.email, role: form.role };
-        const { data, error } = await supabase.from('users').update(payload).eq('id', form.id).select().single();
-        if (error) throw error;
+        const { data: updated, error: updateErr } = await supabase.from('users').update(payload).eq('id', form.id).select().single();
+        if (updateErr) {
+          toast({ title: 'Update failed', description: updateErr.message || String(updateErr), status: 'error' });
+          setIsSubmitting(false);
+          return;
+        }
 
-        // if password provided, update via admin (best-effort)
-        if (form.password) {
-          try {
-            if (supabase.auth?.admin?.updateUserById) {
-              const { error: pwError } = await supabase.auth.admin.updateUserById(form.id, { password: form.password });
-              if (pwError) throw pwError;
+        // If admin API available, update password
+        if (form.password && form.password.length >= 6) {
+          if (supabase.auth?.admin?.updateUserById) {
+            const { error: pwErr } = await supabase.auth.admin.updateUserById(form.id, { password: form.password });
+            if (pwErr) {
+              toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
             } else {
-              // fallback: not possible from browser client - show toast
-              toast({ title: 'Password update pending', description: 'Password update requires admin privileges (server).', status: 'info', duration: 6000 });
+              toast({ title: 'Password updated', status: 'success' });
             }
-          } catch (pwErr) {
-            toast({ title: 'Failed to update password', description: pwErr.message || String(pwErr), status: 'error', duration: 6000 });
+          } else {
+            toast({ title: 'Password update skipped', description: 'Admin password update not available in this client.', status: 'info' });
           }
         }
 
-        setUsers((prev) => prev.map(u => (u.id === data.id ? data : u)));
-        toast({ title: 'User updated', description: `${data.full_name} updated`, status: 'success', duration: 4000 });
-        handleCloseModal();
+        setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
+        toast({ title: 'User updated', description: `${updated.full_name} updated.`, status: 'success' });
+        resetModal();
       }
     } catch (err) {
-      console.error('User save error', err);
-      toast({ title: 'Error', description: err.message || String(err), status: 'error', duration: 6000 });
+      console.error('submit user', err);
+      toast({ title: 'Error', description: err.message || String(err), status: 'error' });
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // checkbox selection
-  const toggleSelect = (id) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      setSelectAllOnPage(false);
-      return next;
+  // delete single user with confirm/undo
+  const pendingDeleteRef = useRef(null);
+  const handleDeleteSingle = async (userId, email) => {
+    // optimistic UI: mark removed, show toast with undo
+    const previous = users.slice();
+    setUsers((prev) => prev.filter((u) => u.id !== userId));
+    toast({
+      title: 'User deleted',
+      description: `Deleted user ${email}. Undo?`,
+      status: 'info',
+      duration: 6000,
+      isClosable: true,
+      action: (
+        <Button size="sm" onClick={() => {
+          setUsers(previous);
+          // cancel deletion
+          pendingDeleteRef.current = null;
+        }}>
+          Undo
+        </Button>
+      ),
     });
+
+    // schedule actual deletion after timeout unless undone
+    pendingDeleteRef.current = setTimeout(async () => {
+      try {
+        // delete from custom users table
+        const { error: userErr } = await supabase.from('users').delete().eq('id', userId);
+        if (userErr) throw userErr;
+
+        // delete from auth via admin API if available (requires service role)
+        if (supabase.auth?.admin?.deleteUserById) {
+          const { error: authErr } = await supabase.auth.admin.deleteUserById(userId);
+          if (authErr) console.warn('Auth delete failed', authErr);
+        }
+        toast({ title: 'User removal completed', status: 'success', duration: 3000 });
+      } catch (err) {
+        console.error('delete user', err);
+        toast({ title: 'Delete failed', description: err.message || String(err), status: 'error' });
+        // restore on error
+        setUsers(previous);
+      } finally {
+        pendingDeleteRef.current = null;
+      }
+    }, 4000);
   };
 
-  const toggleSelectAllOnPage = () => {
-    if (selectAllOnPage) {
-      setSelectedIds(new Set());
-      setSelectAllOnPage(false);
-    } else {
-      const next = new Set(selectedIds);
-      users.forEach((u) => next.add(u.id));
-      setSelectedIds(next);
-      setSelectAllOnPage(true);
-    }
-  };
-
-  // Bulk delete with optimistic update and undo
+  // bulk delete
   const handleBulkDelete = async () => {
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can delete users', status: 'error', duration: 4000 });
-      return;
-    }
     if (selectedIds.size === 0) {
-      toast({ title: 'No selection', description: 'Select users to delete', status: 'info', duration: 3000 });
+      toast({ title: 'No users selected', status: 'info' });
       return;
     }
 
-    const idsToDelete = Array.from(selectedIds);
-    // optimistic remove from UI
-    const removed = users.filter(u => idsToDelete.includes(u.id));
-    deletedCacheRef.current = removed; // cache for undo
-    setUsers(prev => prev.filter(u => !idsToDelete.includes(u.id)));
+    const ids = Array.from(selectedIds);
+    // optimistic remove
+    const previous = users.slice();
+    setUsers((prev) => prev.filter((u) => !selectedIds.has(u.id)));
     setSelectedIds(new Set());
     setSelectAllOnPage(false);
 
-    const undoToastId = `delete-undo-${Date.now()}`;
     toast({
-      id: undoToastId,
-      title: `${idsToDelete.length} user(s) deleted`,
-      description: 'You can undo this action for a short time.',
-      status: 'warning',
-      duration: 7000,
-      isClosable: true,
-      position: 'top-right',
-      // add undo button via onClose? Chakra toasts do not have actions built-in, so we show another toast with button
-    });
-
-    // show an action toast with undo button (simulate)
-    toast({
-      title: 'Undo available',
-      description: (
-        <Box>
-          <Text mb={2}>{idsToDelete.length} user(s) will be permanently deleted unless undone</Text>
-          <Button size="sm" onClick={() => {
-            // Undo: restore cache
-            setUsers(prev => [...deletedCacheRef.current, ...prev]);
-            deletedCacheRef.current = [];
-            toast({ title: 'Delete undone', status: 'info', duration: 3000 });
-          }}>
-            Undo
-          </Button>
-        </Box>
-      ),
+      title: 'Users deleted',
+      description: `Deleting ${ids.length} users — undo?`,
       status: 'info',
-      duration: 7000,
+      duration: 6000,
       isClosable: true,
-      position: 'top-right'
+      action: (
+        <Button size="sm" onClick={() => {
+          setUsers(previous);
+        }}>
+          Undo
+        </Button>
+      ),
     });
 
-    // After a short delay, perform server-side deletes (if not undone)
+    // process actual delete (non-blocking)
     setTimeout(async () => {
-      if (deletedCacheRef.current.length === 0) {
-        // undone
-        return;
-      }
       try {
         // delete from users table
-        const { error } = await supabase.from('users').delete().in('id', idsToDelete);
-        if (error) throw error;
+        const { error: delErr } = await supabase.from('users').delete().in('id', ids);
+        if (delErr) throw delErr;
 
-        // optionally delete from auth (admin call)
-        for (const id of idsToDelete) {
-          try {
-            if (supabase.auth?.admin?.deleteUserById) {
-              // server-side admin delete (may not be available from browser)
+        // delete auth users if admin API available (attempt sequentially)
+        if (supabase.auth?.admin?.deleteUserById) {
+          for (const id of ids) {
+            try {
               await supabase.auth.admin.deleteUserById(id);
+            } catch (e) {
+              console.warn('auth delete failed for', id, e);
             }
-          } catch (e) {
-            console.warn('Failed to delete from Auth:', e);
           }
         }
 
-        deletedCacheRef.current = []; // clear cache
-        toast({ title: 'Users permanently deleted', status: 'success', duration: 4000 });
-        // refresh current page
-        setPage(1);
+        toast({ title: 'Bulk delete completed', status: 'success' });
       } catch (err) {
-        console.error('Bulk delete error', err);
-        toast({ title: 'Error deleting users', description: err.message || String(err), status: 'error', duration: 6000 });
-        // attempt rollback by restoring cached users if any
-        if (deletedCacheRef.current.length) {
-          setUsers(prev => [...deletedCacheRef.current, ...prev]);
-          deletedCacheRef.current = [];
-        }
+        console.error('bulk delete', err);
+        toast({ title: 'Bulk delete failed', description: err.message || String(err), status: 'error' });
+        setUsers(previous);
       }
     }, 3500);
   };
 
-  // Bulk role change (optimistic)
-  const handleBulkChangeRole = async (newRole) => {
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can change roles', status: 'error', duration: 4000 });
-      return;
-    }
-    if (selectedIds.size === 0) {
-      toast({ title: 'No selection', description: 'Select users to change role', status: 'info', duration: 3000 });
-      return;
-    }
-    const ids = Array.from(selectedIds);
-    const prevUsers = [...users];
-    setUsers(prev => prev.map(u => ids.includes(u.id) ? { ...u, role: newRole } : u));
-    setSelectedIds(new Set());
-    setSelectAllOnPage(false);
-
+  // inline role update (fast inline edit)
+  const handleInlineRoleChange = async (userId, newRole) => {
     try {
-      const { error } = await supabase.from('users').update({ role: newRole }).in('id', ids);
+      const { data, error } = await supabase.from('users').update({ role: newRole }).eq('id', userId).select().single();
       if (error) throw error;
-      toast({ title: 'Roles updated', status: 'success', duration: 3000 });
+      setUsers((prev) => prev.map((u) => (u.id === userId ? data : u)));
+      toast({ title: 'Role updated', status: 'success' });
     } catch (err) {
-      console.error('Bulk role update error', err);
-      setUsers(prevUsers); // rollback
-      toast({ title: 'Error updating roles', description: err.message || String(err), status: 'error', duration: 6000 });
+      console.error('inline role update', err);
+      toast({ title: 'Update failed', description: err.message || String(err), status: 'error' });
     }
   };
 
-  // single user delete with confirm (two-step)
-  const handleDelete = async (userId) => {
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can delete users', status: 'error', duration: 4000 });
+  // change password (admin)
+  const handleResetPassword = async (userId, email) => {
+    if (!supabase.auth?.admin?.updateUserById) {
+      toast({ title: 'Admin API not available', description: 'Password reset requires server-side admin API (service key)', status: 'info' });
       return;
     }
-    if (pendingDeleteId !== userId) {
-      setPendingDeleteId(userId);
-      setTimeout(() => setPendingDeleteId(null), 4000);
+    const newPw = prompt(`Set new password for ${email} (min 6 chars):`);
+    if (!newPw || newPw.length < 6) {
+      toast({ title: 'Aborted', description: 'Password not set or too short', status: 'info' });
       return;
     }
+    try {
+      const { error } = await supabase.auth.admin.updateUserById(userId, { password: newPw });
+      if (error) throw error;
+      toast({ title: 'Password updated', status: 'success' });
+    } catch (err) {
+      console.error('pw reset', err);
+      toast({ title: 'Password update failed', description: err.message || String(err), status: 'error' });
+    }
+  };
 
-    // optimistic remove
-    const removed = users.find(u => u.id === userId);
-    deletedCacheRef.current = [removed];
-    setUsers(prev => prev.filter(u => u.id !== userId));
-    setPendingDeleteId(null);
-
-    const { error } = await supabase.from('users').delete().eq('id', userId);
-    if (error) {
-      // rollback
-      setUsers(prev => [removed, ...prev]);
-      toast({ title: 'Delete failed', description: error.message || String(error), status: 'error', duration: 5000 });
+  // CSV export for current filteredSorted set
+  const downloadCSV = (rows = []) => {
+    if (!rows || rows.length === 0) {
+      toast({ title: 'No users to export', status: 'info' });
       return;
     }
-    // Attempt to delete from Auth
-    try {
-      if (supabase.auth?.admin?.deleteUserById) {
-        await supabase.auth.admin.deleteUserById(userId);
-      }
-    } catch (e) {
-      console.warn('Auth deletion failed', e);
-    }
-    toast({ title: 'User deleted', status: 'success', duration: 3000 });
-  };
-
-  // Send password reset (best-effort)
-  const handleSendReset = async (email) => {
-    try {
-      // Many supabase client methods differ by version. Try best-effort:
-      if (supabase.auth?.api?.resetPasswordForEmail) {
-        await supabase.auth.api.resetPasswordForEmail(email);
-        toast({ title: 'Password reset sent', description: `Reset email sent to ${email}`, status: 'success', duration: 4000 });
-      } else if (supabase.auth?.resetPasswordForEmail) {
-        await supabase.auth.resetPasswordForEmail(email);
-        toast({ title: 'Password reset sent', description: `Reset email sent to ${email}`, status: 'success', duration: 4000 });
-      } else {
-        // fallback: inform admin to use server-side
-        toast({ title: 'Action required', description: 'Password reset must be performed from the server (service role).', status: 'info', duration: 6000 });
-      }
-    } catch (err) {
-      console.error('Password reset error', err);
-      toast({ title: 'Reset failed', description: err.message || String(err), status: 'error', duration: 6000 });
-    }
-  };
-
-  // View activity log for a user
-  const handleViewActivity = async (user) => {
-    setActivityUser(user);
-    onActivityOpen();
-    try {
-      const { data, error } = await supabase.from('user_activity').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(200);
-      if (error) {
-        throw error;
-      }
-      setActivityRows(data || []);
-    } catch (err) {
-      console.warn('Could not load activity', err);
-      setActivityRows([]);
-      toast({ title: 'Activity load failed', description: err.message || String(err), status: 'error', duration: 5000 });
-    }
-  };
-
-  // CSV export of filtered users (current page)
-  const exportCsv = () => {
-    const rows = users.map(u => ({
-      id: u.id,
-      full_name: u.full_name,
-      email: u.email,
-      role: u.role,
-      username: u.username,
-      created_at: u.created_at,
-      last_sign_in_at: u.last_sign_in_at,
-      status: u.status,
-    }));
-    const header = Object.keys(rows[0] || {}).join(',');
+    const headers = ['id', 'full_name', 'email', 'role', 'username', 'created_at'];
     const csv = [
-      header,
-      ...rows.map(r => Object.values(r).map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')),
+      headers.join(','),
+      ...rows.map((r) =>
+        headers.map((h) => {
+          let v = r[h] ?? '';
+          if (v === null || v === undefined) v = '';
+          // escape quotes
+          const s = String(v).replace(/"/g, '""');
+          return `"${s}"`;
+        }).join(',')
+      ),
     ].join('\n');
 
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
@@ -498,189 +457,281 @@ function UsersPage() {
     const a = document.createElement('a');
     a.href = url;
     a.download = `users-export-${Date.now()}.csv`;
+    a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    toast({ title: 'CSV exported', status: 'success', duration: 2500 });
+    toast({ title: 'CSV download started', status: 'success' });
   };
 
-  // change sorting
-  const handleSort = (field) => {
-    if (sortBy === field) {
-      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+  // helper generate username (simple)
+  const generateUsername = (fullName) => {
+    if (!fullName) return '';
+    const parts = fullName.trim().split(/\s+/);
+    const firstInitial = parts[0] ? parts[0][0].toUpperCase() : '';
+    const last = parts.length > 1 ? parts[parts.length - 1].toLowerCase() : '';
+    return `${firstInitial}${last}`.replace(/[^a-z0-9_]/gi, '');
+  };
+
+  // select toggles
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const s = new Set(prev);
+      if (s.has(id)) s.delete(id);
+      else s.add(id);
+      return s;
+    });
+  };
+
+  const handleSelectAllOnPage = () => {
+    if (selectAllOnPage) {
+      // unselect all on page
+      setSelectedIds((prev) => {
+        const s = new Set(prev);
+        pageItems.forEach((r) => s.delete(r.id));
+        return s;
+      });
+      setSelectAllOnPage(false);
     } else {
-      setSortBy(field);
+      // select all on page
+      setSelectedIds((prev) => {
+        const s = new Set(prev);
+        pageItems.forEach((r) => s.add(r.id));
+        return s;
+      });
+      setSelectAllOnPage(true);
+    }
+  };
+
+  // header sort toggle
+  const toggleSort = (key) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
       setSortDir('asc');
     }
-    setPage(1);
   };
 
-  // pagination controls
-  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  // UI helpers
+  const roleOptions = [
+    { value: '', label: 'All roles' },
+    { value: 'admin', label: 'Admin' },
+    { value: 'weighbridge', label: 'Weighbridge' },
+    { value: 'outgate', label: 'Outgate' },
+    { value: 'customs', label: 'Customs' },
+    { value: 'agent', label: 'Agent' },
+  ];
 
-  // helper: render avatar with initials
-  const AvatarOrInitials = ({ name }) => {
-    const initials = (name || '').split(/\s+/).filter(Boolean).slice(0,2).map(n => n[0]).join('').toUpperCase() || '?';
-    return <Avatar size="sm" name={name} src={null} bg="teal.500" color="white" />;
-  };
+  // computed UI states
+  const isAllSelectedOnPage = pageItems.every((r) => selectedIds.has(r.id)) && pageItems.length > 0;
 
+  // render
   return (
     <Box p={6}>
-      <Flex justify="space-between" align="center" mb={4}>
+      <Flex justify="space-between" align="center" mb={6}>
         <Heading size="lg">User Management</Heading>
-
-        <HStack spacing={2}>
+        <HStack spacing={3}>
+          <Button leftIcon={<DownloadIcon />} size="sm" onClick={() => downloadCSV(filteredSorted)}>Export CSV</Button>
           <Button colorScheme="teal" onClick={openAddUser}>Add User</Button>
-          <Button onClick={exportCsv} leftIcon={<DownloadIcon />}>Export CSV</Button>
         </HStack>
       </Flex>
 
-      <Flex gap={3} align="center" mb={4} flexWrap="wrap">
-        <InputGroup maxW="420px">
+      <Flex gap={4} mb={4} align="center" flexWrap="wrap">
+        <InputGroup maxW="480px">
           <InputLeftElement pointerEvents="none"><Icon as={SearchIcon} color="gray.400" /></InputLeftElement>
-          <Input placeholder="Search name, email or username" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} aria-label="Search users" />
+          <Input placeholder="Search by name, email or username" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
         </InputGroup>
 
-        <Select placeholder="Filter by role" value={roleFilter} onChange={(e) => { setRoleFilter(e.target.value); setPage(1); }} maxW="220px">
-          <option value="">All roles</option>
-          <option value="admin">Admin</option>
-          <option value="weighbridge">Weighbridge</option>
-          <option value="outgate">Outgate</option>
-          <option value="customs">Customs</option>
-          <option value="agent">Agent</option>
+        <Select maxW="220px" value={roleFilter} onChange={(e) => { setRoleFilter(e.target.value); setPage(1); }}>
+          {roleOptions.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
         </Select>
 
         <Box flex="1" />
 
-        <Box>
-          <Text fontSize="sm" color="gray.600" textAlign="right">Page size</Text>
-          <Select size="sm" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} width="100px">
-            <option value={10}>10</option>
-            <option value={25}>25</option>
-            <option value={50}>50</option>
-            <option value={100}>100</option>
-          </Select>
-        </Box>
+        <Select value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} width="120px">
+          <option value={10}>10 / page</option>
+          <option value={15}>15 / page</option>
+          <option value={25}>25 / page</option>
+          <option value={50}>50 / page</option>
+        </Select>
       </Flex>
 
-      <Box borderRadius="md" overflow="hidden" borderWidth="1px">
+      <Box borderWidth="1px" borderRadius="md" overflow="hidden">
         {loading ? (
-          <Flex justify="center" align="center" py={12}><Spinner size="lg" color="teal.500" /></Flex>
+          <Flex justify="center" align="center" h="200px"><Spinner size="xl" color="teal.500" /></Flex>
         ) : (
           <Fade in={!loading}>
-            <Box overflowX="auto">
-              <Table variant="simple" size="sm">
-                <Thead bg="gray.100">
+            <Table variant="simple" size="sm">
+              <Thead bg="gray.50">
+                <Tr>
+                  <Th px={3}>
+                    <Checkbox
+                      isChecked={isAllSelectedOnPage}
+                      onChange={handleSelectAllOnPage}
+                      aria-label="Select all visible users"
+                    />
+                  </Th>
+                  <Th cursor="pointer" onClick={() => toggleSort('full_name')}>
+                    <Flex align="center" gap={2}>
+                      Full name
+                      {sortKey === 'full_name' && <ChevronDownIcon transform={sortDir === 'asc' ? 'rotate(180deg)' : 'none'} />}
+                    </Flex>
+                  </Th>
+                  <Th cursor="pointer" onClick={() => toggleSort('email')}>
+                    <Flex align="center" gap={2}>
+                      Email
+                      {sortKey === 'email' && <ChevronDownIcon transform={sortDir === 'asc' ? 'rotate(180deg)' : 'none'} />}
+                    </Flex>
+                  </Th>
+                  <Th cursor="pointer" onClick={() => toggleSort('role')}>
+                    <Flex align="center" gap={2}>
+                      Role
+                      {sortKey === 'role' && <ChevronDownIcon transform={sortDir === 'asc' ? 'rotate(180deg)' : 'none'} />}
+                    </Flex>
+                  </Th>
+                  <Th cursor="pointer" onClick={() => toggleSort('created_at')}>
+                    <Flex align="center" gap={2}>
+                      Created
+                      {sortKey === 'created_at' && <ChevronDownIcon transform={sortDir === 'asc' ? 'rotate(180deg)' : 'none'} />}
+                    </Flex>
+                  </Th>
+                  <Th>Actions</Th>
+                </Tr>
+              </Thead>
+
+              <Tbody>
+                {pageItems.length === 0 ? (
                   <Tr>
-                    <Th width="48px">
-                      <Checkbox isChecked={selectAllOnPage} onChange={toggleSelectAllOnPage} />
-                    </Th>
-                    <Th onClick={() => handleSort('full_name')} cursor="pointer">Name {sortBy === 'full_name' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</Th>
-                    <Th onClick={() => handleSort('email')} cursor="pointer">Email {sortBy === 'email' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</Th>
-                    <Th onClick={() => handleSort('role')} cursor="pointer">Role {sortBy === 'role' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</Th>
-                    <Th onClick={() => handleSort('created_at')} cursor="pointer">Created {sortBy === 'created_at' ? (sortDir === 'asc' ? '▲' : '▼') : ''}</Th>
-                    <Th>Last Login</Th>
-                    <Th isNumeric>Actions</Th>
+                    <Td colSpan={6} textAlign="center" py={8}>
+                      <Text>No users found.</Text>
+                    </Td>
                   </Tr>
-                </Thead>
-                <Tbody>
-                  {users.length ? users.map((user) => (
-                    <Tr key={user.id}>
-                      <Td>
-                        <Checkbox isChecked={selectedIds.has(user.id)} onChange={() => toggleSelect(user.id)} />
-                      </Td>
-                      <Td>
-                        <Flex align="center" gap={3}>
-                          <AvatarOrInitials name={user.full_name} />
-                          <Box>
-                            <Text fontWeight="semibold">{user.full_name}</Text>
-                            <Text fontSize="xs" color="gray.500">{user.username || ''}</Text>
-                          </Box>
-                        </Flex>
-                      </Td>
-                      <Td>{user.email}</Td>
-                      <Td>
-                        <Menu>
-                          <MenuButton as={Button} size="sm" variant="outline">{user.role || '—'}</MenuButton>
-                          <MenuList>
-                            {['admin','weighbridge','outgate','customs','agent'].map(r => (
-                              <MenuItem key={r} onClick={async () => {
-                                if (!isAdmin) { toast({ title: 'Permission denied', status: 'error', duration: 3000 }); return; }
-                                const prev = users.slice();
-                                setUsers(prevU => prevU.map(u => u.id === user.id ? { ...u, role: r } : u));
-                                try {
-                                  const { error } = await supabase.from('users').update({ role: r }).eq('id', user.id);
-                                  if (error) throw error;
-                                  toast({ title: 'Role updated', status: 'success', duration: 3000 });
-                                } catch (err) {
-                                  setUsers(prev);
-                                  toast({ title: 'Error', description: err.message || String(err), status: 'error', duration: 5000 });
-                                }
-                              }}>{r}</MenuItem>
-                            ))}
-                          </MenuList>
-                        </Menu>
-                      </Td>
-                      <Td>{user.created_at ? new Date(user.created_at).toLocaleString() : '—'}</Td>
-                      <Td>{user.last_sign_in_at ? new Date(user.last_sign_in_at).toLocaleString() : '—'}</Td>
-                      <Td isNumeric>
-                        <HStack justify="flex-end">
-                          <Button size="sm" onClick={() => openEditUser(user)}>Edit</Button>
-                          <Button size="sm" variant="ghost" onClick={() => handleViewActivity(user)}>Activity</Button>
-                          <Button size="sm" colorScheme="blue" onClick={() => handleSendReset(user.email)}>Reset PW</Button>
-                          {isAdmin && <Button size="sm" colorScheme={pendingDeleteId === user.id ? 'red' : 'gray'} onClick={() => handleDelete(user.id)}>{pendingDeleteId === user.id ? 'Confirm' : 'Delete'}</Button>}
-                        </HStack>
-                      </Td>
-                    </Tr>
-                  )) : (
-                    <Tr><Td colSpan={7} textAlign="center" py={10}>No users found.</Td></Tr>
-                  )}
-                </Tbody>
-              </Table>
-            </Box>
+                ) : pageItems.map((u) => (
+                  <Tr key={u.id}>
+                    <Td px={3}>
+                      <Checkbox isChecked={selectedIds.has(u.id)} onChange={() => toggleSelect(u.id)} />
+                    </Td>
 
-            {/* Bulk actions & pagination footer */}
-            <Flex justify="space-between" align="center" p={3} borderTop="1px solid" borderColor="gray.100" gap={3} flexWrap="wrap">
-              <HStack spacing={2}>
-                <Button size="sm" onClick={() => handleBulkChangeRole('weighbridge')} isDisabled={!isAdmin || selectedIds.size === 0}>Make Weighbridge</Button>
-                <Button size="sm" onClick={() => handleBulkChangeRole('outgate')} isDisabled={!isAdmin || selectedIds.size === 0}>Make Outgate</Button>
-                <Button size="sm" colorScheme="red" onClick={handleBulkDelete} isDisabled={!isAdmin || selectedIds.size === 0}>Delete Selected</Button>
-              </HStack>
+                    <Td>
+                      <Flex align="center" gap={3}>
+                        <Avatar name={u.full_name || u.email || 'User'} size="sm" />
+                        <Stack spacing={0}>
+                          <Text fontWeight="semibold">{u.full_name || '—'}</Text>
+                          <Text fontSize="xs" color="gray.500">{u.username || ''}</Text>
+                        </Stack>
+                      </Flex>
+                    </Td>
 
-              <HStack spacing={3}>
-                <Text fontSize="sm">Page {page} / {totalPages} ({totalCount} users)</Text>
-                <Button size="sm" onClick={() => setPage(p => Math.max(1, p - 1))} isDisabled={page === 1}>Prev</Button>
-                <Button size="sm" onClick={() => setPage(p => Math.min(totalPages, p + 1))} isDisabled={page === totalPages}>Next</Button>
-              </HStack>
-            </Flex>
+                    <Td>{u.email}</Td>
+
+                    <Td>
+                      <Select
+                        size="sm"
+                        value={u.role || ''}
+                        onChange={(e) => handleInlineRoleChange(u.id, e.target.value)}
+                        width="160px"
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="weighbridge">Weighbridge</option>
+                        <option value="outgate">Outgate</option>
+                        <option value="customs">Customs</option>
+                        <option value="agent">Agent</option>
+                      </Select>
+                    </Td>
+
+                    <Td>{u.created_at ? new Date(u.created_at).toLocaleString() : '—'}</Td>
+
+                    <Td>
+                      <HStack spacing={2}>
+                        <Tooltip label="Edit">
+                          <Button size="sm" leftIcon={<EditIcon />} onClick={() => openEditUser(u)}>Edit</Button>
+                        </Tooltip>
+
+                        <Tooltip label="Delete">
+                          <Button size="sm" colorScheme="red" leftIcon={<DeleteIcon />} onClick={() => handleDeleteSingle(u.id, u.email)}>Delete</Button>
+                        </Tooltip>
+                      </HStack>
+                    </Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
           </Fade>
         )}
       </Box>
 
-      {/* Add/Edit Modal */}
-      <Modal isOpen={isOpen} onClose={handleCloseModal} initialFocusRef={initialRef} isCentered>
+      {/* bottom controls: bulk actions, pagination */}
+      <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
+        <HStack spacing={2}>
+          <Button size="sm" colorScheme="red" onClick={handleBulkDelete} isDisabled={selectedIds.size === 0} leftIcon={<DeleteIcon />}>
+            Delete Selected ({selectedIds.size})
+          </Button>
+
+          <Menu>
+            <MenuButton as={Button} size="sm">
+              Change role...
+            </MenuButton>
+            <MenuList>
+              {['admin', 'weighbridge', 'outgate', 'customs', 'agent'].map((r) => (
+                <MenuItem key={r} onClick={async () => {
+                  if (selectedIds.size === 0) {
+                    toast({ title: 'No users selected', status: 'info' });
+                    return;
+                  }
+                  const ids = Array.from(selectedIds);
+                  try {
+                    const { error } = await supabase.from('users').update({ role: r }).in('id', ids);
+                    if (error) throw error;
+                    setUsers((prev) => prev.map((u) => (selectedIds.has(u.id) ? { ...u, role: r } : u)));
+                    setSelectedIds(new Set());
+                    toast({ title: 'Roles updated', status: 'success' });
+                  } catch (err) {
+                    console.error('bulk role update', err);
+                    toast({ title: 'Update failed', description: err.message || String(err), status: 'error' });
+                  }
+                }}>{r}</MenuItem>
+              ))}
+            </MenuList>
+          </Menu>
+
+          <Button size="sm" onClick={() => downloadCSV(filteredSorted)} leftIcon={<DownloadIcon />}>Export filtered</Button>
+        </HStack>
+
+        <HStack spacing={2} align="center">
+          <Button size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} isDisabled={page === 1}>Previous</Button>
+
+          <Text>Page {page} of {totalPages}</Text>
+
+          <Button size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} isDisabled={page === totalPages}>Next</Button>
+        </HStack>
+      </Flex>
+
+      {/* Add / Edit modal */}
+      <Modal isOpen={isOpen} onClose={resetModal} initialFocusRef={initialRef} isCentered>
         <ModalOverlay />
         <ModalContent>
-          <ModalHeader>{form.id ? 'Edit User' : 'Add User'}</ModalHeader>
+          <ModalHeader>{isEditMode ? 'Edit user' : 'Add user'}</ModalHeader>
           <ModalCloseButton disabled={isSubmitting} />
-          <ModalBody pb={6}>
-            <form id="user-form" onSubmit={handleSubmit}>
+          <form id="user-form" onSubmit={handleSubmit}>
+            <ModalBody pb={6}>
               <FormControl isInvalid={!!errors.full_name} mb={3} isRequired>
                 <FormLabel>Full Name</FormLabel>
-                <Input ref={initialRef} name="full_name" placeholder="Full name" value={form.full_name} onChange={handleChange} disabled={isSubmitting} />
+                <Input ref={initialRef} name="full_name" value={form.full_name} onChange={handleChange} disabled={isSubmitting} />
                 <FormErrorMessage>{errors.full_name}</FormErrorMessage>
               </FormControl>
 
               <FormControl isInvalid={!!errors.email} mb={3} isRequired>
                 <FormLabel>Email</FormLabel>
-                <Input name="email" type="email" placeholder="Email address" value={form.email} onChange={handleChange} disabled={isSubmitting} />
+                <Input name="email" type="email" value={form.email} onChange={handleChange} disabled={isSubmitting} />
                 <FormErrorMessage>{errors.email}</FormErrorMessage>
               </FormControl>
 
               <FormControl isInvalid={!!errors.role} mb={3} isRequired>
                 <FormLabel>Role</FormLabel>
-                <Select name="role" placeholder="Select role" value={form.role} onChange={handleChange} disabled={isSubmitting}>
+                <Select name="role" value={form.role} onChange={handleChange} disabled={isSubmitting}>
+                  <option value="">Select role</option>
                   <option value="admin">Admin</option>
                   <option value="weighbridge">Weighbridge</option>
                   <option value="outgate">Outgate</option>
@@ -692,49 +743,27 @@ function UsersPage() {
 
               <FormControl isInvalid={!!errors.password} mb={3} isRequired={form.id === null}>
                 <FormLabel>Password</FormLabel>
-                <Input name="password" type={showPassword ? 'text' : 'password'} placeholder={form.id ? 'Leave blank to keep current password' : 'Password'} value={form.password} onChange={handleChange} disabled={isSubmitting} />
+                <InputGroup>
+                  <Input name="password" type={showPassword ? 'text' : 'password'} value={form.password} onChange={handleChange} disabled={isSubmitting} placeholder={isEditMode ? 'Leave blank to keep current' : 'Password'} />
+                  <InputRightElement width="3rem">
+                    <Button h="1.75rem" size="sm" onClick={() => setShowPassword((s) => !s)} tabIndex={-1}>
+                      {showPassword ? <ViewOffIcon /> : <ViewIcon />}
+                    </Button>
+                  </InputRightElement>
+                </InputGroup>
                 <FormErrorMessage>{errors.password}</FormErrorMessage>
-                <Button size="sm" variant="link" onClick={() => setShowPassword(s => !s)} mt={2}>{showPassword ? 'Hide' : 'Show'}</Button>
               </FormControl>
-            </form>
-          </ModalBody>
-          <ModalFooter>
-            <Button onClick={handleCloseModal} mr={3} disabled={isSubmitting}>Cancel</Button>
-            <Button colorScheme="teal" type="submit" form="user-form" isLoading={isSubmitting} isDisabled={isSubmitting || !form.full_name || !form.email || !form.role || (form.id === null && !form.password)}>
-              {form.id ? 'Update' : 'Add'}
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+            </ModalBody>
 
-      {/* Activity modal */}
-      <Modal isOpen={isActivityOpen} onClose={() => { setActivityRows([]); onActivityClose(); }} size="xl">
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Activity — {activityUser?.full_name ?? ''}</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            {activityRows.length === 0 ? (
-              <Text>No activity logged for this user.</Text>
-            ) : (
-              <Box>
-                {activityRows.map((r) => (
-                  <Box key={r.id} borderBottom="1px solid" borderColor="gray.100" py={2}>
-                    <Text fontWeight="semibold">{r.action}</Text>
-                    <Text fontSize="sm" color="gray.600">{r.details}</Text>
-                    <Text fontSize="xs" color="gray.400">{new Date(r.created_at).toLocaleString()}</Text>
-                  </Box>
-                ))}
-              </Box>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button onClick={() => { setActivityRows([]); onActivityClose(); }}>Close</Button>
-          </ModalFooter>
+            <ModalFooter>
+              <Button onClick={resetModal} mr={3} disabled={isSubmitting}>Cancel</Button>
+              <Button colorScheme="teal" type="submit" isLoading={isSubmitting}>
+                {isEditMode ? 'Update' : 'Add user'}
+              </Button>
+            </ModalFooter>
+          </form>
         </ModalContent>
       </Modal>
     </Box>
   );
 }
-
-export default UsersPage;
