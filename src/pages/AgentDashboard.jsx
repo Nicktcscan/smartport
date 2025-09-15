@@ -1,1120 +1,1734 @@
-// src/pages/WeighbridgeManagementPage.jsx
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+// src/pages/WeightReports.jsx
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
-  Box, Heading, Button, Input, FormControl, FormLabel, Table,
-  Thead, Tbody, Tr, Th, Td, useToast, Modal, ModalOverlay,
-  ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
-  useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, Switch, HStack
+  Box,
+  Heading,
+  Input as ChakraInput,
+  Button,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+  Text,
+  useToast,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalCloseButton,
+  ModalBody,
+  useDisclosure,
+  ModalFooter,
+  Stack,
+  Flex,
+  Icon,
+  SimpleGrid,
+  HStack,
+  FormControl,
+  FormLabel,
+  FormErrorMessage,
+  AlertDialog,
+  AlertDialogOverlay,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogBody,
+  AlertDialogFooter,
+  Tooltip,
+  Spinner,
+  Badge,
 } from '@chakra-ui/react';
-import { ViewIcon } from '@chakra-ui/icons';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowForwardIcon } from '@chakra-ui/icons';
+import {
+  FaFileInvoice,
+  FaFilePdf,
+  FaExternalLinkAlt,
+  FaDownload,
+  FaShareAlt,
+  FaEnvelope,
+  FaUserTie,
+  FaTruck,
+  FaBox,
+  FaBalanceScale,
+  FaTrashAlt,
+  FaEdit,
+  FaCheck,
+  FaRedo,
+} from 'react-icons/fa';
 
 import { supabase } from '../supabaseClient';
-import Tesseract from 'tesseract.js';
-import { pdfPageToBlobPdfjs } from '../utils/pdfUtils';
+import {
+  Document,
+  Page,
+  Text as PdfText,
+  View as PdfView,
+  StyleSheet,
+  pdf as pdfRender,
+  Image as PdfImage,
+} from '@react-pdf/renderer';
 
-const OCR_FUNCTION_URL = 'https://cgyjradpttmdancexdem.functions.supabase.co/ocr';
-const DEFAULT_PAGE_SIZE = 5;
+const MotionModalContent = motion.create(ModalContent);
 
-/**
- * Generate a unique ticket ID
- */
-export function generateTicketId(existingIds = []) {
-  const prefix = "TICKET-";
-  const existingSet = new Set(existingIds);
-  let num = 1;
-  while (existingSet.has(`${prefix}${num}`)) {
-    num++;
-  }
-  return `${prefix}${num}`;
-}
-
-/**
- * Local OCR using Tesseract.js
- */
-export async function extractWithTesseract(file, progressCallback = () => {}) {
-  const { createWorker } = Tesseract;
-  const worker = await createWorker({
-    logger: (m) => {
-      if (m.status === "recognizing text" && m.progress) {
-        progressCallback(m.progress);
-      }
-    },
-  });
-
-  await worker.loadLanguage("eng");
-  await worker.initialize("eng");
-
-  const { data: { text } } = await worker.recognize(file);
-  await worker.terminate();
-
-  return text;
-}
-
-/**
- * Main function to extract ticket data from a PDF or image
- */
-export async function extractTicketDataFromFile(
-  file,
-  progressCallback = () => {},
-  options = { useCloudOCR: true, useAlternativePdfConversion: false }
-) {
-  if (!file) throw new Error("No file provided for OCR");
-
-  progressCallback(0.05);
-  let text = "";
-
-  const convertPdf = async (pdfFile) => {
-    return await pdfPageToBlobPdfjs(pdfFile); // always use pdfPageToBlobPdfjs
-  };
-
-  if (options.useCloudOCR) {
-    const formData = new FormData();
-    let uploadFile = file;
-
-    if (file.type === "application/pdf") {
-      progressCallback(0.1);
-      uploadFile = await convertPdf(file);
-    }
-
-    formData.append("file", uploadFile, "ticket-page-1.png");
-
-    const resp = await fetch(OCR_FUNCTION_URL, { method: "POST", body: formData });
-    const json = await resp.json().catch(() => null);
-
-    if (!resp.ok) {
-      const msg = (json && (json.error || json.message)) || `OCR function returned status ${resp.status}`;
-      throw new Error(msg);
-    }
-
-    progressCallback(0.95);
-    text = json?.text || "";
-  } else {
-    let ocrFile = file;
-    if (file.type === "application/pdf") {
-      progressCallback(0.1);
-      ocrFile = await convertPdf(file);
-    }
-    text = await extractWithTesseract(ocrFile, progressCallback);
-  }
-
-  progressCallback(1);
-  return parseTicketText(text);
-}
-
-/**
- * Dummy parser function (replace with your real parsing logic)
- */
-function parseTicketText(text) {
-  return text.split("\n").map((line) => line.trim()).filter(Boolean);
-}
-
-/**
- * Debounce hook
- */
-export function useDebounce(value, delay) {
-  const [debouncedValue, setDebouncedValue] = useState(value);
-  useEffect(() => {
-    const handler = setTimeout(() => setDebouncedValue(value), delay);
-    return () => clearTimeout(handler);
-  }, [value, delay]);
-  return debouncedValue;
-}
-
-/**
- * OCR Component
- */
-export function OCRComponent({ onComplete }) {
-  const [file, setFile] = useState(null);
-  const [progress, setProgress] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const inputRef = useRef(null);
-
-  const reset = () => {
-    setFile(null);
-    setProgress(0);
-    onComplete?.(null, null);
-    if (inputRef.current) inputRef.current.value = '';
-  };
-
-  const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
-    setFile(selectedFile || null);
-    setProgress(0);
-    onComplete?.(null, null);
-  };
-
-  const trimTextBeforeNotes = (text) => {
-    const noteIndex = text.toLowerCase().indexOf('note');
-    return noteIndex !== -1 ? text.substring(0, noteIndex).trim() : text.trim();
-  };
-
-  const handleOCR = async () => {
-    if (!file) return alert('Please upload an image or PDF first.');
-    setLoading(true);
-    setProgress(0);
-
-    try {
-      let ocrFile = file;
-
-      if (file.type === "application/pdf") {
-        ocrFile = await pdfPageToBlobPdfjs(file); // use pdfPageToBlobPdfjs
-      }
-
-      const result = await Tesseract.recognize(ocrFile, 'eng', {
-        logger: (m) => m.status === 'recognizing text' && setProgress(Math.round(m.progress * 100)),
-      });
-
-      setProgress(100);
-      setLoading(false);
-      const trimmedText = trimTextBeforeNotes(result.data.text || '');
-      onComplete?.(file, trimmedText);
-    } catch (err) {
-      console.error('OCR error:', err);
-      alert(`Failed to extract text: ${err.message}`);
-      setLoading(false);
-      setProgress(0);
-      onComplete?.(file, null);
-    }
-  };
-
-  
-
-  return (
-    <Box border="1px" borderColor="gray.300" borderRadius="md" p={4} mb={4}>
-      <FormControl>
-        <FormLabel>Upload Image or PDF to Extract</FormLabel>
-        <Input type="file" accept="image/*,application/pdf" onChange={handleFileChange} ref={inputRef} />
-      </FormControl>
-      <Button mt={2} onClick={handleOCR} isLoading={loading} colorScheme="teal">
-        Run OCR Extractor
-      </Button>
-      {loading && <Progress mt={2} value={progress} />}
-    </Box>
-  );
-}
-
-/**
- * Helper to normalize key-value pairs
- */
-function parseExtractedText(text) {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const match = line.match(/^(.+?)\s*:\s*(.+)$/);
-      if (!match) return null;
-      let [key, value] = match;
-      key = key
-        .toLowerCase()
-        .split(' ')
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(' ');
-      value = value.replace(/\s+kg/i, 'kg').replace(/\s{2,}/g, ' ');
-      return { key, value };
-    })
-    .filter(Boolean);
-}
-
-
-// Main Page
-function WeighbridgeManagementPage() {
-  const toast = useToast();
-
-  // view modal disclosure for ticket viewing
-  const { isOpen: isViewOpen, onOpen: onViewOpen, onClose: onViewClose } = useDisclosure();
-  // confirm modal disclosure for submit confirmation
-  const { isOpen: isConfirmOpen, onOpen: onConfirmOpen, onClose: onConfirmClose } = useDisclosure();
-
-  const [formData, setFormData] = useState({
-    ticket_no: '', trailer_no: '', gnsw_truck_no: '', manual: '', anpr: '', wb_id: '', consignee: '', operation: '',
-    consolidated: '', driver: '', truck_on_wb: '', gross: '', tare: '', net: '', weight: '', sad_no: '',
-    container_no: '', material: '', pass_number: '', date: '', scale_name: '', operator: '', axles: ''
-  });
-
-  const [ocrFile, setOcrFile] = useState(null);
-  const [ocrText, setOcrText] = useState('');
-  const [extractedPairs, setExtractedPairs] = useState([]);
-  const [tickets, setTickets] = useState([]); // holds either page (server-side) or all tickets (client-side)
-  const [loadingTickets, setLoadingTickets] = useState(false);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const [useClientSidePagination, setUseClientSidePagination] = useState(false);
-  const [totalTickets, setTotalTickets] = useState(0);
-  const [editingTicket, setEditingTicket] = useState(null);
-  const [viewTicket, setViewTicket] = useState(null);
-  const [ticketToSubmit, setTicketToSubmit] = useState(null);
-
-  const debouncedOcrText = useDebounce(ocrText, 500);
-  const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
-
-function handleExtract(rawText) {
-  if (!rawText) {
-    setExtractedPairs([]);
-    return;
-  }
-
-  // --- Pre-clean OCR noise ---
-  rawText = rawText
-    .replace(/[\|~]+/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .replace(/\r?\n/g, '\n');
-
-  const patterns = {
-    ticket_no: /Ticket\s*(?:No\.?|#)?\s*[:\-]?\s*([\w\d\s]+)/i,
-    manual: /MANUAL\s*[:\-]?\s*([FALSEfalse]+)/i,
-    gnsw_truck_no: /GNSW\s*Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9]+)/i,
-    anpr: /ANPR\s*[:\-]?\s*([YESNOyesno]+)/i,
-    wb_id: /(?:WB|Weighbridge)\s*Id\s*[:\-]?\s*(WB\d+)/i,
-    consignee: /Consignee\s*[:\-]?\s*([\s\S]*?)(?=\s*Tare:|$)/i,
-    operation: /Operation\s*[:\-]?\s*([A-Z]+)/i,
-    consolidated: /Consolidated\s*[:\-]?\s*([YESNOyesno]+)/i,
-    driver: /Driver\s*[:\-]?\s*([^\n\r]+)/i,
-    truck_on_wb: /Truck\s*on\s*WB\s*[:\-]?\s*([\w\d]+)/i,
-    gross: /Gross\s*[:\-]?\s*([\d\s\w,]+)/i,
-    tare: /Tare:\s*\(PT\)\s*([\d,]+)\s*kg/i,
-    net: /Net\s*[:\-]?\s*([\d,]+)\s*kg/i,
-    sad_no: /SAD\s*No\.?\s*[:\-]?\s*(\d+)/i,
-    container_no: /Container\s*(?:No\.?|#)?\s*[:\-]?\s*([\w\d]+)/i,
-    material: /Material\s*[:\-]?\s*([^\n\r]+)/i,
-    pass_number: /Pass\s*Number\s*[:\-]?\s*(\d*)/i,
-    date: /(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i,
-    scale_name: /Scale\s*Name\s*[:\-]?\s*([A-Z0-9]+)/i,
-    operator: /Operator\s*[:\-]?\s*([^\n\r]+)/i,
-    axles: /Axles\s*[:\-]?\s*([\d.,\s]+kg)/i,
-  };
-
-  const extractedPairs = [];
-
-  for (const [key, regex] of Object.entries(patterns)) {
-    let val;
-    const match = rawText.match(regex);
-
-    if (match && match[1]) {
-      val = match[1].trim();
-
-      // --- Clean up messy OCR for weights ---
-    if (['gross', 'tare', 'net', 'weight'].includes(key)) {
-  const numMatch = String(val).match(/[\d,.]+/);
-  if (numMatch) val = parseFloat(numMatch[0].replace(/,/g, ''));
-}
-
-if (key === 'operator') {
-  // Grab last word only, which should be the operator's name
-  const parts = val.split(/\s+/);
-  val = parts[parts.length - 1].trim();
-}
-
-extractedPairs.forEach(pair => {
-  if (pair.key === 'scale_name') {
-    pair.value = 'WBRIDGE1'; // override whatever was detected
-  }
+// PDF styles (unchanged)
+const pdfStyles = StyleSheet.create({
+  page: {
+    paddingTop: 18,
+    paddingBottom: 36,
+    paddingHorizontal: 18,
+    fontSize: 10,
+    fontFamily: 'Helvetica',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  companyBlock: { flexDirection: 'column', marginLeft: 8 },
+  companyName: { fontSize: 14, fontWeight: 'bold' },
+  reportTitle: { fontSize: 12, fontWeight: 'bold', marginBottom: 6, textAlign: 'center' },
+  summaryBox: { marginBottom: 8, padding: 8, borderWidth: 1, borderColor: '#ddd' },
+  metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  tableHeader: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#333', paddingBottom: 6, marginBottom: 6 },
+  tableRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' },
+  colSad: { width: '10%', fontSize: 9 },
+  colTicket: { width: '10%', fontSize: 9 },
+  colTruck: { width: '14%', fontSize: 9 },
+  colDate: { width: '14%', fontSize: 9 },
+  colGross: { width: '10%', textAlign: 'right', fontSize: 9, paddingRight: 2 },
+  colTare: { width: '10%', textAlign: 'left', fontSize: 9, paddingRight: 2 },
+  colNet: { width: '10%', textAlign: 'left', fontSize: 9, paddingRight: 4 },
+  colOperator: { width: '12%', fontSize: 9, textAlign: 'left', paddingLeft: 2 },
+  colDriver: { width: '12%', fontSize: 9, textAlign: 'left', paddingLeft: 2 },
+  footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
+  logo: { width: 64, height: 64, objectFit: 'contain' },
 });
 
-// Force manual to always be false
-const manualIndex = extractedPairs.findIndex(p => p.key === 'manual');
-if (manualIndex > -1) {
-  extractedPairs[manualIndex].value = false;
-} else {
-  extractedPairs.push({ key: 'manual', value: false });
+// helper numeric formatting/parsing
+function numericValue(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const cleaned = String(v).replace(/[,\s]+/g, '').replace(/kg/i, '').trim();
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+function formatNumber(v) {
+  const n = numericValue(v);
+  if (n === null) return '';
+  return Number.isInteger(n) ? n.toLocaleString('en-US') : n.toFixed(2).toLocaleString('en-US');
 }
 
-// After extracting all fields
-const grossPair = extractedPairs.find(p => p.key === 'gross');
-if (grossPair) {
-  const weightPairIndex = extractedPairs.findIndex(p => p.key === 'weight');
-  if (weightPairIndex > -1) {
-    extractedPairs[weightPairIndex].value = grossPair.value;
-  } else {
-    extractedPairs.push({ key: 'weight', value: grossPair.value });
-  }
+function computeWeightsFromObj({ gross, tare, net }) {
+  let G = numericValue(gross);
+  let T = numericValue(tare);
+  let N = numericValue(net);
+
+  if ((G === null || G === undefined) && T !== null && N !== null) G = T + N;
+  if ((N === null || N === undefined) && G !== null && T !== null) N = G - T;
+  if ((T === null || T === undefined) && G !== null && N !== null) T = G - N;
+
+  return {
+    grossValue: G !== null ? G : null,
+    tareValue: T !== null ? T : null,
+    netValue: N !== null ? N : null,
+    grossDisplay: G !== null ? formatNumber(G) : '',
+    tareDisplay: T !== null ? formatNumber(T) : '',
+    netDisplay: N !== null ? formatNumber(N) : '',
+  };
 }
 
-      // --- Clean up ticket_no specifically ---
-      if (key === 'ticket_no') {
-        const fallback = rawText.match(/Ticket\s*(?:No\.?|#)?\s*[:\-]?\s*(.*)\nDate\s*Time/i);
-        if (fallback && fallback[1]) {
-          const numMatch = fallback[1].trim().match(/\d+/); // only first number
-          if (numMatch) val = numMatch[0];
-        }
-      }
+function parseTicketDate(raw) {
+  if (!raw) return null;
+  if (raw instanceof Date) return raw;
+  if (typeof raw === 'number') return new Date(raw);
+  const s = String(raw).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + 'T00:00:00');
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) return d;
+  const maybeNum = Number(s);
+  return !Number.isNaN(maybeNum) ? new Date(maybeNum) : null;
+}
 
-// --- Guaranteed Date extraction ---
-if (!extractedPairs.find(p => p.key === 'date')) {
-  const fallback = rawText.match(
-    /Date\s*Time\s*[:\-]?\s*[\r\n]*\s*([\d]{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i
+// PDF ticket row
+function PdfTicketRow({ ticket, operatorName }) {
+  const d = ticket.data || {};
+  const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
+
+  return (
+    <PdfView style={pdfStyles.tableRow}>
+      <PdfText style={pdfStyles.colSad}>{d.sadNo ?? 'N/A'}</PdfText>
+      <PdfText style={pdfStyles.colTicket}>{d.ticketNo ?? ticket.ticketId ?? 'N/A'}</PdfText>
+      <PdfText style={pdfStyles.colTruck}>{d.gnswTruckNo ?? d.anpr ?? 'N/A'}</PdfText>
+      <PdfText style={pdfStyles.colDate}>{d.date ? new Date(d.date).toLocaleString() : 'N/A'}</PdfText>
+      <PdfText style={pdfStyles.colGross}>{computed.grossDisplay || '0'}</PdfText>
+      <PdfText style={pdfStyles.colTare}>{computed.tareDisplay || '0'}</PdfText>
+      <PdfText style={pdfStyles.colNet}>{computed.netDisplay || '0'}</PdfText>
+      <PdfText style={pdfStyles.colDriver}>{d.driver ?? 'N/A'}</PdfText>
+      <PdfText style={pdfStyles.colOperator}>{operatorName ?? 'N/A'}</PdfText>
+    </PdfView>
   );
-  if (fallback && fallback[1]) {
-    extractedPairs.push({ key: 'date', value: fallback[1].trim() });
-  }
 }
 
-      // --- Clean up driver specifically ---
-      if (key === 'driver') {
-        val = val.replace(/\s*Truck\s*on\s*WB:.*$/i, '').trim();
-      }
+// Combined PDF document
+function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' }) {
+  const totalNet = tickets.reduce((sum, t) => {
+    const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+    return sum + (c.netValue || 0);
+  }, 0);
 
-      // --- Clean up messy OCR for other text fields ---
-      if (['consignee', 'container_no', 'material', 'operator', 'scale_name', 'wb_id'].includes(key)) {
-        val = String(val).split(/~~|\n/)[0].trim();
-      }
+  const numberOfTransactions = tickets.length;
+  const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
 
-      // Automatic numeric normalization
-      const numericVal = val.toString().replace(/,/g, '').replace(/\s*kg/i, '').trim();
-      if (!isNaN(numericVal) && numericVal !== '') val = parseFloat(numericVal);
+  // Manual entries
+  const manualEntries = tickets.filter(t => t.data.ticketNo?.startsWith('M-'));
+  const totalManualEntries = manualEntries.length;
+  const cumulativeManualNetWeight = manualEntries.reduce((sum, t) => {
+    const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+    return sum + (c.netValue || 0);
+  }, 0);
 
-      // Automatic boolean normalization
-      const boolCandidate = val.toString().toUpperCase();
-      if (['YES', 'NO'].includes(boolCandidate)) val = boolCandidate;
+  // Pagination
+  const rowsPerSubsequentPage = 20;
+  const firstPageCapacity = 14;
+  const firstPageTickets = tickets.slice(0, firstPageCapacity);
+  const remainingTickets = tickets.slice(firstPageCapacity);
 
-      if (val !== '') extractedPairs.push({ key, value: val });
-    }
+  const remainingPages = [];
+  for (let i = 0; i < remainingTickets.length; i += rowsPerSubsequentPage) {
+    remainingPages.push(remainingTickets.slice(i, i + rowsPerSubsequentPage));
+  }
 
-    // --- Fallbacks for critical fields ---
-    if (!match || val === '' || val == null) {
-      if (key === 'ticket_no') {
-        const fallback = rawText.match(/Ticket\s*(?:No\.?|#)?\s*[:\-]?\s*(.*)\nDate\s*Time/i);
-        if (fallback && fallback[1]) {
-          const numMatch = fallback[1].trim().match(/\d+/);
-          if (numMatch) extractedPairs.push({ key, value: numMatch[0] });
+  const TableHeader = () => (
+    <PdfView style={pdfStyles.tableHeader}>
+      <PdfText style={pdfStyles.colSad}>SAD No</PdfText>
+      <PdfText style={pdfStyles.colTicket}>Ticket No</PdfText>
+      <PdfText style={pdfStyles.colTruck}>Truck No</PdfText>
+      <PdfText style={pdfStyles.colDate}>Date</PdfText>
+      <PdfText style={pdfStyles.colGross}>Gross</PdfText>
+      <PdfText style={pdfStyles.colTare}>Tare</PdfText>
+      <PdfText style={pdfStyles.colNet}>Net</PdfText>
+      <PdfText style={pdfStyles.colDriver}>Driver</PdfText>
+      <PdfText style={pdfStyles.colOperator}>Operator</PdfText>
+    </PdfView>
+  );
+
+  return (
+    <Document>
+      <Page size="A4" style={pdfStyles.page}>
+        <PdfView style={pdfStyles.header}>
+          <PdfImage src={logoUrl} style={pdfStyles.logo} />
+          <PdfView style={pdfStyles.companyBlock}>
+            <PdfText style={pdfStyles.companyName}>NICK TC-SCAN (GAMBIA) LTD</PdfText>
+            <PdfText>WEIGHBRIDGE SITUATION REPORT</PdfText>
+          </PdfView>
+        </PdfView>
+
+        <PdfText style={pdfStyles.reportTitle}>WEIGHBRIDGE SITUATION REPORT</PdfText>
+
+        <PdfView style={pdfStyles.summaryBox}>
+          <PdfView style={pdfStyles.metaRow}>
+            <PdfText>SAD: {reportMeta.sad || 'N/A'}</PdfText>
+            <PdfText>DATE RANGE: {reportMeta.dateRangeText || 'All'}</PdfText>
+          </PdfView>
+
+          <PdfView style={pdfStyles.metaRow}>
+            <PdfText>START: {reportMeta.startTimeLabel || 'N/A'}</PdfText>
+            <PdfText>END: {reportMeta.endTimeLabel || 'N/A'}</PdfText>
+          </PdfView>
+
+          <PdfView style={pdfStyles.metaRow}>
+            <PdfText>NUMBER OF TRANSACTIONS: {numberOfTransactions}</PdfText>
+            <PdfText>TOTAL CUMULATIVE NET (KG): {formatNumber(String(totalNet))} KG</PdfText>
+          </PdfView>
+
+          <PdfView style={pdfStyles.metaRow}>
+            <PdfText>TOTAL MANUAL ENTRIES: {totalManualEntries}</PdfText>
+            <PdfText>CUMULATIVE NET (MANUAL) KG: {formatNumber(String(cumulativeManualNetWeight))}</PdfText>
+          </PdfView>
+
+          <PdfView style={pdfStyles.metaRow}>
+            <PdfText>Operator: {operatorName || 'N/A'}</PdfText>
+            <PdfText />
+          </PdfView>
+        </PdfView>
+
+        {firstPageTickets.length > 0 && (
+          <>
+            <TableHeader />
+            {firstPageTickets.map(t => (
+              <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />
+            ))}
+          </>
+        )}
+
+        <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
+      </Page>
+
+      {remainingPages.map((pageTickets, idx) => (
+        <Page key={`rem-${idx}`} size="A4" style={pdfStyles.page}>
+          <PdfText style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 8 }}>Ticket List</PdfText>
+          <TableHeader />
+          {pageTickets.map(t => (
+            <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />
+          ))}
+          <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
+        </Page>
+      ))}
+    </Document>
+  );
+}
+
+export default function WeightReports() {
+  // Search states
+  const [searchSAD, setSearchSAD] = useState('');
+  const [searchDriver, setSearchDriver] = useState('');
+  const [searchTruck, setSearchTruck] = useState('');
+
+  // Ticket arrays
+  const [originalTickets, setOriginalTickets] = useState([]); // full set returned for current SAD
+  const [filteredTickets, setFilteredTickets] = useState([]); // derived after filters (driver/truck/date/time)
+
+  // modal + editing + loading states
+  const [selectedTicket, setSelectedTicket] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const toast = useToast();
+  const modalRef = useRef();
+
+  // operator username and current user id
+  const [operatorName, setOperatorName] = useState('');
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  // edit state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editData, setEditData] = useState({});
+  const [editErrors, setEditErrors] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // delete confirmation AlertDialog
+  const {
+    isOpen: isDeleteOpen,
+    onOpen: onDeleteOpen,
+    onClose: onDeleteClose,
+  } = useDisclosure();
+  const cancelRef = useRef(); // for AlertDialog focus
+  const [deleting, setDeleting] = useState(false);
+
+  // pending delete (optimistic undo)
+  const [pendingDelete, setPendingDelete] = useState(null);
+
+  // audit logs
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
+  // Date/time filter state
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
+  const [timeFrom, setTimeFrom] = useState('');
+  const [timeTo, setTimeTo] = useState('');
+  const [reportMeta, setReportMeta] = useState({});
+
+  // fetch current user info to derive username and role
+  useEffect(() => {
+    let mounted = true;
+    const loadUser = async () => {
+      try {
+        let currentUser = null;
+        if (supabase.auth?.getUser) {
+          const { data, error } = await supabase.auth.getUser();
+          if (!error) currentUser = data?.user ?? null;
+        } else if (supabase.auth?.user) {
+          currentUser = supabase.auth.user();
         }
+
+        if (!currentUser) return;
+        if (mounted) setCurrentUserId(currentUser.id);
+
+        // fetch username + role from users table
+        const { data: userRow, error: userErr } = await supabase.from('users').select('username, role').eq('id', currentUser.id).maybeSingle();
+        const uname = userRow?.username || currentUser.email || currentUser.user_metadata?.full_name || '';
+        const role = (userRow && userRow.role) || '';
+        if (mounted) {
+          setOperatorName(uname);
+          setIsAdmin(String(role).toLowerCase() === 'admin');
+        }
+      } catch (err) {
+        console.warn('Failed to fetch current user info', err);
       }
-      if (key === 'driver') {
-        const fallback = rawText.match(/Driver\s*[:\-]?\s*([^\n]+)/i);
-        if (fallback && fallback[1]) extractedPairs.push({ key, value: fallback[1].trim().replace(/\s*Truck\s*on\s*WB:.*$/i, '') });
-      }
-    }
-  }
-
-  setExtractedPairs(extractedPairs);
-
-  // Fully adaptive form filling
-  const newFormData = { ...formData };
-  extractedPairs.forEach(({ key, value }) => {
-    newFormData[key] = value;
-  });
-  setFormData(newFormData);
-
-  toast({
-    title: 'Form populated from OCR',
-    status: 'success',
-    duration: 3000,
-    isClosable: true,
-  });
-}
-
-  // Initial empty form
-  const EMPTY_FORM = {
-    ticket_no: '',
-    trailer_no: '',
-    gnsw_truck_no: '',
-    manual: '',
-    anpr: '',
-    wb_id: '',
-    consignee: '',
-    operation: '',
-    consolidated: '',
-    driver: '',
-    truck_on_wb: '',
-    gross: '',
-    tare: '',
-    net: '',
-    total_weight: '',
-    sad_no: '',
-    container_no: '',
-    material: '',
-    pass_number: '',
-    date: '',
-    weight: '',
-    scale_name: '',
-    operator: '',
-    axles: '',
-  };
-
-  const numericFields = ['gross', 'tare', 'net', 'weight', 'total_weight'];
-
-  const normalizeEmpty = (val) => (val === '' || val === undefined || val === null ? null : val);
-
-  const uploadFileToSupabase = async (file) => {
-  if (!(file instanceof File)) {
-    throw new Error("uploadFileToSupabase: file must be a File object");
-  }
-
-  // Generate unique file name
-  const fileExt = file.name.split(".").pop();
-  const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.${fileExt}`;
-  const filePath = `uploads/${fileName}`;
-
-  // Upload file to Supabase storage
-  const { error: uploadError } = await supabase
-    .storage
-    .from("tickets")
-    .upload(filePath, file, {
-      cacheControl: "3600",
-      upsert: false, // prevent overwriting existing files
-    });
-
-  if (uploadError) throw uploadError;
-
-// Remove the erroneous insert here; file upload should not insert into "tickets"
-// The actual ticket insert is handled in saveTicket
-
-// No insert here; just upload file and return file info
-
-
-    const { data: publicData } = supabase
-      .storage
-      .from('tickets')
-      .getPublicUrl(filePath);
-
-    // store file_path so it's easy to reference later
-    return { file_name: filePath, file_url: publicData.publicUrl };
-  };
-
-  // ---------------------------
-  // Helpers for numeric formatting and computing weights
-  // ---------------------------
-  const isNumeric = (v) => {
-    if (v === '' || v === null || v === undefined) return false;
-    return !Number.isNaN(Number(String(v).toString().replace(/,/g, '')));
-  };
-
-  const numericValue = (v) => {
-    if (!isNumeric(v)) return null;
-    return Number(String(v).toString().replace(/,/g, ''));
-  };
-
-  const formatNumber = (val) => {
-    if (val === null || val === undefined || val === '') return '';
-    const n = numericValue(val);
-    if (n === null || Number.isNaN(n)) return String(val);
-    if (Number.isInteger(n)) {
-      return n.toLocaleString('en-US');
-    }
-    return Number(n.toFixed(2)).toLocaleString('en-US');
-  };
-
-  const computeWeightsFromObj = (obj) => {
-    // accepts object with gross, tare, net (may be under alternate names)
-    const rawGross = obj.gross ?? obj.gross_value ?? obj.total_weight ?? null;
-    const rawTare = obj.tare ?? obj.tare ?? obj.tare_value ?? null;
-    const rawNet = obj.net ?? obj.net ?? obj.net_value ?? null;
-
-    let G = numericValue(rawGross);
-    let T = numericValue(rawTare);
-    let N = numericValue(rawNet);
-
-    // compute missing field if two present
-    if ((G === null || G === undefined) && T !== null && N !== null) {
-      G = T + N;
-    }
-    if ((N === null || N === undefined) && G !== null && T !== null) {
-      N = G - T;
-    }
-    if ((T === null || T === undefined) && G !== null && N !== null) {
-      T = G - N;
-    }
-
-    return {
-      grossValue: Number.isFinite(G) ? G : null,
-      tareValue: Number.isFinite(T) ? T : null,
-      netValue: Number.isFinite(N) ? N : null,
-      grossDisplay: G === null || G === undefined ? '' : formatNumber(G),
-      tareDisplay: T === null || T === undefined ? '' : formatNumber(T),
-      netDisplay: N === null || N === undefined ? '' : formatNumber(N),
     };
-  };
+    loadUser();
+    fetchAuditLogs();
+    return () => { mounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // ---------------------------
-  // Fetch tickets - supports both server-side and client-side pagination
-  // ---------------------------
-  const fetchTickets = useCallback(async () => {
-    setLoadingTickets(true);
+  const fetchAuditLogs = async () => {
+    setLoadingAudit(true);
     try {
-      if (useClientSidePagination) {
-        // Fetch all tickets and page locally
-        const { data, error } = await supabase
-          .from("tickets")
-          .select("*")
-          .order("submitted_at", { ascending: false });
-
-        if (error) {
-          throw error;
-        }
-        const all = data || [];
-        setTickets(all);
-        setTotalTickets(all.length);
-        // ensure current page is within bounds
-        setCurrentPage((p) => {
-          const tp = Math.max(1, Math.ceil(all.length / pageSize) || 1);
-          return Math.min(p, tp);
-        });
+      const { data, error } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(20);
+      if (error) {
+        console.warn('audit fetch error', error);
+        setAuditLogs([]);
       } else {
-        // Server-side pagination using range
-        const start = (currentPage - 1) * pageSize;
-        const end = currentPage * pageSize - 1;
-        const { data, error, count } = await supabase
-          .from("tickets")
-          .select("*", { count: "exact" })
-          .order("submitted_at", { ascending: false })
-          .range(start, end);
-
-        if (error) {
-          throw error;
-        }
-        setTickets(data || []);
-        setTotalTickets(count || 0);
+        setAuditLogs(data || []);
       }
     } catch (err) {
-      console.error("Error fetching tickets:", err);
-      toast({
-        title: "Error fetching tickets",
-        description: err.message || String(err),
-        status: "error",
-        duration: 5000,
-        isClosable: true,
-      });
+      console.warn('audit fetch error', err);
+      setAuditLogs([]);
     } finally {
-      setLoadingTickets(false);
+      setLoadingAudit(false);
     }
-  }, [currentPage, pageSize, useClientSidePagination, toast]);
-
-  // Fetch when relevant dependencies change
-  useEffect(() => {
-    fetchTickets();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchTickets]);
-
-  // When page size changes, reset to page 1 and refetch (both modes)
-  useEffect(() => {
-    setCurrentPage(1);
-    fetchTickets();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageSize, useClientSidePagination]);
-
-  // displayedTickets: slice locally if using client-side pagination
-  const displayedTickets = useClientSidePagination
-    ? tickets.slice((currentPage - 1) * pageSize, currentPage * pageSize)
-    : tickets;
-
-  // handle changing page size
-  const handlePageSizeChange = (e) => {
-    const newSize = Number(e.target.value);
-    setPageSize(newSize);
   };
 
-  // toggle pagination mode
-  const handleTogglePaginationMode = (e) => {
-    setUseClientSidePagination(e.target.checked);
-    setCurrentPage(1);
+  // Utility: parse time to minutes
+  const parseTimeToMinutes = (timeStr) => {
+    if (!timeStr) return null;
+    const parts = timeStr.split(':');
+    if (parts.length < 2) return null;
+    const hh = parseInt(parts[0], 10);
+    const mm = parseInt(parts[1], 10);
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+    return hh * 60 + mm;
   };
 
-  // number buttons array
-  const pageNumbers = [];
-  for (let i = 1; i <= Math.max(1, Math.ceil(totalTickets / pageSize)); i++) {
-    pageNumbers.push(i);
-  }
-
-  // Handle view ticket modal
-  const handleView = (ticket) => {
-    setViewTicket(ticket);
-    onViewOpen();
+  const startOfDay = (d) => {
+    const dt = new Date(d);
+    dt.setHours(0, 0, 0, 0);
+    return dt;
+  };
+  const endOfDay = (d) => {
+    const dt = new Date(d);
+    dt.setHours(23, 59, 59, 999);
+    return dt;
   };
 
-  const fieldLabels = {
-    ticket_no: "Ticket No",
-    gnsw_truck_no: "Truck No",
-    driver: "Driver",
-    sad_no: "SAD No",
-    consignee: "Consignee",
-    gross: "Gross Weight",
-    tare: "Tare Weight",
-    net: "Net Weight",
-    status: "Status",
-    date: "Date",
-    file_url: "Attached PDF",
-  };
-
-
-  // ---------------------------
-  // Save ticket (computes missing weights before insert and maps fields)
-  // (kept unchanged — existing implementation)
-  // ---------------------------
-
-  const normalizeEmptyLocal = (val) => (val === '' || val === undefined || val === null ? null : val);
-
-const saveTicket = async (data) => {
-  // define submissionData right at the top
-  const submissionData = { ...data };
-
-  try {
-    // --- Step 1: Upload PDF if exists ---
-    if (ocrFile) {
-      const { file_name, file_url } = await uploadFileToSupabase(
-        ocrFile instanceof File ? ocrFile : new File([ocrFile], 'ticket.pdf', { type: 'application/pdf' })
-      );
-      submissionData.file_name = file_name;
-      submissionData.file_url = file_url;
-    } else {
-      submissionData.file_name = null;
-      submissionData.file_url = null;
+  // Centralized filtering pipeline:
+  // Start with originalTickets (set after SAD search), then apply driver/truck filters, then date/time filters.
+  const computeFilteredTickets = () => {
+    if (!originalTickets || originalTickets.length === 0) {
+      setFilteredTickets([]);
+      return;
     }
 
-    // --- Step 2: Compute weights ---
-    const computed = computeWeightsFromObj({
-      gross: submissionData.gross,
-      tare: submissionData.tare ?? submissionData.tare,
-      net: submissionData.net ?? submissionData.net,
-      weight: submissionData.weight,
-    });
+    let arr = [...originalTickets];
 
-    submissionData.gross = computed.grossValue ?? normalizeEmptyLocal(submissionData.gross);
-    submissionData.tare = computed.tareValue ?? normalizeEmptyLocal(submissionData.tare ?? submissionData.tare);
-    submissionData.net = computed.netValue ?? normalizeEmptyLocal(submissionData.net ?? submissionData.net);
+    // Driver filter (case-insensitive substring)
+    if (searchDriver && searchDriver.trim()) {
+      const q = searchDriver.trim().toLowerCase();
+      arr = arr.filter((t) => {
+        const drv = (t.data.driver || '').toString().toLowerCase();
+        return drv.includes(q);
+      });
+    }
 
-    submissionData.gross = normalizeEmptyLocal(submissionData.gross) ?? normalizeEmptyLocal(submissionData.weight);
+    // Truck filter (case-insensitive substring across columns)
+    if (searchTruck && searchTruck.trim()) {
+      const q = searchTruck.trim().toLowerCase();
+      arr = arr.filter((t) => {
+        const trucks = [
+          (t.data.gnswTruckNo || ''),
+          (t.data.truckOnWb || ''),
+          (t.data.anpr || ''),
+          (t.data.truckNo || ''),
+        ].map((s) => s.toString().toLowerCase());
+        return trucks.some((s) => s.includes(q));
+      });
+    }
 
-    numericFields.forEach((field) => {
-      let value = normalizeEmptyLocal(submissionData[field]);
-      if (value !== null) {
-        const num = Number(value);
-        value = isNaN(num) ? null : num;
+    // Date/time filtering (if present)
+    const hasDateRange = !!(dateFrom || dateTo);
+    const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
+    const tfMinutes = parseTimeToMinutes(timeFrom);
+    const ttMinutes = parseTimeToMinutes(timeTo);
+    const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
+    const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
+
+    arr = arr.filter((ticket) => {
+      const raw = ticket.data.date;
+      const ticketDate = parseTicketDate(raw);
+      if (!ticketDate) return false;
+
+      if (hasDateRange) {
+        let start = startDate ? startOfDay(startDate) : new Date(-8640000000000000);
+        let end = endDate ? endOfDay(endDate) : new Date(8640000000000000);
+
+        if (timeFrom) {
+          const tf = parseTimeToMinutes(timeFrom);
+          if (tf !== null) start.setHours(Math.floor(tf / 60), tf % 60, 0, 0);
+        }
+        if (timeTo) {
+          const tt = parseTimeToMinutes(timeTo);
+          if (tt !== null) end.setHours(Math.floor(tt / 60), tt % 60, 59, 999);
+        }
+
+        return ticketDate >= start && ticketDate <= end;
       }
-      submissionData[field] = value;
+
+      if (hasTimeRangeOnly) {
+        const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+        const fromM = tfMinutes !== null ? tfMinutes : 0;
+        const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
+        return ticketMinutes >= fromM && ticketMinutes <= toM;
+      }
+
+      return true;
     });
 
-    const gross = submissionData.gross;
-    const tare = submissionData.tare;
-    submissionData.total_weight =
-      typeof gross === "number" && typeof tare === "number" ? gross - tare : null;
+    setFilteredTickets(arr);
 
-    // --- Step 3: Insert into Supabase ---
-    const { error } = await supabase.from("tickets").insert([submissionData]);
+    // Update report meta (date range labels unchanged)
+    const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
+    const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
+    let dateRangeText = '';
+    if (dateFrom && dateTo) dateRangeText = `${dateFrom} → ${dateTo}`;
+    else if (dateFrom) dateRangeText = dateFrom;
+    else if (dateTo) dateRangeText = dateTo;
 
-    if (error) {
-      if (error.message?.toLowerCase().includes('tickets_ticket_no_key')) {
-        toast({
-          title: "Duplicate Ticket",
-          description: "This Ticket has already been processed. Kindly upload a new one, or contact App Support Team.",
-          status: "error",
-          duration: 7000,
-          isClosable: true,
-        });
+    setReportMeta((prev) => ({
+      ...prev,
+      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.date ? new Date(originalTickets[0].data.date).toLocaleDateString() : ''),
+      startTimeLabel: startLabel || prev.startTimeLabel || '',
+      endTimeLabel: endLabel || prev.endTimeLabel || '',
+    }));
+  };
+
+  // Initial SAD-only fetch. Driver/Truck filters are intentionally client-side and only shown after SAD search.
+  const handleGenerateReport = async () => {
+    if (!searchSAD.trim()) {
+      toast({ title: 'SAD required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*')
+        .ilike('sad_no', `%${searchSAD.trim()}%`)
+        .order('date', { ascending: true });
+
+      if (error) {
+        toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
+        setLoading(false);
         return;
       }
 
-      if (error.message?.toLowerCase().includes('row-level')) {
-        throw new Error(`${error.message}. Check your RLS policy or insert using a service role key.`);
+      const mappedTickets = (data || []).map((ticket) => ({
+        ticketId: ticket.ticket_id || ticket.id?.toString() || `${Math.random()}`,
+        data: {
+          sadNo: ticket.sad_no,
+          ticketNo: ticket.ticket_no,
+          date: ticket.date,
+          gnswTruckNo: ticket.gnsw_truck_no,
+          truckOnWb: ticket.truck_on_wb,
+          net: ticket.net ?? ticket.net_weight ?? null,
+          tare: ticket.tare ?? ticket.tare_pt ?? null,
+          gross: ticket.gross ?? null,
+          driver: ticket.driver || 'N/A',
+          consignee: ticket.consignee,
+          operator: ticket.operator,
+          status: ticket.status,
+          consolidated: ticket.consolidated,
+          containerNo: ticket.container_no,
+          passNumber: ticket.pass_number,
+          scaleName: ticket.scale_name,
+          anpr: ticket.truck_on_wb,
+          truckNo: ticket.truck_no, // possible additional field
+          fileUrl: ticket.file_url || null,
+        },
+      }));
+
+      // Set originalTickets and clear previous filters except report meta (we'll update it)
+      setOriginalTickets(mappedTickets);
+      // Build report meta summary
+      setReportMeta({
+        dateRangeText: mappedTickets.length > 0 ? (mappedTickets[0].data.date ? new Date(mappedTickets[0].data.date).toLocaleDateString() : '') : '',
+        startTimeLabel: '',
+        endTimeLabel: '',
+        sad: `SAD: ${searchSAD.trim()}`,
+      });
+
+      // Compute filteredTickets from pipeline (respects any existing driver/truck/date/time filters)
+      let arr = [...mappedTickets];
+      if (searchDriver && searchDriver.trim()) {
+        const q = searchDriver.trim().toLowerCase();
+        arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
+      }
+      if (searchTruck && searchTruck.trim()) {
+        const q = searchTruck.trim().toLowerCase();
+        arr = arr.filter((t) => {
+          const trucks = [
+            (t.data.gnswTruckNo || ''),
+            (t.data.truckOnWb || ''),
+            (t.data.anpr || ''),
+            (t.data.truckNo || ''),
+          ].map((s) => s.toString().toLowerCase());
+          return trucks.some((s) => s.includes(q));
+        });
       }
 
-      throw error;
-    }
+      // Apply date/time filter if set
+      const hasDateRange = !!(dateFrom || dateTo);
+      const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
+      const tfMinutes = parseTimeToMinutes(timeFrom);
+      const ttMinutes = parseTimeToMinutes(timeTo);
+      const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
+      const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
 
-    // --- Step 4: Refresh & reset ---
-    await fetchTickets();
-    setFormData(EMPTY_FORM);
-    setExtractedPairs([]);
-    setOcrText('');
-    setOcrFile(null);
+      arr = arr.filter((ticket) => {
+        const raw = ticket.data.date;
+        const ticketDate = parseTicketDate(raw);
+        if (!ticketDate) return false;
 
-    toast({
-      title: "Ticket saved",
-      description: "Your extracted ticket was saved successfully.",
-      status: "success",
-      duration: 3000,
-      isClosable: true,
-    });
-  } catch (err) {
-    toast({
-      title: "Error saving ticket",
-      description: err?.message || "An unexpected error occurred.",
-      status: "error",
-      duration: 7000,
-      isClosable: true,
-    });
-  }
-};
+        if (hasDateRange) {
+          let start = startDate ? startOfDay(startDate) : new Date(-8640000000000000);
+          let end = endDate ? endOfDay(endDate) : new Date(8640000000000000);
 
+          if (timeFrom) {
+            const tf = parseTimeToMinutes(timeFrom);
+            if (tf !== null) start.setHours(Math.floor(tf / 60), tf % 60, 0, 0);
+          }
+          if (timeTo) {
+            const tt = parseTimeToMinutes(timeTo);
+            if (tt !== null) end.setHours(Math.floor(tt / 60), tt % 60, 59, 999);
+          }
 
-  const clearExtractedData = () => {
-    setExtractedPairs([]);
-    setOcrText('');
-    setOcrFile(null);
-  };
+          return ticketDate >= start && ticketDate <= end;
+        }
 
-  // confirmation modal handlers (kept)
-  const cancelRef = useRef();
+        if (hasTimeRangeOnly) {
+          const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+          const fromM = tfMinutes !== null ? tfMinutes : 0;
+          const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
+          return ticketMinutes >= fromM && ticketMinutes <= toM;
+        }
 
-  const handleSubmitClick = (data) => {
-    setTicketToSubmit(data);
-    onConfirmOpen();
-  };
+        return true;
+      });
 
-  const handleConfirmSubmit = async () => {
-    onConfirmClose();
-    if (ticketToSubmit) {
-      await saveTicket(ticketToSubmit);
-      setTicketToSubmit(null);
+      setFilteredTickets(arr);
+    } catch (err) {
+      console.error('fetch error', err);
+      toast({ title: 'Error', description: err?.message || 'Unexpected error', status: 'error', duration: 4000 });
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleCancelSubmit = () => {
-    setTicketToSubmit(null);
-    onConfirmClose();
+  // Date/time apply -> recompute pipeline
+  const applyRange = () => {
+    computeFilteredTickets();
   };
 
+  const resetRange = () => {
+    setDateFrom('');
+    setDateTo('');
+    setTimeFrom('');
+    setTimeTo('');
+    computeFilteredTickets();
+    setReportMeta((prev) => ({ ...prev, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
+  };
+
+  // Driver/Truck apply -> recompute pipeline
+  const applyDriverTruckFilter = () => {
+    computeFilteredTickets();
+    // Update reportMeta.sad to include active filters
+    const driverSummary = searchDriver ? `, Driver: ${searchDriver}` : '';
+    const truckSummary = searchTruck ? `, Truck: ${searchTruck}` : '';
+    setReportMeta((prev) => ({ ...prev, sad: `SAD: ${searchSAD}${driverSummary}${truckSummary}` }));
+  };
+
+  const clearDriverTruckFilters = () => {
+    setSearchDriver('');
+    setSearchTruck('');
+    computeFilteredTickets();
+    setReportMeta((prev) => ({ ...prev, sad: `SAD: ${searchSAD}` }));
+  };
+
+  const clearAll = () => {
+    setSearchSAD('');
+    setSearchDriver('');
+    setSearchTruck('');
+    setOriginalTickets([]);
+    setFilteredTickets([]);
+    setReportMeta({});
+    setDateFrom('');
+    setDateTo('');
+    setTimeFrom('');
+    setTimeTo('');
+  };
+
+  const cumulativeNetWeight = useMemo(() => {
+    return filteredTickets.reduce((total, ticket) => {
+      const computed = computeWeightsFromObj({
+        gross: ticket.data.gross,
+        tare: ticket.data.tare,
+        net: ticket.data.net,
+      });
+      const net = computed.netValue || 0;
+      return total + net;
+    }, 0);
+  }, [filteredTickets]);
+
+  const openModalWithTicket = (ticket) => {
+    setSelectedTicket(ticket);
+    setIsEditing(false);
+    setEditData({});
+    setEditErrors({});
+    onOpen();
+  };
+
+  // PDF utilities
+  const generatePdfBlob = async (ticketsToRender = [], meta = {}, opName = '') => {
+    const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} operatorName={opName} />;
+    const asPdf = pdfRender(doc);
+    const blob = await asPdf.toBlob();
+    return blob;
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'No tickets to export', status: 'info', duration: 3000 });
+      return;
+    }
+    try {
+      setPdfGenerating(true);
+      const blob = await generatePdfBlob(filteredTickets, reportMeta, operatorName);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `SAD-${searchSAD || 'report'}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: 'Download started', status: 'success', duration: 3000 });
+    } catch (err) {
+      console.error('PDF generation failed', err);
+      toast({ title: 'PDF generation failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
+  const handleNativeShare = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'No tickets to share', status: 'info', duration: 3000 });
+      return;
+    }
+
+    if (!navigator || !navigator.canShare) {
+      toast({ title: 'Not supported', description: 'Native file sharing is not supported on this device/browser', status: 'warning', duration: 4000 });
+      return;
+    }
+
+    try {
+      setPdfGenerating(true);
+      const blob = await generatePdfBlob(filteredTickets, reportMeta, operatorName);
+      const file = new File([blob], `SAD-${searchSAD || 'report'}.pdf`, { type: 'application/pdf' });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `SAD ${searchSAD} Report`,
+          text: `Weighbridge report for SAD ${searchSAD} — ${filteredTickets.length} transactions.`,
+        });
+        toast({ title: 'Shared', status: 'success', duration: 3000 });
+      } else {
+        toast({ title: 'Share failed', description: 'Device does not support sharing files', status: 'warning', duration: 4000 });
+      }
+    } catch (err) {
+      console.error('Share error', err);
+      toast({ title: 'Share failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
+  const handleEmailComposer = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'No tickets to email', status: 'info', duration: 3000 });
+      return;
+    }
+
+    try {
+      setPdfGenerating(true);
+      const blob = await generatePdfBlob(filteredTickets, reportMeta, operatorName);
+      const url = URL.createObjectURL(blob);
+      const filename = `SAD-${searchSAD || 'report'}.pdf`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      const subject = encodeURIComponent(`Weighbridge Report for SAD ${searchSAD}`);
+      const body = encodeURIComponent(`Please find (or attach) the Weighbridge report for SAD ${searchSAD}.\n\nNumber of transactions: ${filteredTickets.length}\nCumulative net weight: ${formatNumber(String(cumulativeNetWeight))} KG\n\n(If your mail client does not auto-attach the PDF, please attach the downloaded file: ${filename})`);
+      window.location.href = `mailto:?subject=${subject}&body=${body}`;
+
+      toast({ title: 'Composer opened', description: 'PDF downloaded — attach to your email if not auto-attached', status: 'info', duration: 5000 });
+    } catch (err) {
+      console.error('Email/Download error', err);
+      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
+  // ---------- Edit / Delete with server-side RPC attempt & audit ----------
+  const isTicketEditable = (ticket) => {
+    const status = String(ticket?.data?.status || '').toLowerCase();
+    return status !== 'exited';
+  };
+
+  const startEditing = () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can edit tickets', status: 'warning', duration: 3000 });
+      return;
+    }
+    if (!isTicketEditable(selectedTicket)) {
+      toast({ title: 'Cannot edit', description: "This ticket has status 'Exited' and cannot be edited", status: 'warning', duration: 3000 });
+      return;
+    }
+    const d = selectedTicket.data || {};
+
+    // Optional: clean up driver/operator names
+    const operator = d.operator ? d.operator.replace(/^-+/, "").trim() : '';
+    const driverName = d.driver ? d.driver.replace(/^-+/, "").trim() : '';
+
+    setEditData({
+      consignee: d.consignee ?? '',
+      containerNo: d.containerNo ?? '',
+      operator: operator || '',
+      driver: driverName || '',
+      gross: d.gross ?? '',
+      tare: d.tare ?? '',
+      net: d.net ?? '',
+    });
+    setEditErrors({});
+    setIsEditing(true);
+  };
+
+  const cancelEditing = () => {
+    setIsEditing(false);
+    setEditErrors({});
+    setEditData({});
+  };
+
+  const handleEditChange = (field, val) => {
+    setEditData((p) => ({ ...p, [field]: val }));
+    setEditErrors((p) => {
+      const cp = { ...p };
+      delete cp[field];
+      return cp;
+    });
+  };
+
+  const validateEdit = () => {
+    const errs = {};
+    const g = numericValue(editData.gross);
+    const t = numericValue(editData.tare);
+    let n = numericValue(editData.net);
+
+    if (g === null) errs.gross = 'Invalid gross';
+    if (t === null) errs.tare = 'Invalid tare';
+    if (n === null) {
+      if (g !== null && t !== null) {
+        const computedNet = g - t;
+        if (!Number.isFinite(computedNet)) errs.net = 'Invalid net';
+        else n = computedNet;
+      } else {
+        errs.net = 'Invalid net';
+      }
+    }
+
+    // enforce gross > tare
+    if (g !== null && t !== null && !(g > t)) {
+      errs.gross = 'Gross must be greater than Tare';
+      errs.tare = 'Tare must be less than Gross';
+    }
+
+    setEditErrors(errs);
+    return Object.keys(errs).length === 0;
+  };
+
+  const saveEdits = async () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can save edits', status: 'warning', duration: 3000 });
+      return;
+    }
+    if (!validateEdit()) {
+      toast({ title: 'Validation error', description: 'Please correct fields before saving', status: 'error', duration: 3500 });
+      return;
+    }
+
+    setSavingEdit(true);
+    const before = selectedTicket;
+    const payload = {
+      consignee: editData.consignee || null,
+      container_no: editData.containerNo || null,
+      operator: editData.operator || null,
+    };
+
+    const g = numericValue(editData.gross);
+    const t = numericValue(editData.tare);
+    let n = numericValue(editData.net);
+    if ((n === null || n === undefined) && g !== null && t !== null) n = g - t;
+
+    payload.gross = g !== null ? g : null;
+    payload.tare = t !== null ? t : null;
+    payload.net = n !== null ? n : null;
+
+    try {
+      const ticketIdValue = selectedTicket.ticketId ?? selectedTicket.data.ticketNo ?? null;
+      if (!ticketIdValue) throw new Error('Missing ticket identifier');
+
+      // === Attempt RPC first (server-side enforced) ===
+      let usedRpc = false;
+      try {
+        // RPC function expected: admin_update_ticket(p_ticket_id text, p_gross numeric, p_tare numeric, p_net numeric, p_consignee text, p_container_no text, p_operator text)
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_update_ticket', {
+          p_ticket_id: ticketIdValue,
+          p_gross: payload.gross,
+          p_tare: payload.tare,
+          p_net: payload.net,
+          p_consignee: payload.consignee,
+          p_container_no: payload.container_no,
+          p_operator: payload.operator,
+          p_driver: payload.driver,
+        });
+        if (rpcErr) {
+          // If RPC not found or rejected, we'll fall back.
+          console.debug('admin_update_ticket rpc error / not available:', rpcErr.message || rpcErr);
+        } else {
+          usedRpc = true;
+        }
+      } catch (rpcCallErr) {
+        console.debug('RPC call failed (maybe function not defined)', rpcCallErr);
+      }
+
+      if (!usedRpc) {
+        // As a safety belt, re-check role on server-side (read users table) to make sure client isn't spoofing
+        const { data: roleRow, error: roleErr } = await supabase.from('users').select('role').eq('id', currentUserId).maybeSingle();
+        if (roleErr) throw roleErr;
+        const role = (roleRow && roleRow.role) || '';
+        if (String(role).toLowerCase() !== 'admin') {
+          throw new Error('Server role check failed — only admins may edit tickets');
+        }
+
+        // perform update via direct update (fallback)
+        let { error } = await supabase.from('tickets').update({
+          gross: payload.gross,
+          tare: payload.tare,
+          net: payload.net,
+          consignee: payload.consignee,
+          container_no: payload.container_no,
+          driver: payload.driver,
+          operator: payload.operator,
+        }).eq('ticket_id', ticketIdValue);
+        if (error) {
+          // fallback to ticket_no update
+          const fallback = await supabase.from('tickets').update({
+            gross: payload.gross,
+            tare: payload.tare,
+            net: payload.net,
+            consignee: payload.consignee,
+            container_no: payload.container_no,
+            driver: payload.driver,
+            operator: payload.operator,
+          }).eq('ticket_no', ticketIdValue);
+          if (fallback.error) throw fallback.error;
+        }
+      }
+
+      // Update local arrays and selectedTicket
+      const updatedTicket = {
+        ...selectedTicket,
+        data: {
+          ...selectedTicket.data,
+          consignee: payload.consignee,
+          containerNo: payload.container_no,
+          operator: payload.operator,
+          driver: payload.driver,
+          gross: payload.gross,
+          tare: payload.tare,
+          net: payload.net,
+        },
+      };
+
+      setOriginalTickets((prev) => prev.map((t) => (String(t.ticketId) === String(selectedTicket.ticketId) ? updatedTicket : t)));
+      setFilteredTickets((prev) => prev.map((t) => (String(t.ticketId) === String(selectedTicket.ticketId) ? updatedTicket : t)));
+      setSelectedTicket(updatedTicket);
+      setIsEditing(false);
+
+      // Insert audit log
+      try {
+        const auditEntry = {
+          action: 'update',
+          ticket_id: ticketIdValue,
+          ticket_no: selectedTicket.data?.ticketNo ?? null,
+          user_id: currentUserId || null,
+          username: operatorName || null,
+          details: JSON.stringify({ before: before.data || null, after: updatedTicket.data || null }),
+          created_at: new Date().toISOString(),
+        };
+        await supabase.from('audit_logs').insert([auditEntry]);
+        fetchAuditLogs();
+      } catch (auditErr) {
+        console.warn('Audit log insertion failed', auditErr);
+      }
+
+      toast({ title: 'Saved', description: 'Ticket updated', status: 'success', duration: 2500 });
+    } catch (err) {
+      console.error('Update failed', err);
+      toast({ title: 'Update failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  // delete flow: schedule deletion with undo (server RPC preferred)
+  const confirmDelete = () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 3000 });
+      return;
+    }
+    onDeleteOpen();
+  };
+
+  const performDelete = async () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 3000 });
+      onDeleteClose();
+      return;
+    }
+    onDeleteClose();
+
+    // Remove from UI immediately (optimistic)
+    const ticketToDelete = selectedTicket;
+    setOriginalTickets((prev) => prev.filter((t) => String(t.ticketId) !== String(ticketToDelete.ticketId)));
+    setFilteredTickets((prev) => prev.filter((t) => String(t.ticketId) !== String(ticketToDelete.ticketId)));
+    setSelectedTicket(null);
+
+    // schedule actual DB delete after delay (allow undo)
+    const DELAY = 8000;
+    const timeoutId = setTimeout(async () => {
+      // finalize delete -> remove from DB & insert audit entry (RPC preferred)
+      try {
+        const ticketIdValue = ticketToDelete.ticketId ?? ticketToDelete.data.ticketNo ?? null;
+        if (!ticketIdValue) throw new Error('Missing ticket identifier');
+
+        let usedRpc = false;
+        try {
+          const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_delete_ticket', {
+            p_ticket_id: ticketIdValue,
+          });
+          if (rpcErr) {
+            console.debug('admin_delete_ticket rpc error / not available:', rpcErr.message || rpcErr);
+          } else {
+            usedRpc = true;
+          }
+        } catch (rpcCallErr) {
+          console.debug('RPC delete call failed (maybe function not defined)', rpcCallErr);
+        }
+
+        if (!usedRpc) {
+          // server role check
+          const { data: roleRow, error: roleErr } = await supabase.from('users').select('role').eq('id', currentUserId).maybeSingle();
+          if (roleErr) throw roleErr;
+          const role = (roleRow && roleRow.role) || '';
+          if (String(role).toLowerCase() !== 'admin') {
+            throw new Error('Server role check failed — only admins may delete tickets');
+          }
+
+          // delete by ticket_id fallback to ticket_no
+          let { error } = await supabase.from('tickets').delete().eq('ticket_id', ticketIdValue);
+          if (error) {
+            const fallback = await supabase.from('tickets').delete().eq('ticket_no', ticketIdValue);
+            if (fallback.error) throw fallback.error;
+          }
+        }
+
+        // write audit log
+        try {
+          const auditEntry = {
+            action: 'delete',
+            ticket_id: ticketIdValue,
+            ticket_no: ticketToDelete.data?.ticketNo ?? null,
+            user_id: currentUserId || null,
+            username: operatorName || null,
+            details: JSON.stringify({ before: ticketToDelete.data || null }),
+            created_at: new Date().toISOString(),
+          };
+          await supabase.from('audit_logs').insert([auditEntry]);
+        } catch (auditErr) {
+          console.warn('Audit log insertion failed (delete finalize)', auditErr);
+        }
+
+        setPendingDelete((pd) => (pd && pd.ticket && String(pd.ticket.ticketId) === String(ticketToDelete.ticketId) ? null : pd));
+        fetchAuditLogs();
+        toast({ title: 'Deleted', description: `Ticket ${ticketToDelete.ticketId} deleted`, status: 'success', duration: 3000 });
+      } catch (err) {
+        console.error('Final delete failed', err);
+        // If DB deletion failed, restore item into UI
+        setOriginalTickets((prev) => [ticketToDelete, ...prev]);
+        setFilteredTickets((prev) => [ticketToDelete, ...prev]);
+        setPendingDelete(null);
+        toast({ title: 'Delete failed', description: err?.message || 'Could not delete ticket from server', status: 'error', duration: 6000 });
+      }
+    }, DELAY);
+
+    // store pending delete info for potential undo
+    setPendingDelete({ ticket: ticketToDelete, timeoutId });
+
+    // show undo toast
+    toast({
+      duration: DELAY,
+      isClosable: true,
+      position: 'top-right',
+      render: ({ onClose }) => (
+        <Box color="white" bg="red.500" p={3} borderRadius="md" boxShadow="md">
+          <HStack justify="space-between" align="center">
+            <Box>
+              <Text fontWeight="bold">Ticket deleted</Text>
+              <Text fontSize="sm">Ticket {ticketToDelete.ticketId} scheduled for deletion — <Text as="span" fontWeight="bold">Undo</Text> to restore.</Text>
+            </Box>
+            <HStack>
+              <Button
+                size="sm"
+                colorScheme="whiteAlpha"
+                onClick={() => {
+                  // undo: cancel timeout and restore
+                  clearTimeout(timeoutId);
+                  setOriginalTickets((prev) => [ticketToDelete, ...prev]);
+                  setFilteredTickets((prev) => [ticketToDelete, ...prev]);
+                  setPendingDelete(null);
+                  onClose();
+                  toast({ title: 'Restored', description: `Ticket ${ticketToDelete.ticketId} restored`, status: 'info', duration: 3000 });
+                }}
+              >
+                Undo
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => { clearTimeout(timeoutId); setPendingDelete(null); onClose(); }}>
+                Close
+              </Button>
+            </HStack>
+          </HStack>
+        </Box>
+      ),
+    });
+  };
+
+  // ---------- UI ----------
   return (
-    <Box p={6} maxWidth="1200px" mx="auto">
-      <Heading mb={4} textAlign="center">
-        OCR Ticket Reader
-      </Heading>
-
-      {/* OCR Extraction Section */}
-      <OCRComponent
-        onComplete={(file, text) => {
-          setOcrFile(file);
-          setOcrText(text || '');
-          handleExtract(text || '');
-        }}
-      />
-
-      {/* Controls: pagination mode and page size */}
-      <Flex align="center" gap={4} mb={4} flexWrap="wrap">
-        <HStack spacing={2}>
-          <FormLabel htmlFor="client-side-switch" mb={0} fontSize="sm">Client-side pagination</FormLabel>
-          <Switch id="client-side-switch" isChecked={useClientSidePagination} onChange={handleTogglePaginationMode} />
-        </HStack>
-
-        <FormControl maxW="160px">
-          <FormLabel fontSize="sm" mb={1}>Page size</FormLabel>
-          <Select value={pageSize} onChange={handlePageSizeChange} size="sm">
-            <option value={5}>5</option>
-            <option value={10}>10</option>
-            <option value={20}>20</option>
-          </Select>
-        </FormControl>
-
-        <Box flex="1" />
-
-        <Button colorScheme="blue" onClick={() => fetchTickets()} isLoading={loadingTickets} size="sm">
-          Refresh
-        </Button>
+    <Box p={6} maxW="1400px" mx="auto">
+      <Flex align="center" gap={4} mb={6}>
+        <Heading> SAD Report Generator </Heading>
+        {isAdmin && <Badge colorScheme="green">You are an admin</Badge>}
       </Flex>
 
-      {/* Extracted Data Table */}
-      {extractedPairs.length > 0 && (
-        <Box mb={4}>
-          <Heading size="md" mb={2}>
-            Extracted Data
-          </Heading>
-          <Box
-            maxHeight="200px"
-            overflowY="auto"
-            border="1px solid"
-            borderColor="gray.200"
-            borderRadius="md"
-            p={2}
-          >
-            <Table size="sm" variant="striped">
-              <Thead>
-                <Tr>
-                  <Th>Key</Th>
-                  <Th>Value</Th>
-                </Tr>
-              </Thead>
-              <Tbody>
-                {extractedPairs.map(({ key, value }) => (
-                  <Tr key={key}>
-                    <Td>{key}</Td>
-                    <Td>{value}</Td>
-                  </Tr>
-                ))}
-              </Tbody>
-            </Table>
-          </Box>
-          <Flex mt={2} gap={2}>
-            <Button
-              size="sm"
-              colorScheme="blue"
-              onClick={() =>
-                handleSubmitClick({
-                  ...formData,
-                  ...Object.fromEntries(extractedPairs.map(({ key, value }) => [key, value])),
-                })
-              }
-            >
-              Submit Extracted Ticket
-            </Button>
-          </Flex>
-        </Box>
-      )}
-
-      {/* PDF / Image Preview */}
-      {ocrFile && (
-        <Box mt={4}>
-          <Heading size="md" mb={2}>
-            Ticket Preview
-          </Heading>
-          {ocrFile.type === "application/pdf" ? (
-            <embed
-              src={URL.createObjectURL(ocrFile)}
-              type="application/pdf"
-              width="100%"
-              height="400px"
-            />
+      <Box mb={4}>
+        <SimpleGrid columns={[1, 3]} spacing={3} mb={3}>
+          <ChakraInput
+            placeholder="Type SAD No"
+            value={searchSAD}
+            onChange={(e) => setSearchSAD(e.target.value)}
+            isDisabled={loading || pdfGenerating}
+          />
+          {/* Driver & Truck inputs are shown ONLY after SAD search results exist */}
+          {originalTickets.length > 0 ? (
+            <>
+              <ChakraInput
+                placeholder="Driver Name (filter)"
+                value={searchDriver}
+                onChange={(e) => setSearchDriver(e.target.value)}
+                isDisabled={loading || pdfGenerating}
+              />
+              <ChakraInput
+                placeholder="Truck No (filter)"
+                value={searchTruck}
+                onChange={(e) => setSearchTruck(e.target.value)}
+                isDisabled={loading || pdfGenerating}
+              />
+            </>
           ) : (
-            <img
-              src={URL.createObjectURL(ocrFile)}
-              alt="Uploaded File"
-              style={{ maxWidth: "100%", borderRadius: "6px", border: "1px solid #ccc" }}
-            />
+            <>
+              <Box />
+              <Box />
+            </>
           )}
-        </Box>
-      )}
+        </SimpleGrid>
 
-      {/* Confirmation Modal */}
-      <Modal isOpen={isConfirmOpen} onClose={handleCancelSubmit} isCentered>
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Confirm Submission</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            Kindly confirm if you would like to send this Ticket to Outgate.
-          </ModalBody>
-          <ModalFooter>
-            <Button ref={cancelRef} onClick={handleCancelSubmit}>
-              Cancel
-            </Button>
-            <Button colorScheme="red" ml={3} onClick={handleConfirmSubmit}>
-              Confirm
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+        <Flex gap={3} align="center">
+          <Button
+            colorScheme="teal"
+            onClick={handleGenerateReport}
+            isLoading={loading}
+            loadingText="Searching..."
+            isDisabled={pdfGenerating}
+          >
+            Generate Report
+          </Button>
 
-      {/* Tickets History Table */}
-      <Box mt={8}>
-        <Heading size="md" mb={3}>Processed Tickets</Heading>
+          {/* Apply driver/truck filter only if driver/truck inputs visible */}
+          {originalTickets.length > 0 && (
+            <>
+              <Button
+                size="sm"
+                onClick={applyDriverTruckFilter}
+                isDisabled={loading || pdfGenerating}
+              >
+                Apply Driver/Truck Filter
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={clearDriverTruckFilters}
+                isDisabled={loading || pdfGenerating}
+              >
+                Clear Driver/Truck Filters
+              </Button>
+            </>
+          )}
 
-        {loadingTickets ? (
-          <Text>Loading tickets...</Text>
-        ) : displayedTickets.length === 0 ? (
-          <Text>No tickets found.</Text>
-        ) : (
-          <>
-            <Table variant="striped" colorScheme="teal" size="sm">
-              <Thead>
-                <Tr>
-                  <Th>Ticket No</Th>
-                  <Th>Truck No</Th>
-                  <Th>SAD No</Th>
-                  <Th>Gross (KG)</Th>
-                  <Th>Tare (KG)</Th>
-                  <Th>Net (KG)</Th>
-                  <Th>View</Th>
-                </Tr>
-              </Thead>
-              <Tbody>
-                {displayedTickets.map((t) => {
-                  // compute values using possible field names from DB
-                  const computed = computeWeightsFromObj({
-                    gross: t.gross,
-                    tare: t.tare ?? t.tare_pt ?? t.tare,
-                    net: t.net ?? t.net_weight ?? t.net,
-                  });
+          <Button
+            ml={3}
+            size="sm"
+            leftIcon={<FaRedo />}
+            onClick={clearAll}
+            isDisabled={loading || pdfGenerating}
+          >
+            Clear
+          </Button>
 
-                  return (
-                    <Tr key={t.id || t.ticket_id}>
-                      <Td>{t.ticket_no}</Td>
-                      <Td>{t.gnsw_truck_no}</Td>
-                      <Td>{t.sad_no}</Td>
-                      <Td>{computed.grossDisplay}</Td>
-                      <Td>{computed.tareDisplay}</Td>
-                      <Td>{computed.netDisplay}</Td>
-                      <Td>
-                        <IconButton
-                          icon={<ViewIcon />}
-                          aria-label={`View details of ticket ${t.ticket_no}`}
-                          onClick={() => handleView(t)}
-                          size="sm"
-                          colorScheme="teal"
-                        />
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </Tbody>
-            </Table>
-
-            {/* Pagination controls */}
-            <Flex justifyContent="space-between" alignItems="center" mt={4} gap={3} flexWrap="wrap">
-              <Flex gap={2} align="center">
-                <Button
-                  size="sm"
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  isDisabled={currentPage === 1 || loadingTickets}
-                >
-                  Previous
-                </Button>
-
-                {/* Numbered page buttons */}
-                <HStack spacing={1} ml={2}>
-                  {pageNumbers.map((n) => (
-                    <Button
-                      key={n}
-                      size="sm"
-                      onClick={() => setCurrentPage(n)}
-                      colorScheme={n === currentPage ? 'teal' : 'gray'}
-                      variant={n === currentPage ? 'solid' : 'outline'}
-                    >
-                      {n}
-                    </Button>
-                  ))}
-                </HStack>
-
-                <Button
-                  size="sm"
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  isDisabled={currentPage === totalPages || loadingTickets}
-                >
-                  Next
-                </Button>
-              </Flex>
-
-              <Text>
-                Page {currentPage} of {totalPages} ({totalTickets} tickets)
-              </Text>
-
-              <Box>
-                <Text fontSize="sm" color="gray.600" textAlign="right">
-                  {useClientSidePagination ? 'Client-side' : 'Server-side'} pagination
-                </Text>
-              </Box>
-            </Flex>
-          </>
-        )}
+          <Text ml="auto" fontSize="sm" color="gray.600">
+            Search SAD first — then you can filter by Driver or Truck. Results persist until you clear.
+          </Text>
+        </Flex>
       </Box>
 
-      {/* View Ticket Modal */}
-      <Modal isOpen={isViewOpen} onClose={onViewClose} size="lg" scrollBehavior="inside">
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>View Ticket</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            {viewTicket ? (
+      {filteredTickets.length > 0 ? (
+        <Box mt={6}>
+          <Text fontSize="lg" fontWeight="bold" mb={2}>
+            Report: {reportMeta?.sad || `SAD: ${searchSAD}`}
+          </Text>
+
+          {/* Total transactions display */}
+          <Text fontSize="sm" color="gray.600" mb={3}>
+            Total Transactions: <b>{filteredTickets.length}</b>
+          </Text>
+
+          <Box mb={4} border="1px solid" borderColor="gray.100" p={3} borderRadius="md">
+            <Text fontWeight="semibold" mb={2}>Filter by Date & Time Range</Text>
+            <SimpleGrid columns={[1, 4]} spacing={3} alignItems="end">
               <Box>
-                <SimpleGrid columns={[1, 2]} spacing={4}>
-                  {Object.entries(viewTicket).map(([key, value]) => {
-                    if (!fieldLabels[key]) return null;
-
-                    // Format weight fields for display and compute missing values
-                    if (key === 'gross' || key === 'tare' || key === 'net' || key === 'total_weight') {
-                      const computed = computeWeightsFromObj({
-                        gross: viewTicket.gross,
-                        tare: viewTicket.tare ?? viewTicket.tare_pt ?? viewTicket.tare,
-                        net: viewTicket.net ?? viewTicket.net_weight ?? viewTicket.net,
-                      });
-
-                      let display = value;
-                      if (key === 'gross') display = computed.grossDisplay;
-                      if (key === 'tare') display = computed.tareDisplay;
-                      if (key === 'net') display = computed.netDisplay;
-                      if (key === 'total_weight') {
-                        if (viewTicket.netValue !== undefined && viewTicket.netValue !== null) {
-                          display = formatNumber(viewTicket.total_weight);
-                        } else if (computed.grossValue !== null && computed.tareValue !== null) {
-                          display = formatNumber(computed.grossValue - computed.tareValue);
-                        } else {
-                          display = '';
-                        }
-                      }
-
-                      return (
-                        <Box
-                          key={key}
-                          p={3}
-                          borderWidth="1px"
-                          borderRadius="md"
-                          bg="gray.50"
-                          boxShadow="sm"
-                        >
-                          <Text fontWeight="semibold" color="teal.600" mb={1}>
-                            {fieldLabels[key]}
-                          </Text>
-                          {key === "file_url" && value ? (
-                            <Button
-                              as="a"
-                              href={value}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              colorScheme="teal"
-                              size="sm"
-                            >
-                              Open PDF
-                            </Button>
-                          ) : (
-                            <Text fontSize="md" color="gray.700">
-                              {display !== null && display !== undefined && display !== '' ? display.toString() : 'N/A'}
-                            </Text>
-                          )}
-                        </Box>
-                      );
-                    }
-
-                    return (
-                      <Box
-                        key={key}
-                        p={3}
-                        borderWidth="1px"
-                        borderRadius="md"
-                        bg="gray.50"
-                        boxShadow="sm"
-                      >
-                        <Text fontWeight="semibold" color="teal.600" mb={1}>
-                          {fieldLabels[key]}
-                        </Text>
-                        {key === "file_url" && value ? (
-                          <Button
-                            as="a"
-                            href={value}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            colorScheme="teal"
-                            size="sm"
-                          >
-                            Open PDF
-                          </Button>
-                        ) : (
-                          <Text fontSize="md" color="gray.700">
-                            {value !== null && value !== undefined && value !== '' ? value.toString() : 'N/A'}
-                          </Text>
-                        )}
-                      </Box>
-                    );
-                  })}
-                </SimpleGrid>
-                <Box mt={6} p={3} borderTop="1px" borderColor="gray.200">
-                  <Text fontWeight="bold" color="teal.600">
-                    Submitted At:
-                  </Text>
-                  <Text>
-                    {viewTicket.submitted_at ? new Date(viewTicket.submitted_at).toLocaleString() : 'N/A'}
-                  </Text>
-                </Box>
+                <Text fontSize="sm" mb={1}>Date From</Text>
+                <ChakraInput type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} isDisabled={loading || pdfGenerating} />
               </Box>
+              <Box>
+                <Text fontSize="sm" mb={1}>Date To</Text>
+                <ChakraInput type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} isDisabled={loading || pdfGenerating} />
+              </Box>
+              <Box>
+                <Text fontSize="sm" mb={1}>Time From</Text>
+                <ChakraInput type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} isDisabled={loading || pdfGenerating} />
+              </Box>
+              <Box>
+                <Text fontSize="sm" mb={1}>Time To</Text>
+                <ChakraInput type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} isDisabled={loading || pdfGenerating} />
+              </Box>
+            </SimpleGrid>
+
+            <Flex mt={3} gap={2} align="center">
+              <Button size="sm" colorScheme="blue" onClick={applyRange} isDisabled={loading || pdfGenerating}>Apply Range</Button>
+              <Button size="sm" variant="ghost" onClick={resetRange} isDisabled={loading || pdfGenerating}>Reset Range</Button>
+
+              <HStack ml="auto" spacing={2}>
+                <Button leftIcon={<FaDownload />} colorScheme="gray" size="sm" onClick={handleDownloadPdf} isLoading={pdfGenerating}>
+                  Download PDF
+                </Button>
+
+                <Button leftIcon={<FaShareAlt />} colorScheme="blue" size="sm" onClick={handleNativeShare} isLoading={pdfGenerating}>
+                  Share (Native)
+                </Button>
+
+                <Button leftIcon={<FaEnvelope />} colorScheme="green" size="sm" onClick={handleEmailComposer} isLoading={pdfGenerating}>
+                  Email (Composer)
+                </Button>
+              </HStack>
+            </Flex>
+
+            <Text ml={2} mt={2} fontSize="sm" color="gray.600">
+              Tip: Use the date/time range to narrow your shift; then download or share the PDF.
+            </Text>
+          </Box>
+
+          <Table variant="striped" colorScheme="teal" size="sm">
+            <Thead>
+              <Tr>
+                <Th>SAD No</Th>
+                <Th>Ticket No</Th>
+                <Th>Date & Time</Th>
+                <Th>Truck No</Th>
+                <Th>Gross (kg)</Th>
+                <Th>Tare (kg)</Th>
+                <Th>Net (kg)</Th>
+                <Th>Driver</Th>
+                <Th>Actions</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {filteredTickets.map((ticket) => {
+                const computed = computeWeightsFromObj({
+                  gross: ticket.data.gross,
+                  tare: ticket.data.tare,
+                  net: ticket.data.net,
+                });
+
+                // driver fallback and truck fallback across columns
+                const displayDriver = ticket.data.driver || 'N/A';
+                const displayTruck =
+                  ticket.data.gnswTruckNo ||
+                  ticket.data.truckOnWb ||
+                  ticket.data.anpr ||
+                  ticket.data.truckNo ||
+                  'N/A';
+
+                return (
+                  <Tr key={ticket.ticketId} _hover={{ bg: 'teal.50', cursor: 'pointer' }}>
+                    <Td>{ticket.data.sadNo}</Td>
+                    <Td>{ticket.data.ticketNo}</Td>
+                    <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
+                    <Td>{displayTruck}</Td>
+                    <Td>{computed.grossDisplay || '0'}</Td>
+                    <Td>{computed.tareDisplay || '0'}</Td>
+                    <Td>{computed.netDisplay || '0'}</Td>
+                    <Td>{displayDriver}</Td>
+                    <Td>
+                      <Flex gap={2} align="center">
+                        <Button
+                          size="sm"
+                          colorScheme="teal"
+                          variant="outline"
+                          onClick={() => openModalWithTicket(ticket)}
+                          leftIcon={<ArrowForwardIcon />}
+                        >
+                          View More
+                        </Button>
+
+                        {ticket.data.fileUrl ? (
+                          <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
+                            Open Ticket
+                          </Button>
+                        ) : null}
+                      </Flex>
+                    </Td>
+                  </Tr>
+                );
+              })}
+
+              <Tr fontWeight="bold" bg="teal.100">
+                <Td colSpan={6}>Cumulative Net Weight</Td>
+                <Td>{formatNumber(cumulativeNetWeight) || '0'} kg</Td>
+                <Td colSpan={2}></Td>
+              </Tr>
+            </Tbody>
+          </Table>
+
+          {/* Audit logs panel */}
+          <Box mt={6} p={4} borderRadius="md" border="1px solid" borderColor="gray.100" bg="white">
+            <Flex align="center" mb={3}>
+              <Heading size="sm">Recent Audit Logs</Heading>
+              {/* Hide fetch button for non-admins */}
+              {isAdmin && (
+                <Button size="sm" ml="auto" onClick={fetchAuditLogs} leftIcon={<FaRedo />}>
+                  Refresh
+                </Button>
+              )}
+            </Flex>
+
+            {loadingAudit ? (
+              <Flex align="center" justify="center" p={4}><Spinner /></Flex>
+            ) : auditLogs.length === 0 ? (
+              <Text fontSize="sm" color="gray.500">No audit logs yet.</Text>
             ) : (
-              <Text>No data to display.</Text>
+              <Table size="sm" variant="simple">
+                <Thead>
+                  <Tr>
+                    <Th>When</Th>
+                    <Th>User</Th>
+                    <Th>Action</Th>
+                    <Th>Ticket</Th>
+                    <Th>Details</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {auditLogs.map((a) => (
+                    <Tr key={a.id || `${a.ticket_id}-${a.created_at}`}>
+                      <Td>{a.created_at ? new Date(a.created_at).toLocaleString() : '—'}</Td>
+                      <Td>{a.username ?? a.user_id ?? '—'}</Td>
+                      <Td>{a.action}</Td>
+                      <Td>{a.ticket_no ?? a.ticket_id ?? '—'}</Td>
+                      <Td style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {a.details ? a.details : '—'}
+                      </Td>
+                    </Tr>
+                  ))}
+                </Tbody>
+              </Table>
             )}
-          </ModalBody>
-          <ModalFooter>
-            <Button onClick={onViewClose}>Close</Button>
-          </ModalFooter>
-        </ModalContent>
+          </Box>
+        </Box>
+      ) : (
+        !loading &&
+        (searchSAD || searchDriver || searchTruck) && (
+          <Text mt={6} fontStyle="italic">
+            No records found for:
+            <Text as="span" fontWeight="bold"> {reportMeta?.sad || [searchSAD, searchDriver, searchTruck].filter(Boolean).join(', ')}</Text>
+          </Text>
+        )
+      )}
+
+      {/* Ticket Details Modal */}
+      <Modal
+        isOpen={isOpen}
+        onClose={() => {
+          onClose();
+          setIsEditing(false);
+          setEditData({});
+          setEditErrors({});
+        }}
+        size="lg"
+        scrollBehavior="inside"
+        isCentered
+      >
+        <ModalOverlay />
+        <AnimatePresence>
+          {isOpen && (
+            <MotionModalContent
+              ref={modalRef}
+              borderRadius="lg"
+              p={4}
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 30 }}
+              transition={{ duration: 0.25 }}
+            >
+              <ModalHeader>
+                <Flex align="center" gap={3}>
+                  <Icon as={FaFileInvoice} color="teal.500" boxSize={5} />
+                  <Box>
+                    <Text fontWeight="bold">Ticket Details</Text>
+                    <Text fontSize="sm" fontWeight="normal" color="gray.500">
+                      {selectedTicket?.ticketId} •{' '}
+                      {selectedTicket?.data?.date
+                        ? new Date(selectedTicket.data.date).toLocaleString()
+                        : ''}
+                    </Text>
+                  </Box>
+                </Flex>
+              </ModalHeader>
+              <ModalCloseButton />
+              <ModalBody>
+                {selectedTicket ? (
+                  <Stack spacing={3} fontSize="sm">
+                    <HStack>
+                      <Icon as={FaTruck} />
+                      <Text>
+                        <b>Truck No:</b>{' '}
+                        {selectedTicket.data.gnswTruckNo ||
+                         selectedTicket.data.truckOnWb ||
+                         selectedTicket.data.anpr ||
+                         selectedTicket.data.truckNo ||
+                         'N/A'}
+                      </Text>
+                    </HStack>
+
+                    {isEditing ? (
+                      <>
+                        <FormControl isInvalid={!!editErrors.operator}>
+                          <FormLabel>
+                            <Icon as={FaUserTie} mr={2} /> Operator
+                          </FormLabel>
+                          <ChakraInput
+                            value={editData.operator ?? ''}
+                            onChange={(e) => handleEditChange('operator', e.target.value)}
+                          />
+                          <FormErrorMessage>{editErrors.operator}</FormErrorMessage>
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel>
+                            <Icon as={FaBox} mr={2} /> Consignee
+                          </FormLabel>
+                          <ChakraInput
+                            value={editData.consignee ?? ''}
+                            onChange={(e) => handleEditChange('consignee', e.target.value)}
+                          />
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel>
+                            <Icon as={FaBox} mr={2} /> Container No
+                          </FormLabel>
+                          <ChakraInput
+                            value={editData.containerNo ?? ''}
+                            onChange={(e) => handleEditChange('containerNo', e.target.value)}
+                          />
+                        </FormControl>
+
+                        <SimpleGrid columns={[1, 3]} spacing={3}>
+                          <FormControl isInvalid={!!editErrors.gross}>
+                            <FormLabel>
+                              <Icon as={FaBalanceScale} mr={2} /> Gross (kg)
+                            </FormLabel>
+                            <ChakraInput
+                              value={editData.gross ?? ''}
+                              onChange={(e) => handleEditChange('gross', e.target.value)}
+                            />
+                            <FormErrorMessage>{editErrors.gross}</FormErrorMessage>
+                          </FormControl>
+                          <FormControl isInvalid={!!editErrors.tare}>
+                            <FormLabel>
+                              <Icon as={FaBalanceScale} mr={2} /> Tare (kg)
+                            </FormLabel>
+                            <ChakraInput
+                              value={editData.tare ?? ''}
+                              onChange={(e) => handleEditChange('tare', e.target.value)}
+                            />
+                            <FormErrorMessage>{editErrors.tare}</FormErrorMessage>
+                          </FormControl>
+                          <FormControl isInvalid={!!editErrors.net}>
+                            <FormLabel>
+                              <Icon as={FaBalanceScale} mr={2} /> Net (kg)
+                            </FormLabel>
+                            <ChakraInput
+                              value={
+                                editData.net ??
+                                (numericValue(editData.gross) !== null &&
+                                numericValue(editData.tare) !== null
+                                  ? String(
+                                      numericValue(editData.gross) - numericValue(editData.tare)
+                                    )
+                                  : '')
+                              }
+                              onChange={(e) => handleEditChange('net', e.target.value)}
+                            />
+                            <FormErrorMessage>{editErrors.net}</FormErrorMessage>
+                          </FormControl>
+                        </SimpleGrid>
+                      </>
+                    ) : (
+                      <>
+                        <HStack>
+                          <Icon as={FaUserTie} />
+                          <Text>
+                            <b>Operator:</b> {operatorName || selectedTicket.data.operator || 'N/A'}
+                          </Text>
+                        </HStack>
+
+                        <HStack>
+                          <Icon as={FaBox} />
+                          <Text>
+                            <b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}
+                          </Text>
+                        </HStack>
+
+                        {(() => {
+                          const computed = computeWeightsFromObj({
+                            gross: selectedTicket.data.gross,
+                            tare: selectedTicket.data.tare,
+                            net: selectedTicket.data.net,
+                          });
+                          return (
+                            <>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text>
+                                  <b>Gross Weight:</b> {computed.grossDisplay || '0'} kg
+                                </Text>
+                              </HStack>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text>
+                                  <b>Tare Weight:</b> {computed.tareDisplay || '0'} kg
+                                </Text>
+                              </HStack>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text>
+                                  <b>Net Weight:</b> {computed.netDisplay || '0'} kg
+                                </Text>
+                              </HStack>
+                            </>
+                          );
+                        })()}
+                      </>
+                    )}
+
+                    <HStack>
+                      <Icon as={FaBox} />
+                      <Text>
+                        <b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}
+                      </Text>
+                    </HStack>
+                    <HStack>
+                      <Text>
+                        <b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}
+                      </Text>
+                    </HStack>
+
+                    {/* Open Ticket PDF Button */}
+                    {selectedTicket.data.fileUrl && (
+                      <Box pt={2}>
+                        <Button
+                          size="sm"
+                          colorScheme="blue"
+                          onClick={() =>
+                            window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')
+                          }
+                          leftIcon={<FaExternalLinkAlt />}
+                        >
+                          Open Stored Ticket PDF
+                        </Button>
+                      </Box>
+                    )}
+                  </Stack>
+                ) : (
+                  <Text>No data</Text>
+                )}
+              </ModalBody>
+              <ModalFooter>
+                {/* Admin-only Edit/Delete controls */}
+                {selectedTicket && !isEditing && (
+                  <>
+                    {isAdmin ? (
+                      isTicketEditable(selectedTicket) ? (
+                        <Button
+                          leftIcon={<FaEdit />}
+                          colorScheme="yellow"
+                          mr={2}
+                          onClick={startEditing}
+                        >
+                          Edit
+                        </Button>
+                      ) : (
+                        <Tooltip label="Cannot edit tickets with status 'Exited'">
+                          <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>
+                            Edit
+                          </Button>
+                        </Tooltip>
+                      )
+                    ) : (
+                      <Tooltip label="Admin only">
+                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>
+                          Edit
+                        </Button>
+                      </Tooltip>
+                    )}
+
+                    {isAdmin ? (
+                      <Button
+                        leftIcon={<FaTrashAlt />}
+                        colorScheme="red"
+                        mr={2}
+                        onClick={confirmDelete}
+                      >
+                        Delete
+                      </Button>
+                    ) : (
+                      <Tooltip label="Admin only">
+                        <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>
+                          Delete
+                        </Button>
+                      </Tooltip>
+                    )}
+                  </>
+                )}
+
+                {isEditing && (
+                  <>
+                    <Button
+                      leftIcon={<FaCheck />}
+                      colorScheme="green"
+                      mr={2}
+                      onClick={saveEdits}
+                      isLoading={savingEdit}
+                    >
+                      Save
+                    </Button>
+                    <Button variant="ghost" mr={2} onClick={cancelEditing}>
+                      Cancel
+                    </Button>
+                  </>
+                )}
+
+                <Button
+                  onClick={() => {
+                    onClose();
+                    setIsEditing(false);
+                    setEditData({});
+                    setEditErrors({});
+                  }}
+                >
+                  Close
+                </Button>
+              </ModalFooter>
+            </MotionModalContent>
+          )}
+        </AnimatePresence>
       </Modal>
 
+      {/* Delete confirmation AlertDialog */}
+      <AlertDialog
+        isOpen={isDeleteOpen}
+        leastDestructiveRef={cancelRef}
+        onClose={onDeleteClose}
+        isCentered
+      >
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">
+              Delete Ticket
+            </AlertDialogHeader>
+
+            <AlertDialogBody>
+              Are you sure you want to delete ticket <b>{selectedTicket?.ticketId}</b>? It will be
+              removed from the list and scheduled for deletion. You can undo for a few seconds.
+            </AlertDialogBody>
+
+            <AlertDialogFooter>
+              <Button ref={cancelRef} onClick={onDeleteClose} isDisabled={deleting}>
+                Cancel
+              </Button>
+              <Button colorScheme="red" onClick={performDelete} ml={3} isLoading={deleting}>
+                Delete
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
     </Box>
   );
 }
-
-export default WeighbridgeManagementPage;
