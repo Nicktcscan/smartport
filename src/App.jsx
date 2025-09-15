@@ -1,7 +1,7 @@
 // src/App.jsx
 import React from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
-import { Box } from '@chakra-ui/react';
+import { Box, Center, Spinner, Text } from '@chakra-ui/react';
 import { useAuth } from './context/AuthContext';
 
 import Layout from './components/Layout';
@@ -39,7 +39,6 @@ import CustomsNotifications from './pages/customs/CustomsNotifications';
 import OCRComponent from './components/OCRComponent';
 import AgentDashboard from './pages/AgentDashboard';
 
-
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
@@ -63,8 +62,22 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
 };
 
 function App() {
-  const { user } = useAuth();
+  const { user, loading } = useAuth();
   const location = useLocation();
+
+  // While AuthContext is determining session, show a centered loading spinner.
+  // This avoids rendering routes while `user` is still being initialized and prevents the
+  // flicker between login and dashboard.
+  if (loading) {
+    return (
+      <Center minH="100vh" bg="gray.50" p={4}>
+        <Box textAlign="center">
+          <Spinner size="xl" thickness="4px" color="teal.500" />
+          <Text mt={3} fontSize="md" color="gray.600">Checking session…</Text>
+        </Box>
+      </Center>
+    );
+  }
 
   // Helper to detect if path is a static asset (file extensions)
   const isStaticAsset = location.pathname.match(/\.(js|css|png|jpg|jpeg|gif|ico|json|svg|txt|woff|woff2|ttf|eot|map)$/);
