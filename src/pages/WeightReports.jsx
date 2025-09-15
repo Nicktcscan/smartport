@@ -1100,7 +1100,7 @@ export default function WeightReports() {
             </Stat>
 
             <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
-              <StatLabel>Cumulative Net (kg)</StatLabel>
+              <StatLabel>Total Net (kg)</StatLabel>
               <StatNumber>{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
             </Stat>
           </StatGroup>
