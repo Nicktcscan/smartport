@@ -40,7 +40,6 @@ import {
   AlertDialogFooter,
   Tooltip,
   Spinner,
-  Badge,
   Stat,
   StatLabel,
   StatNumber,
@@ -74,6 +73,10 @@ import {
   FaSearch,
   FaTimes,
   FaEllipsisV,
+  FaFileCsv,
+  FaSort,
+  FaSortUp,
+  FaSortDown,
 } from 'react-icons/fa';
 
 import { supabase } from '../supabaseClient';
@@ -89,39 +92,49 @@ import {
 
 const MotionModalContent = motion.create(ModalContent);
 
-// PDF styles (kept from your original)
+// ---------------- PDF styles (fixed widths so they sum to 100%) ----------------
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 18,
     paddingBottom: 36,
     paddingHorizontal: 18,
-    fontSize: 10,
+    fontSize: 9,
     fontFamily: 'Helvetica',
     display: 'flex',
     flexDirection: 'column',
   },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   companyBlock: { flexDirection: 'column', marginLeft: 8 },
-  companyName: { fontSize: 14, fontWeight: 'bold' },
-  reportTitle: { fontSize: 12, fontWeight: 'bold', marginBottom: 6, textAlign: 'center' },
+  companyName: { fontSize: 13, fontWeight: 'bold' },
+  reportTitle: { fontSize: 11, fontWeight: 'bold', marginBottom: 6, textAlign: 'center' },
   summaryBox: { marginBottom: 8, padding: 8, borderWidth: 1, borderColor: '#ddd' },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  tableHeader: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#333', paddingBottom: 6, marginBottom: 6 },
+  tableHeader: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+    paddingBottom: 6,
+    marginBottom: 6,
+    alignItems: 'center',
+  },
   tableRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' },
-  colSad: { width: '10%', fontSize: 9 },
-  colTicket: { width: '10%', fontSize: 9 },
-  colTruck: { width: '14%', fontSize: 9 },
-  colDate: { width: '14%', fontSize: 9 },
-  colGross: { width: '10%', textAlign: 'right', fontSize: 9, paddingRight: 2 },
-  colTare: { width: '10%', textAlign: 'left', fontSize: 9, paddingRight: 2 },
-  colNet: { width: '10%', textAlign: 'left', fontSize: 9, paddingRight: 4 },
-  colOperator: { width: '12%', fontSize: 9, textAlign: 'left', paddingLeft: 2 },
-  colDriver: { width: '12%', fontSize: 9, textAlign: 'left', paddingLeft: 2 },
+
+  // column widths revised so total <= 100%
+  colSad: { width: '8%', fontSize: 8 },
+  colTicket: { width: '10%', fontSize: 8 },
+  colTruck: { width: '12%', fontSize: 8 },
+  colDate: { width: '16%', fontSize: 8 },
+  colGross: { width: '12%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
+  colTare: { width: '12%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
+  colNet: { width: '12%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
+  colDriver: { width: '9%', fontSize: 8, paddingLeft: 4 },
+  colOperator: { width: '9%', fontSize: 8, paddingLeft: 4 },
+
   footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
   logo: { width: 64, height: 64, objectFit: 'contain' },
 });
 
-// helpers
+// ---------------- Helpers ----------------
 function numericValue(v) {
   if (v === null || v === undefined || v === '') return null;
   const cleaned = String(v).replace(/[,\s]+/g, '').replace(/kg/i, '').trim();
@@ -173,27 +186,35 @@ function sortTicketsByDateDesc(arr) {
   });
 }
 
-// PDF ticket row (unchanged)
+// ---------------- PDF row ----------------
 function PdfTicketRow({ ticket, operatorName }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
+  const grossText = computed.grossDisplay || '0';
+  const tareText = computed.tareDisplay || '0';
+  const netText = computed.netDisplay || '0';
+  const driverText = d.driver ?? 'N/A';
+  const operatorText = operatorName ?? d.operator ?? 'N/A';
+  const ticketNo = d.ticketNo ?? ticket.ticketId ?? 'N/A';
+  const truckText = d.gnswTruckNo ?? d.anpr ?? d.truckNo ?? 'N/A';
+  const dateText = d.date ? new Date(d.date).toLocaleString() : 'N/A';
 
   return (
-    <PdfView style={pdfStyles.tableRow}>
+    <PdfView style={pdfStyles.tableRow} wrap={false}>
       <PdfText style={pdfStyles.colSad}>{d.sadNo ?? 'N/A'}</PdfText>
-      <PdfText style={pdfStyles.colTicket}>{d.ticketNo ?? ticket.ticketId ?? 'N/A'}</PdfText>
-      <PdfText style={pdfStyles.colTruck}>{d.gnswTruckNo ?? d.anpr ?? 'N/A'}</PdfText>
-      <PdfText style={pdfStyles.colDate}>{d.date ? new Date(d.date).toLocaleString() : 'N/A'}</PdfText>
-      <PdfText style={pdfStyles.colGross}>{computed.grossDisplay || '0'}</PdfText>
-      <PdfText style={pdfStyles.colTare}>{computed.tareDisplay || '0'}</PdfText>
-      <PdfText style={pdfStyles.colNet}>{computed.netDisplay || '0'}</PdfText>
-      <PdfText style={pdfStyles.colDriver}>{d.driver ?? 'N/A'}</PdfText>
-      <PdfText style={pdfStyles.colOperator}>{operatorName ?? 'N/A'}</PdfText>
+      <PdfText style={pdfStyles.colTicket}>{ticketNo}</PdfText>
+      <PdfText style={pdfStyles.colTruck}>{truckText}</PdfText>
+      <PdfText style={pdfStyles.colDate}>{dateText}</PdfText>
+      <PdfText style={pdfStyles.colGross}>{grossText}</PdfText>
+      <PdfText style={pdfStyles.colTare}>{tareText}</PdfText>
+      <PdfText style={pdfStyles.colNet}>{netText}</PdfText>
+      <PdfText style={pdfStyles.colDriver}>{driverText}</PdfText>
+      <PdfText style={pdfStyles.colOperator}>{operatorText}</PdfText>
     </PdfView>
   );
 }
 
-// Combined PDF (unchanged)
+// ---------------- Combined PDF Document ----------------
 function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' }) {
   const totalNet = tickets.reduce((sum, t) => {
     const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
@@ -203,7 +224,10 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
   const numberOfTransactions = tickets.length;
   const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
 
-  // manual entries
+  // sanitize SAD label
+  const rawSad = reportMeta?.sad ?? '';
+  const sadLabel = rawSad ? String(rawSad).replace(/^SAD:\s*/i, '') : 'N/A';
+
   const manualEntries = tickets.filter(t => t.data.ticketNo?.startsWith('M-'));
   const totalManualEntries = manualEntries.length;
   const cumulativeManualNetWeight = manualEntries.reduce((sum, t) => {
@@ -211,7 +235,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
     return sum + (c.netValue || 0);
   }, 0);
 
-  // pagination
   const rowsPerSubsequentPage = 20;
   const firstPageCapacity = 14;
   const firstPageTickets = tickets.slice(0, firstPageCapacity);
@@ -251,7 +274,7 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
 
         <PdfView style={pdfStyles.summaryBox}>
           <PdfView style={pdfStyles.metaRow}>
-            <PdfText>SAD: {reportMeta.sad || 'N/A'}</PdfText>
+            <PdfText>SAD: {sadLabel}</PdfText>
             <PdfText>DATE RANGE: {reportMeta.dateRangeText || 'All'}</PdfText>
           </PdfView>
 
@@ -302,17 +325,22 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
   );
 }
 
+// ---------------- main React component ----------------
 export default function WeightReports() {
-  // search/filter state
+  // search / filter state
   const [searchSAD, setSearchSAD] = useState('');
   const [searchDriver, setSearchDriver] = useState('');
   const [searchTruck, setSearchTruck] = useState('');
 
-  // ticket lists
+  // tickets
   const [originalTickets, setOriginalTickets] = useState([]);
   const [filteredTickets, setFilteredTickets] = useState([]);
 
-  // ui state
+  // sorting
+  const [sortBy, setSortBy] = useState('date'); // date/gross/net/ticketNo/sadNo/truck
+  const [sortDir, setSortDir] = useState('desc'); // asc | desc
+
+  // UI state
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pdfGenerating, setPdfGenerating] = useState(false);
@@ -325,7 +353,7 @@ export default function WeightReports() {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
 
-  // edit state
+  // edit
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState({});
   const [editErrors, setEditErrors] = useState({});
@@ -337,23 +365,23 @@ export default function WeightReports() {
   const [deleting, setDeleting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
 
-  // audit logs (keeps showing but fails gracefully)
+  // audit logs
   const [auditLogs, setAuditLogs] = useState([]);
   const [loadingAudit, setLoadingAudit] = useState(false);
 
-  // date/time filters
+  // date/time
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
   const [reportMeta, setReportMeta] = useState({});
 
-  // responsive helpers
+  // responsive
   const isMobile = useBreakpointValue({ base: true, md: false });
   const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
   const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
 
-  // load user + audit logs
+  // load user & audit logs
   useEffect(() => {
     let mounted = true;
     async function loadUser() {
@@ -385,13 +413,12 @@ export default function WeightReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // fetch audit logs but handle missing table gracefully
+  // fetch audit logs gracefully
   const fetchAuditLogs = async () => {
     setLoadingAudit(true);
     try {
       const { data, error } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(20);
       if (error) {
-        // If the table doesn't exist, ignore and don't spam console
         console.debug('audit fetch error', error);
         setAuditLogs([]);
       } else {
@@ -405,7 +432,7 @@ export default function WeightReports() {
     }
   };
 
-  // parse time to minutes
+  // parse helpers
   const parseTimeToMinutes = (timeStr) => {
     if (!timeStr) return null;
     const parts = timeStr.split(':');
@@ -418,22 +445,31 @@ export default function WeightReports() {
   const startOfDay = (d) => { const dt = new Date(d); dt.setHours(0, 0, 0, 0); return dt; };
   const endOfDay = (d) => { const dt = new Date(d); dt.setHours(23, 59, 59, 999); return dt; };
 
-  // unified pipeline to compute filteredTickets based on originalTickets + filters
-  const computeFilteredTickets = () => {
-    if (!originalTickets || originalTickets.length === 0) {
+  // Sorting UI handler
+  const toggleSort = (key) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(key);
+      setSortDir('desc');
+    }
+  };
+
+  // unified pipeline: filters -> sort
+  const computeFilteredTickets = (baseArr = null) => {
+    if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
       setFilteredTickets([]);
       return;
     }
+    let arr = (baseArr || originalTickets).slice();
 
-    let arr = [...originalTickets];
-
-    // driver filter
+    // Driver
     if (searchDriver && searchDriver.trim()) {
       const q = searchDriver.trim().toLowerCase();
       arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
 
-    // truck filter across possible fields
+    // Truck (multi-field)
     if (searchTruck && searchTruck.trim()) {
       const q = searchTruck.trim().toLowerCase();
       arr = arr.filter((t) => {
@@ -447,7 +483,7 @@ export default function WeightReports() {
       });
     }
 
-    // date/time filter
+    // date/time
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
     const tfMinutes = parseTimeToMinutes(timeFrom);
@@ -486,10 +522,41 @@ export default function WeightReports() {
       return true;
     });
 
-    // newest-first
-    setFilteredTickets(sortTicketsByDateDesc(arr));
+    // Sorting based on sortBy/sortDir
+    const comparator = (a, b) => {
+      const dir = sortDir === 'asc' ? 1 : -1;
+      if (sortBy === 'date') {
+        const da = parseTicketDate(a?.data?.date);
+        const db = parseTicketDate(b?.data?.date);
+        if (!da && !db) return 0;
+        if (!da) return 1;
+        if (!db) return -1;
+        return (da.getTime() - db.getTime()) * dir;
+      }
+      if (sortBy === 'gross' || sortBy === 'tare' || sortBy === 'net') {
+        const ka = numericValue(a.data[sortBy]) ?? 0;
+        const kb = numericValue(b.data[sortBy]) ?? 0;
+        return (ka - kb) * dir;
+      }
+      if (sortBy === 'ticketNo') {
+        const sa = String(a.data.ticketNo || '').localeCompare(String(b.data.ticketNo || '')) * dir;
+        return sa;
+      }
+      if (sortBy === 'sadNo') {
+        return String(a.data.sadNo || '').localeCompare(String(b.data.sadNo || '')) * dir;
+      }
+      if (sortBy === 'truck') {
+        const ta = (a.data.gnswTruckNo || a.data.truckOnWb || a.data.anpr || a.data.truckNo || '').toString().toLowerCase();
+        const tb = (b.data.gnswTruckNo || b.data.truckOnWb || b.data.anpr || b.data.truckNo || '').toString().toLowerCase();
+        return ta.localeCompare(tb) * dir;
+      }
+      return 0;
+    };
 
-    // update report meta labels
+    arr.sort(comparator);
+    setFilteredTickets(arr);
+
+    // update report meta
     const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
     const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
     let dateRangeText = '';
@@ -505,7 +572,7 @@ export default function WeightReports() {
     }));
   };
 
-  // SAD search -> fetch tickets -> populate originalTickets and filteredTickets
+  // SAD search
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
       toast({ title: 'SAD Required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
@@ -517,7 +584,6 @@ export default function WeightReports() {
         .from('tickets')
         .select('*')
         .ilike('sad_no', `%${searchSAD.trim()}%`);
-        // intentionally no server sort — we sort client side for consistent behavior
 
       if (error) {
         toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
@@ -557,11 +623,11 @@ export default function WeightReports() {
         dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.date ? new Date(sortedOriginal[0].data.date).toLocaleDateString() : '') : '',
         startTimeLabel: '',
         endTimeLabel: '',
-        sad: `SAD: ${searchSAD.trim()}`,
+        sad: `${searchSAD.trim()}`, // raw SAD (no 'SAD:' prefix)
       });
 
-      // respect any driver/truck/date/time filters already present
-      computeFilteredTicketsFromArray(sortedOriginal);
+      // compute filters & sort on the new original set
+      computeFilteredTickets(sortedOriginal);
     } catch (err) {
       console.error('fetch error', err);
       toast({ title: 'Error', description: err?.message || 'Unexpected error', status: 'error', duration: 4000 });
@@ -570,82 +636,25 @@ export default function WeightReports() {
     }
   };
 
-  // helper to compute filteredTickets from a provided array (used on initial set)
-  const computeFilteredTicketsFromArray = (arr) => {
-    if (!arr) arr = originalTickets || [];
-    let copy = [...arr];
-
-    if (searchDriver && searchDriver.trim()) {
-      const q = searchDriver.trim().toLowerCase();
-      copy = copy.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
-    }
-    if (searchTruck && searchTruck.trim()) {
-      const q = searchTruck.trim().toLowerCase();
-      copy = copy.filter((t) => {
-        const trucks = [
-          (t.data.gnswTruckNo || ''),
-          (t.data.truckOnWb || ''),
-          (t.data.anpr || ''),
-          (t.data.truckNo || ''),
-        ].map((s) => s.toString().toLowerCase());
-        return trucks.some((s) => s.includes(q));
-      });
-    }
-
-    // apply date/time filters using the same logic as computeFilteredTickets (but simplified)
-    const hasDateRange = !!(dateFrom || dateTo);
-    const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
-    const tfMinutes = parseTimeToMinutes(timeFrom);
-    const ttMinutes = parseTimeToMinutes(timeTo);
-    const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
-    const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
-
-    copy = copy.filter((ticket) => {
-      const raw = ticket.data.date;
-      const ticketDate = parseTicketDate(raw);
-      if (!ticketDate) return false;
-
-      if (hasDateRange) {
-        let start = startDate ? startOfDay(startDate) : new Date(-8640000000000000);
-        let end = endDate ? endOfDay(endDate) : new Date(8640000000000000);
-
-        if (timeFrom) {
-          const tf = parseTimeToMinutes(timeFrom);
-          if (tf !== null) start.setHours(Math.floor(tf / 60), tf % 60, 0, 0);
-        }
-        if (timeTo) {
-          const tt = parseTimeToMinutes(timeTo);
-          if (tt !== null) end.setHours(Math.floor(tt / 60), tt % 60, 59, 999);
-        }
-
-        return ticketDate >= start && ticketDate <= end;
-      }
-
-      if (hasTimeRangeOnly) {
-        const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
-        const fromM = tfMinutes !== null ? tfMinutes : 0;
-        const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
-        return ticketMinutes >= fromM && ticketMinutes <= toM;
-      }
-
-      return true;
-    });
-
-    setFilteredTickets(sortTicketsByDateDesc(copy));
+  // date/time apply & reset
+  const applyRange = () => computeFilteredTickets();
+  const resetRange = () => {
+    setDateFrom('');
+    setDateTo('');
+    setTimeFrom('');
+    setTimeTo('');
+    computeFilteredTickets();
+    setReportMeta((p) => ({ ...p, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
 
-  // apply date/time from UI
-  const applyRange = () => computeFilteredTickets();
-  const resetRange = () => { setDateFrom(''); setDateTo(''); setTimeFrom(''); setTimeTo(''); computeFilteredTickets(); setReportMeta((p) => ({ ...p, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' })); };
-
-  // driver/truck apply
+  // driver/truck apply/clear
   const applyDriverTruckFilter = () => {
     computeFilteredTickets();
     const driverSummary = searchDriver ? `, Driver: ${searchDriver}` : '';
     const truckSummary = searchTruck ? `, Truck: ${searchTruck}` : '';
-    setReportMeta((prev) => ({ ...prev, sad: `SAD: ${searchSAD}${driverSummary}${truckSummary}` }));
+    setReportMeta((prev) => ({ ...prev, sad: `${searchSAD}${driverSummary}${truckSummary}` }));
   };
-  const clearDriverTruckFilters = () => { setSearchDriver(''); setSearchTruck(''); computeFilteredTickets(); setReportMeta((prev) => ({ ...prev, sad: `SAD: ${searchSAD}` })); };
+  const clearDriverTruckFilters = () => { setSearchDriver(''); setSearchTruck(''); computeFilteredTickets(); setReportMeta((prev) => ({ ...prev, sad: `${searchSAD}` })); };
 
   const clearAll = () => {
     setSearchSAD('');
@@ -658,6 +667,51 @@ export default function WeightReports() {
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
+  };
+
+  // csv export
+  const exportCsv = () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
+      return;
+    }
+    const header = ['sadNo', 'ticketNo', 'date', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'containerNo', 'passNumber', 'scaleName'];
+    const rows = filteredTickets.map((t) => {
+      const d = t.data || {};
+      const truck = d.gnswTruckNo || d.truckOnWb || d.anpr || d.truckNo || '';
+      return [
+        d.sadNo ?? '',
+        d.ticketNo ?? t.ticketId ?? '',
+        d.date ? new Date(d.date).toISOString() : '',
+        truck,
+        d.driver ?? '',
+        d.gross ?? '',
+        d.tare ?? '',
+        d.net ?? '',
+        d.consignee ?? '',
+        d.operator ?? '',
+        d.containerNo ?? '',
+        d.passNumber ?? '',
+        d.scaleName ?? '',
+      ];
+    });
+
+    const csv = [header, ...rows].map((r) => r.map((cell) => {
+      if (cell === null || cell === undefined) return '';
+      const s = String(cell).replace(/"/g, '""');
+      return `"${s}"`;
+    }).join(',')).join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `SAD-${searchSAD || 'report'}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast({ title: 'CSV exported', status: 'success', duration: 3000 });
   };
 
   // cumulative net weight (memo)
@@ -682,7 +736,7 @@ export default function WeightReports() {
     onOpen();
   };
 
-  // PDF generation helpers (unchanged)
+  // PDF generation helpers
   const generatePdfBlob = async (ticketsToRender = [], meta = {}, opName = '') => {
     const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} operatorName={opName} />;
     const asPdf = pdfRender(doc);
@@ -778,7 +832,7 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- Edit / Delete (kept from your logic) ----------
+  // ---------- Edit / Delete (kept) ----------
   const isTicketEditable = (ticket) => {
     const status = String(ticket?.data?.status || '').toLowerCase();
     return status !== 'exited';
@@ -873,7 +927,6 @@ export default function WeightReports() {
       const ticketIdValue = selectedTicket.ticketId ?? selectedTicket.data.ticketNo ?? null;
       if (!ticketIdValue) throw new Error('Missing ticket identifier');
 
-      // try RPC (if present)
       let usedRpc = false;
       try {
         const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_update_ticket', {
@@ -936,13 +989,11 @@ export default function WeightReports() {
       };
 
       setOriginalTickets((prev) => prev.map((t) => (String(t.ticketId) === String(selectedTicket.ticketId) ? updatedTicket : t)));
-      // recompute filtered list
       setTimeout(() => computeFilteredTickets(), 0);
 
       setSelectedTicket(updatedTicket);
       setIsEditing(false);
 
-      // audit log insert (best-effort)
       try {
         const auditEntry = {
           action: 'update',
@@ -968,7 +1019,7 @@ export default function WeightReports() {
     }
   };
 
-  // delete flow (same)
+  // delete flow
   const confirmDelete = () => {
     if (!selectedTicket) return;
     if (!isAdmin) {
@@ -1083,15 +1134,14 @@ export default function WeightReports() {
   // ----------------- UI -----------------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }}>
-      {/* Page header */}
+      {/* Header */}
       <Flex direction={{ base: 'column', md: 'row' }} align={{ base: 'stretch', md: 'center' }} gap={4} mb={6}>
         <Box>
           <Heading size={headingSize}>SAD Report Generator</Heading>
-          <Text mt={2} color="gray.600">Generate and export weighbridge reports. Search SAD first, then refine by Driver or Truck.</Text>
+          <Text mt={2} color="gray.600">Search SAD → then filter by driver or truck. Results persist until cleared.</Text>
         </Box>
 
         <Flex ml="auto" gap={4} align="center" wrap="wrap">
-          {/* Transaction & Net stat group */}
           <StatGroup display="flex" alignItems="center" gap={4}>
             <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
               <StatLabel>Total Transactions</StatLabel>
@@ -1100,18 +1150,17 @@ export default function WeightReports() {
             </Stat>
 
             <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
-              <StatLabel>Total Net (kg)</StatLabel>
+              <StatLabel>Cumulative Net (kg)</StatLabel>
               <StatNumber>{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
+              <StatHelpText>From current filtered results</StatHelpText>
             </Stat>
           </StatGroup>
-
-          {isAdmin && <Badge colorScheme="green" ml={{ base: 0, md: 2 }}>Admin</Badge>}
         </Flex>
       </Flex>
 
-      {/* Card panel */}
+      {/* Main card */}
       <Box bg="white" p={{ base: 4, md: 6 }} borderRadius="md" boxShadow="sm">
-        {/* Search & Filters */}
+        {/* Search & filters */}
         <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={3} alignItems="end">
           <ChakraInput
             placeholder="Type SAD No (required)"
@@ -1120,9 +1169,9 @@ export default function WeightReports() {
             isDisabled={loading || pdfGenerating}
             borderRadius="md"
             size="md"
+            aria-label="Search SAD"
           />
 
-          {/* Driver & Truck inputs appear only after SAD search has been performed */}
           {originalTickets.length > 0 ? (
             <>
               <ChakraInput
@@ -1132,6 +1181,7 @@ export default function WeightReports() {
                 isDisabled={loading || pdfGenerating}
                 borderRadius="md"
                 size="md"
+                aria-label="Filter by driver"
               />
               <ChakraInput
                 placeholder="Truck No (filter)"
@@ -1140,17 +1190,18 @@ export default function WeightReports() {
                 isDisabled={loading || pdfGenerating}
                 borderRadius="md"
                 size="md"
+                aria-label="Filter by truck"
               />
             </>
           ) : (
             <>
-              <Box /> {/* placeholders to preserve grid */}
+              <Box />
               <Box />
             </>
           )}
         </SimpleGrid>
 
-        {/* Buttons toolbar: wraps responsively */}
+        {/* Buttons */}
         <Flex gap={3} wrap="wrap" align="center" mb={4}>
           <Button
             colorScheme="teal"
@@ -1160,41 +1211,36 @@ export default function WeightReports() {
             isLoading={loading}
             loadingText="Searching..."
             minW="160px"
+            aria-label="Generate report"
           >
             Generate Report
           </Button>
 
-          {/* driver/truck apply */}
           {originalTickets.length > 0 && (
             <>
-              <Button size="md" leftIcon={<FaFilter />} onClick={applyDriverTruckFilter} isDisabled={loading || pdfGenerating}>
-                Apply Filters
-              </Button>
-              <Button size="md" variant="ghost" leftIcon={<FaTimes />} onClick={clearDriverTruckFilters} isDisabled={loading || pdfGenerating}>
-                Clear Filters
-              </Button>
+              <Button size="md" leftIcon={<FaFilter />} onClick={applyDriverTruckFilter} isDisabled={loading || pdfGenerating}>Apply Filters</Button>
+              <Button size="md" variant="ghost" leftIcon={<FaTimes />} onClick={clearDriverTruckFilters} isDisabled={loading || pdfGenerating}>Clear Filters</Button>
             </>
           )}
 
-          <Button size="md" variant="ghost" leftIcon={<FaRedo />} onClick={clearAll} minW="120px">
-            Clear All
-          </Button>
+          <Button size="md" variant="ghost" leftIcon={<FaRedo />} onClick={clearAll} minW="120px">Clear All</Button>
 
           <HStack spacing={2} ml="auto" wrap="wrap">
-            <Tooltip label="Download PDF">
-              <Button leftIcon={<FaDownload />} onClick={handleDownloadPdf} isLoading={pdfGenerating} size="sm" colorScheme="gray" variant="outline" />
-            </Tooltip>
-            <Tooltip label="Share (native)">
-              <Button leftIcon={<FaShareAlt />} onClick={handleNativeShare} isLoading={pdfGenerating} size="sm" colorScheme="blue" variant="ghost" />
-            </Tooltip>
-            <Tooltip label="Email (composer)">
-              <Button leftIcon={<FaEnvelope />} onClick={handleEmailComposer} isLoading={pdfGenerating} size="sm" colorScheme="green" variant="ghost" />
-            </Tooltip>
+            <Button leftIcon={<FaFilePdf />} onClick={handleDownloadPdf} isLoading={pdfGenerating} size="sm" colorScheme="gray">
+              Download PDF
+            </Button>
+            <Button leftIcon={<FaShareAlt />} onClick={handleNativeShare} isLoading={pdfGenerating} size="sm" colorScheme="blue">
+              Share
+            </Button>
+            <Button leftIcon={<FaEnvelope />} onClick={handleEmailComposer} isLoading={pdfGenerating} size="sm" colorScheme="green">
+              Email 
+            </Button>
 
             <Menu>
               <MenuButton as={IconButton} aria-label="more" icon={<FaEllipsisV />} variant="ghost" />
               <MenuList>
                 <MenuItem icon={<FaFilePdf />} onClick={handleDownloadPdf}>Export PDF</MenuItem>
+                <MenuItem icon={<FaFileCsv />} onClick={exportCsv}>Export CSV</MenuItem>
                 <MenuItem icon={<FaShareAlt />} onClick={handleNativeShare}>Share</MenuItem>
                 <MenuItem icon={<FaEnvelope />} onClick={handleEmailComposer}>Email</MenuItem>
                 <MenuItem onClick={fetchAuditLogs}>Refresh Audit Logs</MenuItem>
@@ -1203,7 +1249,7 @@ export default function WeightReports() {
           </HStack>
         </Flex>
 
-        {/* Date/time filters box */}
+        {/* Date/time filters */}
         <Box border="1px solid" borderColor="gray.100" p={3} borderRadius="md" mb={4}>
           <Text fontWeight="semibold" mb={2}>Filter by Date & Time Range</Text>
           <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} alignItems="end">
@@ -1229,20 +1275,16 @@ export default function WeightReports() {
             <Button size="sm" colorScheme="blue" onClick={applyRange}>Apply Range</Button>
             <Button size="sm" variant="ghost" onClick={resetRange}>Reset Range</Button>
 
-            <Text ml="auto" fontSize="sm" color="gray.600">
-              Tip: Narrow by date/time, then export.
-            </Text>
+            <Text ml="auto" fontSize="sm" color="gray.600">Tip: Narrow by date/time, then export.</Text>
           </Flex>
         </Box>
 
-        {/* Results area */}
+        {/* Results */}
         {filteredTickets.length > 0 ? (
           <>
             {/* header */}
             <Flex align="center" justify="space-between" mb={3} gap={4} wrap="wrap">
-              <Text fontSize={{ base: 'md', md: 'lg' }} fontWeight="bold">
-                {reportMeta?.sad || `SAD: ${searchSAD}`}
-              </Text>
+              <Text fontSize={{ base: 'md', md: 'lg' }} fontWeight="bold">{reportMeta?.sad ? `SAD: ${reportMeta.sad}` : `SAD: ${searchSAD}`}</Text>
 
               <HStack spacing={3}>
                 <Box textAlign="right">
@@ -1256,7 +1298,7 @@ export default function WeightReports() {
               </HStack>
             </Flex>
 
-            {/* Mobile: stacked cards */}
+            {/* Mobile cards */}
             {isMobile ? (
               <VStack spacing={3} align="stretch">
                 {filteredTickets.map((t) => {
@@ -1298,7 +1340,11 @@ export default function WeightReports() {
 
                         <HStack spacing={2} ml="auto">
                           <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
-                          {t.data.fileUrl && <Button size="sm" variant="ghost" onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>Open PDF</Button>}
+                          {t.data.fileUrl && (
+                            <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>
+                              Open PDF
+                            </Button>
+                          )}
                         </HStack>
                       </Flex>
                     </Box>
@@ -1306,22 +1352,44 @@ export default function WeightReports() {
                 })}
               </VStack>
             ) : (
-              /* Desktop / Tablet: table */
-              <Box overflowX="auto" borderRadius="md" bg="white">
-                <Table variant="striped" colorScheme="teal" size="sm">
+              /* Desktop/tablet table */
+              <Box overflowX="auto" borderRadius="md" bg="white" boxShadow="sm">
+                <Table variant="striped" colorScheme="teal" size="sm" sx={{
+                  'th': {
+                    position: 'sticky',
+                    top: 0,
+                    background: 'white',
+                    zIndex: 2,
+                  }
+                }}>
                   <Thead bg="gray.50">
                     <Tr>
-                      <Th>SAD No</Th>
-                      <Th>Ticket No</Th>
-                      <Th>Date & Time</Th>
-                      <Th>Truck No</Th>
-                      <Th isNumeric>Gross (kg)</Th>
-                      <Th isNumeric>Tare (kg)</Th>
-                      <Th isNumeric>Net (kg)</Th>
+                      <Th onClick={() => toggleSort('sadNo')} cursor="pointer">
+                        <HStack spacing={2}><Text>SAD No</Text> {sortBy === 'sadNo' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th onClick={() => toggleSort('ticketNo')} cursor="pointer">
+                        <HStack spacing={2}><Text>Ticket No</Text> {sortBy === 'ticketNo' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th onClick={() => toggleSort('date')} cursor="pointer">
+                        <HStack spacing={2}><Text>Date & Time</Text> {sortBy === 'date' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th onClick={() => toggleSort('truck')} cursor="pointer">
+                        <HStack spacing={2}><Text>Truck No</Text> {sortBy === 'truck' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th isNumeric onClick={() => toggleSort('gross')} cursor="pointer">
+                        <HStack spacing={2} justify="flex-end"><Text>Gross (kg)</Text> {sortBy === 'gross' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th isNumeric onClick={() => toggleSort('tare')} cursor="pointer">
+                        <HStack spacing={2} justify="flex-end"><Text>Tare (kg)</Text> {sortBy === 'tare' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th isNumeric onClick={() => toggleSort('net')} cursor="pointer">
+                        <HStack spacing={2} justify="flex-end"><Text>Net (kg)</Text> {sortBy === 'net' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
                       <Th>Driver</Th>
                       <Th>Actions</Th>
                     </Tr>
                   </Thead>
+
                   <Tbody>
                     {filteredTickets.map((ticket) => {
                       const computed = computeWeightsFromObj({
@@ -1344,11 +1412,11 @@ export default function WeightReports() {
                           <Td>{displayDriver}</Td>
                           <Td>
                             <HStack spacing={2} flexWrap="wrap">
-                              <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>
-                                View
-                              </Button>
+                              <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
                               {ticket.data.fileUrl && (
-                                <Button size="sm" variant="ghost" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>Open</Button>
+                                <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
+                                  Open
+                                </Button>
                               )}
                             </HStack>
                           </Td>
@@ -1366,11 +1434,11 @@ export default function WeightReports() {
               </Box>
             )}
 
-            {/* Audit logs panel */}
+            {/* Audit logs */}
             <Box mt={6} p={4} borderRadius="md" border="1px solid" borderColor="gray.100" bg="white">
               <Flex align="center" mb={3}>
                 <Heading size="sm">Recent Audit Logs</Heading>
-                {isAdmin && <Button size="sm" ml="auto" onClick={fetchAuditLogs} leftIcon={<FaRedo />}>Refresh</Button>}
+                <Button size="sm" ml="auto" onClick={fetchAuditLogs} leftIcon={<FaRedo />}>Refresh</Button>
               </Flex>
 
               {loadingAudit ? (
@@ -1543,7 +1611,8 @@ export default function WeightReports() {
 
                     {selectedTicket.data.fileUrl && (
                       <Box pt={2}>
-                        <Button size="sm" colorScheme="blue" onClick={() => window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')} leftIcon={<FaExternalLinkAlt />}>
+                        {/* Stored ticket open also red as requested */}
+                        <Button size="sm" colorScheme="red" leftIcon={<FaExternalLinkAlt />} onClick={() => window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')}>
                           Open Stored Ticket PDF
                         </Button>
                       </Box>
@@ -1562,14 +1631,14 @@ export default function WeightReports() {
                       isTicketEditable(selectedTicket) ? (
                         <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={startEditing}>Edit</Button>
                       ) : (
-                        <Tooltip label="Cannot edit tickets with status 'Exited'"><Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button></Tooltip>
+                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>
                       )
-                    ) : (<Tooltip label="Admin only"><Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button></Tooltip>)}
+                    ) : (<Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>)}
 
                     {isAdmin ? (
                       <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} onClick={confirmDelete}>Delete</Button>
                     ) : (
-                      <Tooltip label="Admin only"><Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>Delete</Button></Tooltip>
+                      <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>Delete</Button>
                     )}
                   </>
                 )}
