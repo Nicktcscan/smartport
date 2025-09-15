@@ -1,3 +1,4 @@
+// src/context/AuthContext.jsx
 import React, {
   createContext,
   useContext,
@@ -11,201 +12,296 @@ import { supabase } from '../supabaseClient';
 
 const AuthContext = createContext();
 
+/**
+ * AuthProvider
+ *
+ * Responsibilities:
+ * - determine current session / user & role (from Supabase session + users table)
+ * - provide login/logout helpers
+ * - maintain inactivity timeout (auto logout)
+ * - expose `loading` so the app can avoid rendering routes until auth is resolved
+ */
 export const AuthProvider = ({ children }) => {
   const navigate = useNavigate();
-  const [user, setUser] = useState(() => {
-    const storedUser = localStorage.getItem('user');
-    return storedUser ? JSON.parse(storedUser) : null;
-  });
+
+  // Start with `null` to avoid trusting stale localStorage and causing route flicker.
+  const [user, setUser] = useState(null);
+
+  // loading indicates we're resolving the session / user information
   const [loading, setLoading] = useState(true);
+
+  // inactivity timer + guard for intentional logout
   const timeoutRef = useRef(null);
   const justLoggedOutRef = useRef(false);
 
+  // Helper: navigate to role's landing page (use replace to avoid polluting history)
   const redirectToDashboard = useCallback(
     (role) => {
       switch (role) {
         case 'admin':
-          navigate('/admin');
+          navigate('/admin', { replace: true });
           break;
         case 'customs':
-          navigate('/customs');
+          navigate('/customs', { replace: true });
           break;
         case 'agent':
-          navigate('/agent');
+          navigate('/agent', { replace: true });
           break;
         case 'outgate':
-          navigate('/outgate');
+          navigate('/outgate', { replace: true });
           break;
         case 'weighbridge':
-          navigate('/dashboard');
+          navigate('/dashboard', { replace: true });
           break;
         default:
-          navigate('/');
+          navigate('/', { replace: true });
       }
     },
     [navigate]
   );
 
+  // Logout helper: sets local cleanup, signs out at Supabase, and navigates to login.
   const logout = useCallback(async () => {
-    if (justLoggedOutRef.current) return; // prevent double logout
+    if (justLoggedOutRef.current) return; // protect against repeated calls
     justLoggedOutRef.current = true;
-    clearTimeout(timeoutRef.current);
 
+    // clear local timers / state
+    clearTimeout(timeoutRef.current);
     setUser(null);
     localStorage.removeItem('user');
 
     try {
+      // sign out at Supabase (this will also emit a SIGNED_OUT event)
       await supabase.auth.signOut();
     } catch (err) {
       console.error('Supabase signOut error:', err);
     }
 
+    // navigate to login (replace so Back doesn't return to restricted page)
     navigate('/login', { replace: true });
+
+    // allow future sign-outs to proceed
     justLoggedOutRef.current = false;
   }, [navigate]);
 
+  // Resets the inactivity timer (30 minutes by default)
   const resetInactivityTimer = useCallback(() => {
     clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
-      alert('You have been logged out due to 30 minutes of inactivity.');
+      // friendly alert then logout
+      try {
+        // keep UX simple for now
+        // You can replace alert with a nicer Chakra modal if desired.
+        alert('You have been logged out due to 30 minutes of inactivity.');
+      } catch (e) {
+        // ignore UI alert failures
+      }
       logout();
     }, 30 * 60 * 1000);
   }, [logout]);
 
-  const login = useCallback(
-    async (userObj) => {
-      try {
-        const authUser = {
-          id: userObj.id,
-          email: userObj.email,
-          role: userObj.role,
-        };
-        setUser(authUser);
-        localStorage.setItem('user', JSON.stringify(authUser));
-        redirectToDashboard(userObj.role);
-        resetInactivityTimer();
-      } catch (error) {
-        console.error('Login error:', error);
-      }
-    },
-    [redirectToDashboard, resetInactivityTimer]
-  );
-
+  // Small helper to persist user locally and start inactivity timer
   const setUserOnly = useCallback(
     (userObj) => {
+      if (!userObj) return;
       const authUser = {
         id: userObj.id,
         email: userObj.email,
-        role: userObj.role,
+        role: userObj.role ?? null,
       };
       setUser(authUser);
-      localStorage.setItem('user', JSON.stringify(authUser));
+      try {
+        localStorage.setItem('user', JSON.stringify(authUser));
+      } catch (e) {
+        // ignore localStorage errors in some environments
+      }
       resetInactivityTimer();
     },
     [resetInactivityTimer]
   );
 
+  // login helper used by your UI when sign-in finishes (e.g., after form)
+  const login = useCallback(
+    async (userObj) => {
+      if (!userObj) return;
+      const authUser = {
+        id: userObj.id,
+        email: userObj.email,
+        role: userObj.role ?? null,
+      };
+      setUser(authUser);
+      try {
+        localStorage.setItem('user', JSON.stringify(authUser));
+      } catch (e) {
+        // ignore
+      }
+      // navigate to role-specific dashboard
+      if (userObj.role) redirectToDashboard(userObj.role);
+      resetInactivityTimer();
+    },
+    [redirectToDashboard, resetInactivityTimer]
+  );
+
+  // On mount: resolve session -> user -> role. Also attach auth state change listener.
   useEffect(() => {
-    const getSession = async () => {
+    let isMounted = true;
+
+    const getSessionAndUser = async () => {
       setLoading(true);
       try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
-        const currentUser = session?.user;
+        const { data } = await supabase.auth.getSession();
+        const session = data?.session ?? null;
+        const currentUser = session?.user ?? null;
 
-        if (currentUser?.id) {
-          // ✅ Set temporary user right away
+        if (!isMounted) return;
+
+        if (currentUser && currentUser.id) {
+          // set a temporary minimal user while we fetch the role
           setUser({
             id: currentUser.id,
-            email: currentUser.email,
+            email: currentUser.email ?? null,
             role: null,
           });
 
-          // Fetch role from users table
+          // fetch role from users table (safer .maybeSingle())
           const { data: userData, error } = await supabase
             .from('users')
             .select('role')
             .eq('id', currentUser.id)
-            .maybeSingle(); // 👈 safer than .single()
+            .maybeSingle();
 
           if (error) {
-            console.error('Error fetching role from users table:', error.message);
+            console.error('Error fetching role from users table:', error);
           }
 
+          // if user not present, create a fallback profile row with default role
           if (!userData) {
-            // ✅ User not in custom users table → insert them
-            const { error: insertError } = await supabase.from('users').insert({
-              id: currentUser.id,
-              email: currentUser.email,
-              role: 'agent', // default role can now be 'agent'
-            });
-
-            if (insertError) {
-              console.error('Error inserting user into users table:', insertError.message);
-            } else {
-              setUserOnly({ ...currentUser, role: 'agent' });
+            try {
+              const { error: insertError } = await supabase.from('users').insert({
+                id: currentUser.id,
+                email: currentUser.email,
+                role: 'agent',
+              });
+              if (insertError) {
+                console.error('Error inserting default user row:', insertError);
+                // still set local user with role 'agent' — best-effort
+                setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+              } else {
+                setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+              }
+            } catch (e) {
+              console.error('Insert fallback user failed:', e);
+              // fallback to setting user with no role
+              setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
             }
           } else if (userData?.role) {
-            setUserOnly({ ...currentUser, role: userData.role });
+            // success - set full user object
+            setUserOnly({ id: currentUser.id, email: currentUser.email, role: userData.role });
+          } else {
+            // no role present -> set default
+            setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
           }
         } else {
-          // ✅ No session means truly logged out
+          // no session -> ensure logged out locally
           setUser(null);
-          localStorage.removeItem('user');
+          try {
+            localStorage.removeItem('user');
+          } catch (e) {}
         }
       } catch (err) {
-        console.error('Session fetch error:', err.message);
+        console.error('Session fetch error:', err);
+        // in error cases, ensure user is null
+        setUser(null);
+        try {
+          localStorage.removeItem('user');
+        } catch (e) {}
       } finally {
-        setLoading(false);
+        if (isMounted) setLoading(false);
       }
     };
 
-    getSession();
+    // run initial resolution
+    getSessionAndUser();
 
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        if (event === 'SIGNED_OUT') {
-          if (!justLoggedOutRef.current) {
-            logout();
-          } else {
-            justLoggedOutRef.current = false;
-          }
+    // Subscribe to auth state changes
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      // NOTE: Do NOT call logout() here - that would call signOut again and risk loops.
+      // Instead, perform lightweight local cleanup when the event originates outside the app.
+      if (event === 'SIGNED_OUT') {
+        // If this sign-out followed an intentional logout initiated by this app,
+        // just clear the `justLoggedOut` flag and do nothing else (we already cleaned up).
+        if (justLoggedOutRef.current) {
+          justLoggedOutRef.current = false;
+          return;
         }
 
-        if (event === 'SIGNED_IN' && session?.user) {
-          getSession(); // Refresh user info
+        // External sign-out (e.g. session expired or signed out in another tab) — clean local state
+        setUser(null);
+        try {
+          localStorage.removeItem('user');
+        } catch (e) {}
+        // navigate to login safely
+        try {
+          navigate('/login', { replace: true });
+        } catch (e) {
+          // ignore navigate errors during teardown
         }
+        // clear inactivity timer
+        clearTimeout(timeoutRef.current);
+        return;
       }
-    );
+
+      if (event === 'SIGNED_IN' && session?.user) {
+        // when signed in, re-run session resolution to pick up possible role/profile updates
+        getSessionAndUser();
+      }
+
+      // other events (TOKEN_REFRESH etc.) are ignored here (we can add handling if needed)
+    });
 
     return () => {
-      listener?.subscription.unsubscribe();
+      isMounted = false;
+      // unsubscribe listener
+      try {
+        if (listener && listener.subscription && typeof listener.subscription.unsubscribe === 'function') {
+          listener.subscription.unsubscribe();
+        } else if (listener && typeof listener.unsubscribe === 'function') {
+          // older SDK shapes
+          listener.unsubscribe();
+        }
+      } catch (e) {
+        // ignore unsubscribe errors
+      }
+      clearTimeout(timeoutRef.current);
     };
-  }, [setUserOnly, logout]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setUserOnly, logout, navigate]);
 
+  // Activity listeners to reset inactivity timer
   useEffect(() => {
-    if (!user) return;
+    if (!user) {
+      // if not logged in, ensure timer cleared
+      clearTimeout(timeoutRef.current);
+      return;
+    }
 
     const activityEvents = ['mousemove', 'keydown', 'scroll', 'click'];
-    const handleActivity = () => resetInactivityTimer();
+    const handler = () => resetInactivityTimer();
 
-    activityEvents.forEach((event) =>
-      window.addEventListener(event, handleActivity)
-    );
-
+    activityEvents.forEach((ev) => window.addEventListener(ev, handler));
+    // start timer
     resetInactivityTimer();
 
     return () => {
-      activityEvents.forEach((event) =>
-        window.removeEventListener(event, handleActivity)
-      );
+      activityEvents.forEach((ev) => window.removeEventListener(ev, handler));
       clearTimeout(timeoutRef.current);
     };
   }, [user, resetInactivityTimer]);
 
+  // Expose auth helpers and state
   return (
     <AuthContext.Provider value={{ user, login, logout, loading }}>
+      {/* Keep children hidden until we've resolved auth to avoid route flicker */}
       {!loading && children}
     </AuthContext.Provider>
   );
