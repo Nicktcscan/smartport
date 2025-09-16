@@ -488,16 +488,24 @@ function handleExtract(rawText) {
       (found.wb_id || "").replace(/^WB/i, ""),
     ].filter(Boolean));
 
-    // new: filter out candidates that appear inside the date substring
+    // Refined fallback:
+    // - Exclude candidates that are equal to known fields (SAD/weights/WB)
+    // - Exclude candidates that appear inside a "Print Date" / "Date Time" line
+    // - Exclude candidates that occur inside the parsed date substring (if present)
+    // - Exclude time-like fragments (hhmm or hhmmss)
+    // - Prefer 5-digit candidates (typical ticket numbers)
     const candidate = found._ticket_candidates.find((n) => {
       // Exclude SAD/weights/WB
       if (exclude.has(n)) return false;
 
-      // Exclude numbers that are clearly part of the date/time substring
+      // Exclude if number appears inside a Print Date / Date Time line
+      const badLine = lines.find((l) => /Print\s*Date|Date\s*Time/i.test(l) && l.includes(n));
+      if (badLine) return false;
+
+      // Exclude numbers that are clearly part of the parsed date substring
       if (found.date) {
         const dateIdx = full.indexOf(found.date);
         if (dateIdx >= 0) {
-          // if n occurs inside the date substring, skip it
           let pos = full.indexOf(n, 0);
           while (pos !== -1) {
             if (pos >= dateIdx && pos < dateIdx + found.date.length) return false;
@@ -508,6 +516,9 @@ function handleExtract(rawText) {
 
       // Exclude numbers that look like time-only values (hhmm or hhmmss)
       if (/^(?:[01]?\d|2[0-3])[0-5]\d(?:[0-5]\d)?$/.test(n)) return false;
+
+      // Prefer 5-digit ticket numbers — reject other lengths
+      if (!/^\d{5}$/.test(n)) return false;
 
       return true;
     });
@@ -590,6 +601,7 @@ function handleExtract(rawText) {
     isClosable: true,
   });
 }
+
 
   // Initial empty form
   const EMPTY_FORM = {
