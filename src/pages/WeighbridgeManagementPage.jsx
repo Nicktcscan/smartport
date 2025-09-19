@@ -6,7 +6,7 @@ import {
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, Switch, HStack
 } from '@chakra-ui/react';
-import { ViewIcon } from '@chakra-ui/icons';
+import { ViewIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 
 import { supabase } from '../supabaseClient';
 import Tesseract from 'tesseract.js';
@@ -258,9 +258,13 @@ function WeighbridgeManagementPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [useClientSidePagination, setUseClientSidePagination] = useState(false);
   const [totalTickets, setTotalTickets] = useState(0);
-  const [editingTicket, setEditingTicket] = useState(null);
+  const [editingTicket, setEditingTicket] = useState(null); // unused but retained
   const [viewTicket, setViewTicket] = useState(null);
   const [ticketToSubmit, setTicketToSubmit] = useState(null);
+
+  // New state for inline editing of ticket_no
+  const [editingTicketId, setEditingTicketId] = useState(null);
+  const [editingTicketNo, setEditingTicketNo] = useState('');
 
   const debouncedOcrText = useDebounce(ocrText, 500);
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
@@ -938,6 +942,52 @@ function handleExtract(rawText) {
   };
 
 
+  // Inline-edit helpers for ticket_no
+  const startEditingTicketNo = (ticket) => {
+    const idValue = ticket.id ?? ticket.ticket_id;
+    setEditingTicketId(idValue);
+    setEditingTicketNo(ticket.ticket_no ?? '');
+  };
+
+  const cancelEditingTicketNo = () => {
+    setEditingTicketId(null);
+    setEditingTicketNo('');
+  };
+
+  const saveEditingTicketNo = async (ticket) => {
+    const idField = ticket.id ? 'id' : 'ticket_id';
+    const idValue = ticket.id ?? ticket.ticket_id;
+    try {
+      const { error } = await supabase
+        .from('tickets')
+        .update({ ticket_no: editingTicketNo })
+        .eq(idField, idValue);
+
+      if (error) throw error;
+
+      toast({
+        title: "Ticket updated",
+        description: `Ticket No updated successfully to ${editingTicketNo}`,
+        status: "success",
+        duration: 3000,
+        isClosable: true,
+      });
+
+      // Refresh the list (server or client mode)
+      await fetchTickets();
+
+      cancelEditingTicketNo();
+    } catch (err) {
+      toast({
+        title: "Update failed",
+        description: err?.message || "Could not update ticket number.",
+        status: "error",
+        duration: 5000,
+        isClosable: true,
+      });
+    }
+  };
+
   const clearExtractedData = () => {
     setExtractedPairs([]);
     setOcrText('');
@@ -1126,9 +1176,46 @@ function handleExtract(rawText) {
                     net: t.net ?? t.net_weight ?? t.net,
                   });
 
+                  const rowId = t.id ?? t.ticket_id;
+
                   return (
-                    <Tr key={t.id || t.ticket_id}>
-                      <Td>{t.ticket_no}</Td>
+                    <Tr key={rowId}>
+                      <Td>
+                        {editingTicketId === rowId ? (
+                          <HStack spacing={2}>
+                            <Input
+                              size="sm"
+                              value={editingTicketNo}
+                              onChange={(e) => setEditingTicketNo(e.target.value)}
+                              width="120px"
+                            />
+                            <IconButton
+                              size="sm"
+                              colorScheme="green"
+                              icon={<CheckIcon />}
+                              aria-label="Save ticket no"
+                              onClick={() => saveEditingTicketNo(t)}
+                            />
+                            <IconButton
+                              size="sm"
+                              colorScheme="red"
+                              icon={<CloseIcon />}
+                              aria-label="Cancel edit"
+                              onClick={cancelEditingTicketNo}
+                            />
+                          </HStack>
+                        ) : (
+                          <HStack spacing={2}>
+                            <Text>{t.ticket_no ?? '-'}</Text>
+                            <IconButton
+                              size="sm"
+                              icon={<EditIcon />}
+                              aria-label="Edit Ticket No"
+                              onClick={() => startEditingTicketNo(t)}
+                            />
+                          </HStack>
+                        )}
+                      </Td>
                       <Td>{t.gnsw_truck_no}</Td>
                       <Td>{t.sad_no}</Td>
                       <Td>{computed.grossDisplay}</Td>
