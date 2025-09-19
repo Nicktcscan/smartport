@@ -1053,10 +1053,6 @@ function handleExtract(rawText) {
 
       {/* Controls: pagination mode and page size */}
       <Flex align="center" gap={4} mb={4} flexWrap="wrap">
-        <HStack spacing={2}>
-          <FormLabel htmlFor="client-side-switch" mb={0} fontSize="sm">Client-side pagination</FormLabel>
-          <Switch id="client-side-switch" isChecked={useClientSidePagination} onChange={handleTogglePaginationMode} />
-        </HStack>
 
         <FormControl maxW="160px">
           <FormLabel fontSize="sm" mb={1}>Page size</FormLabel>
@@ -1067,12 +1063,12 @@ function handleExtract(rawText) {
           </Select>
         </FormControl>
 
-        {/* Search input for live Ticket No search */}
+        {/* Search input for live Ticket Number search */}
         <FormControl maxW="240px">
-          <FormLabel fontSize="sm" mb={1}>Search Ticket No</FormLabel>
+          <FormLabel fontSize="sm" mb={1}>Search Here!</FormLabel>
           <HStack>
             <Input
-              placeholder="Search by Ticket No"
+              placeholder="Search by Ticket Number"
               size="sm"
               value={searchTicketNo}
               onChange={(e) => setSearchTicketNo(e.target.value)}
