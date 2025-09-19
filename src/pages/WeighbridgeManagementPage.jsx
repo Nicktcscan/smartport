@@ -266,6 +266,10 @@ function WeighbridgeManagementPage() {
   const [editingTicketId, setEditingTicketId] = useState(null);
   const [editingTicketNo, setEditingTicketNo] = useState('');
 
+  // New state for live search
+  const [searchTicketNo, setSearchTicketNo] = useState('');
+  const debouncedSearchTicket = useDebounce(searchTicketNo, 300);
+
   const debouncedOcrText = useDebounce(ocrText, 500);
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
 
@@ -729,8 +733,10 @@ function handleExtract(rawText) {
   const fetchTickets = useCallback(async () => {
     setLoadingTickets(true);
     try {
+      const search = String(debouncedSearchTicket || '').trim();
+
       if (useClientSidePagination) {
-        // Fetch all tickets and page locally
+        // Fetch all tickets and page locally, then apply search filter locally
         const { data, error } = await supabase
           .from("tickets")
           .select("*")
@@ -740,20 +746,35 @@ function handleExtract(rawText) {
           throw error;
         }
         const all = data || [];
-        setTickets(all);
-        setTotalTickets(all.length);
+
+        // apply local search filter if provided
+        const filtered = search
+          ? all.filter((t) => String(t.ticket_no ?? '').toLowerCase().includes(search.toLowerCase()))
+          : all;
+
+        setTickets(filtered);
+        setTotalTickets(filtered.length);
         // ensure current page is within bounds
         setCurrentPage((p) => {
-          const tp = Math.max(1, Math.ceil(all.length / pageSize) || 1);
+          const tp = Math.max(1, Math.ceil(filtered.length / pageSize) || 1);
           return Math.min(p, tp);
         });
       } else {
-        // Server-side pagination using range
+        // Server-side pagination using range, with optional search filter
         const start = (currentPage - 1) * pageSize;
         const end = currentPage * pageSize - 1;
-        const { data, error, count } = await supabase
+
+        let query = supabase
           .from("tickets")
-          .select("*", { count: "exact" })
+          .select("*", { count: "exact" });
+
+        if (search) {
+          // Use ilike for case-insensitive partial match
+          query = query.ilike("ticket_no", `%${search}%`);
+        }
+
+        // apply ordering and range after filters
+        const { data, error, count } = await query
           .order("submitted_at", { ascending: false })
           .range(start, end);
 
@@ -775,7 +796,7 @@ function handleExtract(rawText) {
     } finally {
       setLoadingTickets(false);
     }
-  }, [currentPage, pageSize, useClientSidePagination, toast]);
+  }, [currentPage, pageSize, useClientSidePagination, toast, debouncedSearchTicket]);
 
   // Fetch when relevant dependencies change
   useEffect(() => {
@@ -1044,6 +1065,17 @@ function handleExtract(rawText) {
             <option value={10}>10</option>
             <option value={20}>20</option>
           </Select>
+        </FormControl>
+
+        {/* Search input for live Ticket No search */}
+        <FormControl maxW="240px">
+          <FormLabel fontSize="sm" mb={1}>Search Ticket No</FormLabel>
+          <Input
+            placeholder="Search by Ticket No"
+            size="sm"
+            value={searchTicketNo}
+            onChange={(e) => setSearchTicketNo(e.target.value)}
+          />
         </FormControl>
 
         <Box flex="1" />
