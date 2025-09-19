@@ -1070,12 +1070,25 @@ function handleExtract(rawText) {
         {/* Search input for live Ticket No search */}
         <FormControl maxW="240px">
           <FormLabel fontSize="sm" mb={1}>Search Ticket No</FormLabel>
-          <Input
-            placeholder="Search by Ticket No"
-            size="sm"
-            value={searchTicketNo}
-            onChange={(e) => setSearchTicketNo(e.target.value)}
-          />
+          <HStack>
+            <Input
+              placeholder="Search by Ticket No"
+              size="sm"
+              value={searchTicketNo}
+              onChange={(e) => setSearchTicketNo(e.target.value)}
+            />
+            <IconButton
+              aria-label="Clear search"
+              size="sm"
+              icon={<CloseIcon />}
+              onClick={async () => {
+                if (!searchTicketNo) return;
+                setSearchTicketNo('');
+                setCurrentPage(1);
+                await fetchTickets();
+              }}
+            />
+          </HStack>
         </FormControl>
 
         <Box flex="1" />
