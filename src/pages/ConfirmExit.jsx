@@ -175,9 +175,9 @@ export default function ConfirmExit() {
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
 
-  const [allTickets, setAllTickets] = useState([]);
+  const [allTickets, setAllTickets] = useState([]); // pending tickets (status = 'Pending')
   const [filteredResults, setFilteredResults] = useState([]);
-  const [confirmedTickets, setConfirmedTickets] = useState([]);
+  const [confirmedTickets, setConfirmedTickets] = useState([]); // deduped confirmed exits (unique by ticket_id)
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [actionType, setActionType] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -190,6 +190,9 @@ export default function ConfirmExit() {
 
   const [totalTickets, setTotalTickets] = useState(null);
   const printRef = useRef(null);
+
+  // Confirmed search (live)
+  const [confirmedQuery, setConfirmedQuery] = useState('');
 
   // Helpers
   const formatDate = (iso) => {
@@ -218,7 +221,7 @@ export default function ConfirmExit() {
     return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
   };
 
-  // Fetch pending tickets (Pending) and confirmed exits (outgate). Include driver on outgate.
+  // Fetch pending tickets (Pending)
   const fetchTickets = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -235,33 +238,52 @@ export default function ConfirmExit() {
     }
   }, [toast]);
 
+  // Fetch confirmed exits and dedupe (keep latest per ticket_id)
   const fetchConfirmedExits = useCallback(async () => {
     try {
       const { data, error } = await supabase
         .from('outgate')
         .select('id, ticket_id, ticket_no, vehicle_number, container_id, sad_no, gross, tare, net, created_at, file_url, file_name, driver')
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false }); // newest first
 
       if (error) throw error;
 
       const rows = data || [];
 
-      // For rows without driver but with a pdf file_url, try to extract driver from PDF (best-effort).
-      const needsDriver = rows.filter((r) => (!r.driver || r.driver === '') && r.file_url && isPdfUrl(r.file_url));
+      // Deduplicate by ticket_id: keep the first (newest) row per ticket_id
+      const dedupeMap = new Map();
+      for (const r of rows) {
+        // Only dedupe rows that have a ticket_id; rows with no ticket_id will be kept separately (but not counted towards unique confirmed count)
+        if (r.ticket_id) {
+          if (!dedupeMap.has(r.ticket_id)) {
+            dedupeMap.set(r.ticket_id, r);
+          }
+        }
+      }
+
+      // Keep unique deduped rows (as an array)
+      const deduped = Array.from(dedupeMap.values());
+
+      // For rows without ticket_id (rare), we can optionally keep them appended (but they won't affect unique ticket counts)
+      const noTicketIdRows = rows.filter((r) => !r.ticket_id);
+
+      // Combine deduped (unique) + noTicketIdRows (kept at the end)
+      const finalConfirmed = [...deduped, ...noTicketIdRows];
+
+      // For any finalConfirmed rows missing driver and having a PDF, try to extract driver (best-effort)
+      const needsDriver = finalConfirmed.filter((r) => (!r.driver || r.driver === '') && r.file_url && isPdfUrl(r.file_url));
+
       if (needsDriver.length) {
-        // Process sequentially to avoid overwhelming network / CPU
         for (const r of needsDriver) {
           try {
             const text = await extractTextFromPdfUrl(r.file_url);
             const parsed = parseDriverNameFromText(text);
             if (parsed) {
-              // Update local object
               r.driver = parsed;
-              // Persist back to outgate table so future loads have it (best-effort)
+              // Best-effort persist back to outgate
               try {
                 await supabase.from('outgate').update({ driver: parsed }).eq('id', r.id);
               } catch (e) {
-                // ignore DB update error but log
                 console.warn('Failed to persist driver to outgate', e);
               }
             }
@@ -271,7 +293,7 @@ export default function ConfirmExit() {
         }
       }
 
-      setConfirmedTickets(rows);
+      setConfirmedTickets(finalConfirmed);
     } catch (err) {
       toast({ title: 'Error fetching confirmed exits', description: err?.message || 'Could not fetch confirmed exits', status: 'error', duration: 5000, isClosable: true });
     }
@@ -279,6 +301,7 @@ export default function ConfirmExit() {
 
   const fetchTotalTickets = useCallback(async () => {
     try {
+      // get count directly
       const resp = await supabase.from('tickets').select('ticket_id', { count: 'exact', head: true });
       const cnt = resp?.count ?? null;
       if (cnt != null) {
@@ -298,9 +321,9 @@ export default function ConfirmExit() {
     fetchTotalTickets();
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // Exclude confirmed tickets from pending list
+  // Exclude confirmed tickets from pending list (use the deduped confirmed ticket_ids)
   useEffect(() => {
-    const confirmedIds = new Set(confirmedTickets.map((t) => t.ticket_id));
+    const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
     const unconfirmed = allTickets.filter((t) => !confirmedIds.has(t.ticket_id));
     setFilteredResults(unconfirmed);
     setCurrentPage(1);
@@ -319,9 +342,9 @@ export default function ConfirmExit() {
     return hh * 60 + mm;
   };
 
-  // Search & filter
+  // Search & filter for pending tickets
   const handleSearch = () => {
-    const confirmedIds = new Set(confirmedTickets.map((t) => t.ticket_id));
+    const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
 
     const df = dateFrom ? new Date(dateFrom) : null;
     const dt = dateTo ? new Date(dateTo) : null;
@@ -366,7 +389,7 @@ export default function ConfirmExit() {
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
-    const confirmedIds = new Set(confirmedTickets.map((t) => t.ticket_id));
+    const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
     const unconfirmed = allTickets.filter((t) => !confirmedIds.has(t.ticket_id));
     setFilteredResults(unconfirmed);
     setCurrentPage(1);
@@ -427,12 +450,25 @@ export default function ConfirmExit() {
 
   const totalPages = Math.max(1, Math.ceil(sortedResults.length / pendingPageSize));
 
+  // Confirmed search + pagination: filter confirmedTickets (deduped)
+  const filteredConfirmed = useMemo(() => {
+    if (!confirmedQuery) return confirmedTickets;
+    const q = confirmedQuery.toLowerCase();
+    return confirmedTickets.filter((r) => {
+      const truck = (r.vehicle_number || r.gnsw_truck_no || '').toString().toLowerCase();
+      const driver = (r.driver || '').toString().toLowerCase();
+      const sad = (r.sad_no || '').toString().toLowerCase();
+      const ticketNo = (r.ticket_no || '').toString().toLowerCase();
+      return truck.includes(q) || driver.includes(q) || sad.includes(q) || ticketNo.includes(q);
+    });
+  }, [confirmedTickets, confirmedQuery]);
+
   const paginatedConfirmed = useMemo(() => {
     const start = (confirmedPage - 1) * PAGE_SIZE;
-    return confirmedTickets.slice(start, start + PAGE_SIZE);
-  }, [confirmedTickets, confirmedPage]);
+    return filteredConfirmed.slice(start, start + PAGE_SIZE);
+  }, [filteredConfirmed, confirmedPage]);
 
-  const totalConfirmedPages = Math.max(1, Math.ceil(confirmedTickets.length / PAGE_SIZE));
+  const totalConfirmedPages = Math.max(1, Math.ceil(filteredConfirmed.length / PAGE_SIZE));
 
   // Open modal for view or confirm
   const openActionModal = async (ticket, type) => {
@@ -469,7 +505,7 @@ export default function ConfirmExit() {
     }
   };
 
-  // Confirm exit: if ticket.driver missing, try to parse from ticket.file_url before inserting
+  // Confirm exit: check for existing outgate (prevent duplicates), then insert
   const handleConfirmExit = async () => {
     if (!selectedTicket) return;
     try {
@@ -494,11 +530,48 @@ export default function ConfirmExit() {
         gross,
         tare,
         net,
-        date: selectedTicket.date || null, // entry date
+        // date represents entry date; outgate table uses created_at for exit time
+        // include date if you want to store original entry date
+        date: selectedTicket.date || null,
         file_url: selectedTicket.file_url || null,
         file_name: selectedTicket.file_name || null,
         driver: resolvedDriver || null, // <-- include driver column in outgate
       };
+
+      // Prevent duplicate outgate insert for same ticket_id
+      if (payload.ticket_id) {
+        const { data: existing, error: existingErr } = await supabase
+          .from('outgate')
+          .select('id, created_at')
+          .eq('ticket_id', payload.ticket_id)
+          .limit(1);
+        if (existingErr) {
+          console.warn('check existing outgate error', existingErr);
+        }
+        if (existing && existing.length) {
+          toast({
+            title: 'Already confirmed',
+            description: `Ticket ${payload.ticket_id} already has a confirmed exit.`,
+            status: 'warning',
+            duration: 4000,
+            isClosable: true,
+          });
+
+          // still ensure ticket status is set to Exited in tickets table (best-effort)
+          try {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', payload.ticket_id);
+            // refresh lists
+            await fetchTickets();
+            await fetchConfirmedExits();
+            await fetchTotalTickets();
+          } catch (e) {
+            // ignore
+          }
+
+          onClose();
+          return;
+        }
+      }
 
       const { error: insertErr } = await supabase.from('outgate').insert([payload]);
       if (insertErr) {
@@ -507,7 +580,9 @@ export default function ConfirmExit() {
       }
 
       // update tickets table status
-      await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
+      if (selectedTicket.ticket_id) {
+        await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
+      }
 
       toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no}`, status: 'success', duration: 3000, isClosable: true });
 
@@ -547,11 +622,11 @@ export default function ConfirmExit() {
   };
 
   const handleExportConfirmed = () => {
-    const rows = confirmedTickets.map((r) => {
+    const rows = filteredConfirmed.map((r) => {
       const w = computeWeights(r);
       return {
         'Ticket No': r.ticket_no ?? '',
-        'Truck': r.vehicle_number ?? '',
+        'Truck': r.vehicle_number ?? r.gnsw_truck_no ?? '',
         'SAD No': r.sad_no ?? '',
         'Container': r.container_id ?? '',
         'Exit Date': r.created_at ? formatDate(r.created_at) : '',
@@ -603,6 +678,11 @@ export default function ConfirmExit() {
     w.close();
   };
 
+  // Derived counts for stats (use deduped confirmed count)
+  const pendingCount = allTickets.length; // Pending rows (not yet Exited)
+  const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length; // number of unique ticket_id
+  const noTicketIdConfirmedCount = confirmedTickets.filter((t) => !t.ticket_id).length;
+
   return (
     <Box p={{ base: 4, md: 8 }}>
       <Flex justify="space-between" align="center" mb={6} flexWrap="wrap" gap={4}>
@@ -628,13 +708,13 @@ export default function ConfirmExit() {
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={6}>
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="gray.200">
           <StatLabel>Pending</StatLabel>
-          <StatNumber>{allTickets.length}</StatNumber>
+          <StatNumber>{pendingCount}</StatNumber>
           <StatHelpText>Tickets awaiting exit</StatHelpText>
         </Stat>
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="gray.200">
           <StatLabel>Confirmed Exits</StatLabel>
-          <StatNumber>{confirmedTickets.length}</StatNumber>
-          <StatHelpText>Already processed</StatHelpText>
+          <StatNumber>{confirmedUniqueCount}</StatNumber>
+          <StatHelpText>Unique confirmed tickets ({noTicketIdConfirmedCount} rows without ticket_id)</StatHelpText>
         </Stat>
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="gray.200">
           <StatLabel>Total Tickets</StatLabel>
@@ -800,8 +880,21 @@ export default function ConfirmExit() {
         </ModalContent>
       </Modal>
 
-      {/* Confirmed exits */}
-      <Heading size="md" mt={10} mb={4}>Confirmed Exits</Heading>
+      {/* Confirmed exits header + live search */}
+      <Flex align="center" justify="space-between" mt={10} mb={4} gap={4} flexWrap="wrap">
+        <Heading size="md">Confirmed Exits</Heading>
+        <HStack spacing={2}>
+          <Input
+            placeholder="Search confirmed by Truck, Driver, SAD, or Ticket No (live)"
+            value={confirmedQuery}
+            onChange={(e) => { setConfirmedQuery(e.target.value); setConfirmedPage(1); }}
+            size="sm"
+            maxW="380px"
+          />
+          <Button size="sm" onClick={() => { setConfirmedQuery(''); setConfirmedPage(1); }}>Clear</Button>
+        </HStack>
+      </Flex>
+
       <Box bg="white" borderRadius="md" boxShadow="sm" overflowX="auto">
         <Table variant="simple" size="sm">
           <Thead bg="gray.100">
@@ -824,7 +917,7 @@ export default function ConfirmExit() {
                 <Tr key={ticket.ticket_id || ticket.id}>
                   <Td>{ticket.ticket_no ?? '-'}</Td>
                   <Td>{ticket.sad_no ?? '—'}</Td>
-                  <Td>{ticket.vehicle_number ?? '—'}</Td>
+                  <Td>{ticket.vehicle_number ?? ticket.gnsw_truck_no ?? '—'}</Td>
                   <Td isNumeric>{formatWeight(gross)}</Td>
                   <Td isNumeric>{formatWeight(tare)}</Td>
                   <Td isNumeric>{formatWeight(net)}</Td>
