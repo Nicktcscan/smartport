@@ -186,6 +186,22 @@ function sortTicketsByDateDesc(arr) {
   });
 }
 
+// ---------------- Duplicate removal helper ----------------
+function removeDuplicates(tickets) {
+  const seen = new Set();
+  return tickets.filter((t) => {
+    const { gross, tare, net } = t.data || {};
+    // Use numeric canonical values so "1,000" and "1000" match
+    const G = numericValue(gross) ?? 0;
+    const T = numericValue(tare) ?? 0;
+    const N = numericValue(net) ?? 0;
+    const key = `${G}-${T}-${N}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 // ---------------- PDF row ----------------
 function PdfTicketRow({ ticket, operatorName }) {
   const d = ticket.data || {};
@@ -616,7 +632,14 @@ export default function WeightReports() {
         },
       }));
 
-      const sortedOriginal = sortTicketsByDateDesc(mappedTickets);
+      // ✅ Remove duplicates here (at data fetch stage)
+      const dedupedTickets = removeDuplicates(mappedTickets);
+      if (dedupedTickets.length < mappedTickets.length) {
+        const removed = mappedTickets.length - dedupedTickets.length;
+        toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by (gross, tare, net)`, status: 'info', duration: 3500, isClosable: true });
+      }
+
+      const sortedOriginal = sortTicketsByDateDesc(dedupedTickets);
       setOriginalTickets(sortedOriginal);
 
       setReportMeta({
@@ -1131,6 +1154,7 @@ export default function WeightReports() {
     });
   };
 
+  // ---------------------- UI (unchanged) ----------------------
   // ----------------- UI -----------------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }}>
@@ -1483,8 +1507,7 @@ export default function WeightReports() {
           )
         )}
       </Box>
-
-      {/* Ticket modal */}
+{/* Ticket modal */}
       <Modal isOpen={isOpen} onClose={() => { onClose(); setIsEditing(false); setEditData({}); setEditErrors({}); }} size={modalSize} isCentered scrollBehavior="inside">
         <ModalOverlay />
         <AnimatePresence>
