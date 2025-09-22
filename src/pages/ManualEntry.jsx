@@ -32,6 +32,9 @@ import {
   Th,
   Td,
   Progress,
+  VStack,
+  useBreakpointValue,
+  Stack,
 } from '@chakra-ui/react';
 import { ViewIcon, ExternalLinkIcon } from '@chakra-ui/icons';
 import { supabase } from '../supabaseClient';
@@ -182,6 +185,79 @@ function getCondensedPages(current, total, edge = 1, around = 2) {
 }
 
 /* -----------------------
+   Ticket generation utility (keeps your M-#### pattern)
+   ----------------------- */
+async function getNextTicketNoFromDB(localHistory = []) {
+  try {
+    const { data, error } = await supabase
+      .from('tickets')
+      .select('ticket_no')
+      .ilike('ticket_no', 'M-%')
+      .order('submitted_at', { ascending: false })
+      .limit(1000);
+
+    if (error) {
+      console.warn('Could not fetch ticket_no from DB; falling back to local history', error);
+    }
+
+    const candidates = (data && data.map((r) => r.ticket_no).filter(Boolean)) || localHistory.map((h) => h.data?.ticketNo).filter(Boolean);
+
+    let maxNum = 0;
+    const re = /^M-(\d+)$/i;
+    for (const t of candidates) {
+      const m = String(t).trim().match(re);
+      if (m && m[1]) {
+        const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
+        if (!isNaN(n) && n > maxNum) maxNum = n;
+      }
+    }
+
+    const next = maxNum + 1;
+    return `M-${String(next).padStart(4, '0')}`;
+  } catch (err) {
+    console.error('getNextTicketNoFromDB error', err);
+    let maxNum = 0;
+    const re = /^M-(\d+)$/i;
+    for (const h of localHistory) {
+      const t = h.data?.ticketNo;
+      const m = String(t).trim().match(re);
+      if (m && m[1]) {
+        const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
+        if (!isNaN(n) && n > maxNum) maxNum = n;
+      }
+    }
+    return `M-${String(maxNum + 1).padStart(4, '0')}`;
+  }
+}
+
+/* Insert with retry to reduce chance of duplicate ticket_no collisions */
+async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 5) {
+  let attempt = 0;
+  while (attempt < retryLimit) {
+    attempt += 1;
+    const nextTicketNo = await getNextTicketNoFromDB(historyRef);
+    insertData.ticket_no = nextTicketNo;
+    insertData.ticket_id = nextTicketNo;
+
+    const { data, error } = await supabase.from('tickets').insert([insertData]);
+    if (!error) {
+      return { data, error: null, ticketNo: nextTicketNo };
+    }
+
+    const msg = String(error?.message || '').toLowerCase();
+    if (msg.includes('duplicate') || msg.includes('unique')) {
+      console.warn(`ticket_no collision on attempt ${attempt} (${nextTicketNo}), retrying...`);
+      await new Promise((res) => setTimeout(res, 120 * attempt));
+      continue;
+    }
+
+    return { data: null, error, ticketNo: null };
+  }
+
+  return { data: null, error: new Error('Too many retries generating ticket number'), ticketNo: null };
+}
+
+/* -----------------------
    Main Component
    ----------------------- */
 export default function ManualEntry() {
@@ -300,79 +376,6 @@ export default function ManualEntry() {
     });
   };
 
-  /* -----------------------
-     Ticket number generation (from ticket_no)
-  ----------------------- */
-  const getNextTicketNoFromDB = useCallback(async (localHistory = []) => {
-    try {
-      const { data, error } = await supabase
-        .from('tickets')
-        .select('ticket_no')
-        .ilike('ticket_no', 'M-%')
-        .order('submitted_at', { ascending: false })
-        .limit(1000);
-
-      if (error) {
-        console.warn('Could not fetch ticket_no from DB; falling back to local history', error);
-      }
-
-      const candidates = (data && data.map((r) => r.ticket_no).filter(Boolean)) || localHistory.map((h) => h.data?.ticketNo).filter(Boolean);
-
-      let maxNum = 0;
-      const re = /^M-(\d+)$/i;
-      for (const t of candidates) {
-        const m = String(t).trim().match(re);
-        if (m && m[1]) {
-          const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
-          if (!isNaN(n) && n > maxNum) maxNum = n;
-        }
-      }
-
-      const next = maxNum + 1;
-      return `M-${String(next).padStart(4, '0')}`;
-    } catch (err) {
-      console.error('getNextTicketNoFromDB error', err);
-      let maxNum = 0;
-      const re = /^M-(\d+)$/i;
-      for (const h of localHistory) {
-        const t = h.data?.ticketNo;
-        const m = String(t).trim().match(re);
-        if (m && m[1]) {
-          const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
-          if (!isNaN(n) && n > maxNum) maxNum = n;
-        }
-      }
-      return `M-${String(maxNum + 1).padStart(4, '0')}`;
-    }
-  }, []);
-
-  /* Insert with retry to reduce chance of duplicate ticket_no collisions */
-  const insertTicketWithRetry = useCallback(async (insertData, retryLimit = 5) => {
-    let attempt = 0;
-    while (attempt < retryLimit) {
-      attempt += 1;
-      const nextTicketNo = await getNextTicketNoFromDB(history);
-      insertData.ticket_no = nextTicketNo;
-      insertData.ticket_id = nextTicketNo;
-
-      const { data, error } = await supabase.from('tickets').insert([insertData]);
-      if (!error) {
-        return { data, error: null, ticketNo: nextTicketNo };
-      }
-
-      const msg = String(error?.message || '').toLowerCase();
-      if (msg.includes('duplicate') || msg.includes('unique')) {
-        console.warn(`ticket_no collision on attempt ${attempt} (${nextTicketNo}), retrying...`);
-        await new Promise((res) => setTimeout(res, 120 * attempt));
-        continue;
-      }
-
-      return { data: null, error, ticketNo: null };
-    }
-
-    return { data: null, error: new Error('Too many retries generating ticket number'), ticketNo: null };
-  }, [getNextTicketNoFromDB, history]);
-
   /* Fetch tare for truck (debounced) */
   const fetchTareForTruck = useCallback(async (truckNo) => {
     if (!truckNo) return;
@@ -399,6 +402,7 @@ export default function ManualEntry() {
         console.warn('Error fetching vehicle_tare_history', histErr);
       }
 
+      // update state only if changed
       setVehicleSummary((prev) => {
         const newSummary = summaryData || null;
         if (JSON.stringify(prev) === JSON.stringify(newSummary)) return prev;
@@ -558,8 +562,17 @@ export default function ManualEntry() {
           const mapped = data.map((item, idx) => {
             const ticketId = item.ticket_id ?? item.id ?? item.ticket_no ?? `unknown-${idx}-${Date.now()}`;
 
-            // NOTE: prefer gnsw_truck_no first (canonical source)
-            const truck = item.gnsw_truck_no ?? item.truck_on_wb ?? item.truckOnWb ?? '';
+            // canonical truck: gnsw_truck_no preferred, else truck_on_wb, else truckOnWb
+            const truck =
+              (item.gnsw_truck_no && String(item.gnsw_truck_no).trim()) ||
+              (item.truck_on_wb && String(item.truck_on_wb).trim()) ||
+              (item.truckOnWb && String(item.truckOnWb).trim()) ||
+              '';
+
+            // normalize numeric fields for display
+            const grossVal = (item.gross !== null && item.gross !== undefined) ? String(item.gross) : '';
+            const tareVal = (item.tare !== null && item.tare !== undefined) ? String(item.tare) : '';
+            const netVal = (item.net !== null && item.net !== undefined) ? String(item.net) : '';
 
             return {
               ticketId,
@@ -571,10 +584,10 @@ export default function ManualEntry() {
                 driver: item.driver ?? '',
                 sadNo: item.sad_no ?? item.sadNo ?? '',
                 containerNo: item.container_no ?? '',
-                gross: item.gross !== null && item.gross !== undefined ? formatNumber(String(item.gross)) : '',
-                tare: item.tare !== null && item.tare !== undefined ? formatNumber(String(item.tare)) : '',
-                net: item.net !== null && item.net !== undefined ? formatNumber(String(item.net)) : '',
-                manual: item.manual ?? '',
+                gross: grossVal,
+                tare: tareVal,
+                net: netVal,
+                manual: item.manual ?? 'Yes',
                 operator: item.operator ?? '',
                 status: item.status ?? '',
                 fileUrl: item.file_url ?? null,
@@ -613,8 +626,7 @@ export default function ManualEntry() {
 
     load();
     return () => { mounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [toast]);
 
   /* Submit form (optimistic UI + DB) */
   const handleSubmit = async () => {
@@ -640,6 +652,7 @@ export default function ManualEntry() {
       net: formDataRef.current.net,
     });
 
+    // optimistic row
     const tempId = `tmp-${Date.now()}`;
     const tempTicket = {
       ticketId: tempId,
@@ -668,21 +681,21 @@ export default function ManualEntry() {
     // canonical truck value (we store it to gnsw_truck_no)
     const truck = formDataRef.current.truckOnWb || null;
 
+    // Build insert payload: prefer canonical names used elsewhere
     const insertData = {
-      // prefer gnsw_truck_no as canonical truck column
-      truck_on_wb: null,
       gnsw_truck_no: truck,
+      truck_on_wb: null,
       consignee: formDataRef.current.consignee || null,
       operation: formDataRef.current.operation || null,
       driver: formDataRef.current.driver || null,
       sad_no: formDataRef.current.sadNo || null,
       container_no: formDataRef.current.containerNo || null,
-      material: 'No Material',
+      material: null,
       pass_number: null,
       date: new Date().toISOString(),
       scale_name: 'WBRIDGE1',
-      weight: computed.grossValue !== null ? computed.grossValue : null,
-      manual: 'Yes',
+      weight: numericValue(formDataRef.current.gross) !== null ? numericValue(formDataRef.current.gross) : null,
+      manual: 'Yes', // canonical manual flag
       operator: operatorName || null,
       operator_id: operatorId || null,
       gross: computed.grossValue !== null ? computed.grossValue : null,
@@ -692,7 +705,7 @@ export default function ManualEntry() {
     };
 
     try {
-      const { data, error, ticketNo } = await insertTicketWithRetry(insertData, 5);
+      const { data, error, ticketNo } = await insertTicketWithRetry(insertData, history, 5);
       if (error) {
         setHistory((prev) => prev.filter((r) => r.ticketId !== tempId));
         toast({ title: 'Submit failed', description: error.message || String(error), status: 'error', duration: 5000, isClosable: true });
@@ -702,8 +715,8 @@ export default function ManualEntry() {
 
       const newTicketNo = ticketNo || (data && data[0] && data[0].ticket_no) || 'M-0001';
 
-      // record tare history
-      if (truck && computed.tareValue !== null) {
+      // record tare history if requested
+      if (truck && computed.tareValue !== null && saveTare) {
         try {
           await supabase.from('vehicle_tare_history').insert([
             {
@@ -862,6 +875,21 @@ export default function ManualEntry() {
     setPage(n);
   };
 
+  // stats summary
+  const stats = useMemo(() => {
+    const manualOnly = history.filter((h) => h.data.manual && String(h.data.manual).toLowerCase() === 'yes');
+    const count = manualOnly.length;
+    if (count === 0) return { count: 0, avgGross: null, avgNet: null };
+    const grossVals = manualOnly.map((m) => numericValue(m.data.gross)).filter((n) => n !== null);
+    const netVals = manualOnly.map((m) => numericValue(m.data.net)).filter((n) => n !== null);
+    const avgGross = grossVals.length ? grossVals.reduce((a, b) => a + b, 0) / grossVals.length : null;
+    const avgNet = netVals.length ? netVals.reduce((a, b) => a + b, 0) / netVals.length : null;
+    return { count, avgGross, avgNet };
+  }, [history]);
+
+  // responsive: mobile cards vs desktop table
+  const isMobile = useBreakpointValue({ base: true, md: false });
+
   /* -----------------------
      Render
   ----------------------- */
@@ -869,9 +897,24 @@ export default function ManualEntry() {
     <Box p={6} maxW="1200px" mx="auto">
       <Heading mb={6}>Manual Ticket Entry</Heading>
 
-      <Button onClick={onOpen} colorScheme="teal" mb={6}>
-        New Manual Ticket
-      </Button>
+      <Flex gap={4} align="center" mb={6} wrap="wrap">
+        <Button onClick={onOpen} colorScheme="teal">New Manual Ticket</Button>
+
+        <Box ml="auto" display="flex" gap={4} alignItems="center" flexWrap="wrap">
+          <Box>
+            <Text fontSize="sm" color="gray.600">Manual tickets</Text>
+            <Text fontWeight="bold">{stats.count}</Text>
+          </Box>
+          <Box>
+            <Text fontSize="sm" color="gray.600">Avg Gross</Text>
+            <Text fontWeight="bold">{stats.avgGross ? formatNumber(String(stats.avgGross)) + ' kg' : '—'}</Text>
+          </Box>
+          <Box>
+            <Text fontSize="sm" color="gray.600">Avg Net</Text>
+            <Text fontWeight="bold">{stats.avgNet ? formatNumber(String(stats.avgNet)) + ' kg' : '—'}</Text>
+          </Box>
+        </Box>
+      </Flex>
 
       <Modal
         isOpen={isOpen}
@@ -1077,47 +1120,110 @@ export default function ManualEntry() {
         </FormControl>
       </Box>
 
-      {/* History table */}
+      {/* History table / cards */}
       {filteredHistory.length === 0 ? (
         <Text>No tickets found.</Text>
       ) : (
         <>
-          <Table variant="striped" colorScheme="teal" size="sm">
-            <Thead>
-              <Tr>
-                <Th>Ticket No</Th>
-                <Th>Truck No</Th>
-                <Th>SAD No</Th>
-                <Th>Gross (KG)</Th>
-                <Th>Tare (KG)</Th>
-                <Th>Net (KG)</Th>
-                <Th>View</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
+          {isMobile ? (
+            <VStack spacing={3} align="stretch">
               {pagedHistory.map(({ ticketId, data, submittedAt }) => {
                 const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
+                const anomaly = (computed.grossValue !== null && computed.tareValue !== null && computed.netValue !== null && !(computed.grossValue > computed.tareValue));
                 return (
-                  <Tr key={ticketId}>
-                    <Td>{data.ticketNo}</Td>
-                    <Td>{data.truckOnWb}</Td>
-                    <Td>{data.sadNo}</Td>
-                    <Td>{computed.grossDisplay}</Td>
-                    <Td>{computed.tareDisplay}</Td>
-                    <Td>{computed.netDisplay}</Td>
-                    <Td>
-                      <HStack>
-                        {data.fileUrl && (
-                          <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
-                        )}
-                        <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
-                      </HStack>
-                    </Td>
-                  </Tr>
+                  <Box key={ticketId} borderWidth="1px" borderRadius="md" p={3} bg="white" boxShadow="sm">
+                    <Flex justify="space-between" align="center">
+                      <Box>
+                        <Text fontWeight="bold">{data.ticketNo}</Text>
+                        <Text fontSize="sm" color="gray.500">{data.truckOnWb || 'N/A'} • SAD: {data.sadNo || 'N/A'}</Text>
+                      </Box>
+                      <Box textAlign="right">
+                        {anomaly && <Badge colorScheme="red" mb={1}>Check weights</Badge>}
+                        {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge colorScheme="purple">Manual</Badge>}
+                      </Box>
+                    </Flex>
+
+                    <Stack direction="row" spacing={4} mt={3} justify="space-between">
+                      <Box>
+                        <Text fontSize="xs" color="gray.500">Gross</Text>
+                        <Text fontWeight="semibold">{computed.grossDisplay || '—'}</Text>
+                      </Box>
+                      <Box>
+                        <Text fontSize="xs" color="gray.500">Tare</Text>
+                        <Text fontWeight="semibold">{computed.tareDisplay || '—'}</Text>
+                      </Box>
+                      <Box>
+                        <Text fontSize="xs" color="gray.500">Net</Text>
+                        <Text fontWeight="semibold">{computed.netDisplay || '—'}</Text>
+                      </Box>
+                    </Stack>
+
+                    <Flex mt={3} justify="flex-end" gap={2}>
+                      {data.fileUrl && (
+                        <Button size="sm" variant="outline" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')}>Open PDF</Button>
+                      )}
+                      <Button size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })}>View</Button>
+                    </Flex>
+                  </Box>
                 );
               })}
-            </Tbody>
-          </Table>
+            </VStack>
+          ) : (
+            <Table variant="striped" colorScheme="teal" size="sm">
+              <Thead>
+                <Tr>
+                  <Th>Ticket No</Th>
+                  <Th>Truck No</Th>
+                  <Th>SAD No</Th>
+                  <Th>Gross (KG)</Th>
+                  <Th>Tare (KG)</Th>
+                  <Th>Net (KG)</Th>
+                  <Th>View</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {pagedHistory.map(({ ticketId, data, submittedAt }) => {
+                  const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
+                  const anomaly = (computed.grossValue !== null && computed.tareValue !== null && computed.netValue !== null && !(computed.grossValue > computed.tareValue));
+                  return (
+                    <Tr key={ticketId}>
+                      <Td>
+                        <Box>
+                          <Text>{data.ticketNo}</Text>
+                          {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge ml={2} colorScheme="purple">Manual</Badge>}
+                        </Box>
+                      </Td>
+                      <Td>{data.truckOnWb}</Td>
+                      <Td>{data.sadNo}</Td>
+                      <Td>{computed.grossDisplay}</Td>
+                      <Td>
+                        <Box display="flex" alignItems="center" gap={2}>
+                          <Text>{computed.tareDisplay}</Text>
+                          {isTareAnomaly && data.truckOnWb && String(data.truckOnWb).trim() === String(formData.truckOnWb).trim() && (
+                            <Badge colorScheme="red">Tare anomaly</Badge>
+                          )}
+                        </Box>
+                      </Td>
+                      <Td>
+                        <Box display="flex" alignItems="center" gap={2}>
+                          <Text>{computed.netDisplay}</Text>
+                          {anomaly && <Badge colorScheme="red">Check</Badge>}
+                        </Box>
+                      </Td>
+                      <Td>
+                        <HStack>
+                          {data.fileUrl && (
+                            <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
+                          )}
+                          <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
+                        </HStack>
+                      </Td>
+                    </Tr>
+                  );
+                })}
+              </Tbody>
+            </Table>
+          )}
 
           {/* Pagination (condensed) */}
           <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
@@ -1172,6 +1278,22 @@ export default function ManualEntry() {
                 <SimpleGrid columns={[1, 2]} spacing={4}>
                   {Object.entries(viewTicket.data).map(([key, value]) => {
                     if (key === 'fileUrl') return null;
+                    const computedKeys = ['gross', 'tare', 'net'];
+                    if (computedKeys.includes(key)) {
+                      const computed = computeWeights({
+                        gross: viewTicket.data.gross,
+                        tare: viewTicket.data.tare,
+                        net: viewTicket.data.net,
+                      });
+                      const display = key === 'gross' ? computed.grossDisplay : key === 'tare' ? computed.tareDisplay : computed.netDisplay;
+                      return (
+                        <Box key={key} p={3} borderWidth="1px" borderRadius="md" bg="gray.50">
+                          <Text fontWeight="semibold" color="teal.600" mb={1}>{key}</Text>
+                          <Text>{display || 'N/A'}</Text>
+                        </Box>
+                      );
+                    }
+
                     return (
                       <Box key={key} p={3} borderWidth="1px" borderRadius="md" bg="gray.50">
                         <Text fontWeight="semibold" color="teal.600" mb={1} textTransform="capitalize">{key}</Text>
