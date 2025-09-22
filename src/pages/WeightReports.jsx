@@ -50,7 +50,6 @@ import {
   MenuButton,
   MenuList,
   MenuItem,
-  BoxProps,
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowForwardIcon } from '@chakra-ui/icons';
@@ -144,7 +143,7 @@ function numericValue(v) {
 function formatNumber(v) {
   const n = numericValue(v);
   if (n === null) return '';
-  return Number.isInteger(n) ? n.toLocaleString('en-US') : n.toFixed(2).toLocaleString('en-US');
+  return Number.isInteger(n) ? n.toLocaleString('en-US') : Number(n.toFixed(2)).toLocaleString('en-US');
 }
 function computeWeightsFromObj({ gross, tare, net }) {
   let G = numericValue(gross);
@@ -156,24 +155,67 @@ function computeWeightsFromObj({ gross, tare, net }) {
   if ((T === null || T === undefined) && G !== null && N !== null) T = G - N;
 
   return {
-    grossValue: G !== null ? G : null,
-    tareValue: T !== null ? T : null,
-    netValue: N !== null ? N : null,
-    grossDisplay: G !== null ? formatNumber(G) : '',
-    tareDisplay: T !== null ? formatNumber(T) : '',
-    netDisplay: N !== null ? formatNumber(N) : '',
+    grossValue: G !== null && G !== undefined ? G : null,
+    tareValue: T !== null && T !== undefined ? T : null,
+    netValue: N !== null && N !== undefined ? N : null,
+    grossDisplay: G !== null && G !== undefined ? formatNumber(G) : '',
+    tareDisplay: T !== null && T !== undefined ? formatNumber(T) : '',
+    netDisplay: N !== null && N !== undefined ? formatNumber(N) : '',
   };
 }
+
+/**
+ * Robust date parsing helper.
+ * - Accepts Date, timestamp, ISO, or many human readable forms.
+ * - Tries `new Date()`, and if invalid attempts to clamp seconds > 59.
+ */
 function parseTicketDate(raw) {
   if (!raw) return null;
-  if (raw instanceof Date) return raw;
-  if (typeof raw === 'number') return new Date(raw);
+  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+  if (typeof raw === 'number') {
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
   const s = String(raw).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + 'T00:00:00');
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) return d;
+  if (s === '') return null;
+
+  // ISO-like YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const d = new Date(s + 'T00:00:00');
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Try Date.parse first
+  const d0 = new Date(s);
+  if (!isNaN(d0.getTime())) return d0;
+
+  // Try to detect patterns like "22-Sep-25 12:35:61 AM" and clamp seconds to 59
+  const m = s.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)?/i);
+  if (m) {
+    let [ , datePart, hh, mm, ss, ampm ] = m;
+    let secNum = parseInt(ss, 10);
+    if (secNum > 59) secNum = 59;
+    // normalize two-digit year to 4-digit if needed
+    let yearPart = datePart.split('-')[2];
+    if (yearPart.length === 2) {
+      const y = Number(yearPart);
+      yearPart = y >= 70 ? `19${String(y).padStart(2,'0')}` : `20${String(y).padStart(2,'0')}`;
+      datePart = datePart.split('-').slice(0,2).concat([yearPart]).join('-');
+    }
+    const fixed = `${datePart} ${String(hh).padStart(2,'0')}:${mm}:${String(secNum).padStart(2,'0')}${ampm ? ' ' + ampm : ''}`;
+    const d1 = new Date(fixed);
+    if (!isNaN(d1.getTime())) return d1;
+  }
+
+  // Last resort: attempt to parse numbers-only timestamp
   const maybeNum = Number(s);
-  return !Number.isNaN(maybeNum) ? new Date(maybeNum) : null;
+  if (!Number.isNaN(maybeNum)) {
+    const d2 = new Date(maybeNum);
+    return isNaN(d2.getTime()) ? null : d2;
+  }
+
+  return null;
 }
 function sortTicketsByDateDesc(arr) {
   return (arr || []).slice().sort((a, b) => {
@@ -186,20 +228,51 @@ function sortTicketsByDateDesc(arr) {
   });
 }
 
-// ---------------- Duplicate removal helper ----------------
-function removeDuplicates(tickets) {
-  const seen = new Set();
-  return tickets.filter((t) => {
-    const { gross, tare, net } = t.data || {};
-    // Use numeric canonical values so "1,000" and "1000" match
-    const G = numericValue(gross) ?? 0;
-    const T = numericValue(tare) ?? 0;
-    const N = numericValue(net) ?? 0;
-    const key = `${G}-${T}-${N}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+// ---------------- Duplicate removal helper (by ticket number) ----------------
+/**
+ * Deduplicate by ticket number (preferred) or ticketId.
+ * Keeps the most recently dated record (by data.date) when duplicates are found.
+ * If dates are equal or missing, prefers the record with fileUrl present.
+ */
+function removeDuplicatesByTicketNo(tickets = []) {
+  const map = new Map();
+
+  for (const t of tickets) {
+    const rawKey = (t.data && (t.data.ticketNo ?? t.ticketId)) || t.ticketId || '';
+    const key = String(rawKey || '').trim().toUpperCase();
+
+    if (!key) {
+      // keep items without ticket number, using generated unique id
+      const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
+      map.set(fallbackKey, t);
+      continue;
+    }
+
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, t);
+      continue;
+    }
+
+    // choose which to keep: prefer one with later date
+    const da = parseTicketDate(existing.data?.date);
+    const db = parseTicketDate(t.data?.date);
+
+    if (db && (!da || db.getTime() > da.getTime())) {
+      map.set(key, t);
+      continue;
+    }
+    if (!da && !db) {
+      // prefer the one with fileUrl
+      if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
+        map.set(key, t);
+      }
+      // else keep existing
+    }
+    // otherwise keep existing
+  }
+
+  return Array.from(map.values());
 }
 
 // ---------------- PDF row ----------------
@@ -244,7 +317,7 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
   const rawSad = reportMeta?.sad ?? '';
   const sadLabel = rawSad ? String(rawSad).replace(/^SAD:\s*/i, '') : 'N/A';
 
-  const manualEntries = tickets.filter(t => t.data.ticketNo?.startsWith('M-'));
+  const manualEntries = tickets.filter(t => String(t.data.ticketNo || '').startsWith('M-'));
   const totalManualEntries = manualEntries.length;
   const cumulativeManualNetWeight = manualEntries.reduce((sum, t) => {
     const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
@@ -554,11 +627,11 @@ export default function WeightReports() {
         const kb = numericValue(b.data[sortBy]) ?? 0;
         return (ka - kb) * dir;
       }
-      if (sortBy === 'ticketNo') {
+      if (sortBy === 'ticketNo' || sortBy === 'ticketno') {
         const sa = String(a.data.ticketNo || '').localeCompare(String(b.data.ticketNo || '')) * dir;
         return sa;
       }
-      if (sortBy === 'sadNo') {
+      if (sortBy === 'sadNo' || sortBy === 'sadNo') {
         return String(a.data.sadNo || '').localeCompare(String(b.data.sadNo || '')) * dir;
       }
       if (sortBy === 'truck') {
@@ -632,11 +705,11 @@ export default function WeightReports() {
         },
       }));
 
-      // ✅ Remove duplicates here (at data fetch stage)
-      const dedupedTickets = removeDuplicates(mappedTickets);
+      // ✅ Remove duplicates here (at data fetch stage) — by ticket number
+      const dedupedTickets = removeDuplicatesByTicketNo(mappedTickets);
       if (dedupedTickets.length < mappedTickets.length) {
         const removed = mappedTickets.length - dedupedTickets.length;
-        toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by (gross, tare, net)`, status: 'info', duration: 3500, isClosable: true });
+        toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
       }
 
       const sortedOriginal = sortTicketsByDateDesc(dedupedTickets);
@@ -1155,7 +1228,6 @@ export default function WeightReports() {
   };
 
   // ---------------------- UI (unchanged) ----------------------
-  // ----------------- UI -----------------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }}>
       {/* Header */}
