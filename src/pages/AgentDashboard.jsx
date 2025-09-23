@@ -612,28 +612,6 @@ export default function OutgateReports() {
         </HStack>
       </Flex>
 
-      <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={6}>
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Total SADs</StatLabel>
-          <StatNumber>{totals.totalSads}</StatNumber>
-          <StatHelpText>distinct SAD numbers</StatHelpText>
-        </Stat>
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Total Exits</StatLabel>
-          <StatNumber>{totals.totalExits}</StatNumber>
-          <StatHelpText>outgate rows</StatHelpText>
-        </Stat>
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Total Tickets</StatLabel>
-          <StatNumber>{totals.totalTickets}</StatNumber>
-          <StatHelpText>tickets referenced</StatHelpText>
-        </Stat>
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Filtered Results</StatLabel>
-          <StatNumber>{totals.reportsCount}</StatNumber>
-          <StatHelpText>matching current filters</StatHelpText>
-        </Stat>
-      </SimpleGrid>
 
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Text fontWeight="semibold" mb={2}>SAD Report (Search by SAD No)</Text>
