@@ -320,7 +320,7 @@ function App() {
         <Route
           path="/outgate/reports"
           element={
-            <ProtectedRoute allowedRoles={['outgate', 'admin', 'customs']}>
+            <ProtectedRoute allowedRoles={['outgate', 'admin', 'customs','agent']}>
               <Layout>
                 <Box as="main" p={4} bg="gray.50">
                   <OutgateReports />
