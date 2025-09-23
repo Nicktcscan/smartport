@@ -186,6 +186,7 @@ function getCondensedPages(current, total, edge = 1, around = 2) {
 
 /* -----------------------
    Ticket generation utility (keeps your M-#### pattern)
+   - returns { nextTicketNo, maxNum } so callers can fallback to offsetting on collisions
    ----------------------- */
 async function getNextTicketNoFromDB(localHistory = []) {
   try {
@@ -205,6 +206,7 @@ async function getNextTicketNoFromDB(localHistory = []) {
     let maxNum = 0;
     const re = /^M-(\d+)$/i;
     for (const t of candidates) {
+      if (!t) continue;
       const m = String(t).trim().match(re);
       if (m && m[1]) {
         const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
@@ -213,48 +215,91 @@ async function getNextTicketNoFromDB(localHistory = []) {
     }
 
     const next = maxNum + 1;
-    return `M-${String(next).padStart(4, '0')}`;
+    return { nextTicketNo: `M-${String(next).padStart(4, '0')}`, maxNum };
   } catch (err) {
     console.error('getNextTicketNoFromDB error', err);
     let maxNum = 0;
     const re = /^M-(\d+)$/i;
     for (const h of localHistory) {
       const t = h.data?.ticketNo;
+      if (!t) continue;
       const m = String(t).trim().match(re);
       if (m && m[1]) {
         const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
         if (!isNaN(n) && n > maxNum) maxNum = n;
       }
     }
-    return `M-${String(maxNum + 1).padStart(4, '0')}`;
+    const next = maxNum + 1;
+    return { nextTicketNo: `M-${String(next).padStart(4, '0')}`, maxNum };
   }
 }
 
 /* Insert with retry to reduce chance of duplicate ticket_no collisions */
-async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 5) {
+async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7) {
   let attempt = 0;
+  let lastMaxNum = null;
+
   while (attempt < retryLimit) {
     attempt += 1;
-    const nextTicketNo = await getNextTicketNoFromDB(historyRef);
-    insertData.ticket_no = nextTicketNo;
-    insertData.ticket_id = nextTicketNo;
 
-    const { data, error } = await supabase.from('tickets').insert([insertData]);
-    if (!error) {
-      return { data, error: null, ticketNo: nextTicketNo };
-    }
+    // Fetch base suggestion
+    const { nextTicketNo, maxNum } = await getNextTicketNoFromDB(historyRef);
+    lastMaxNum = maxNum !== undefined && maxNum !== null ? maxNum : lastMaxNum;
 
-    const msg = String(error?.message || '').toLowerCase();
-    if (msg.includes('duplicate') || msg.includes('unique')) {
-      console.warn(`ticket_no collision on attempt ${attempt} (${nextTicketNo}), retrying...`);
-      await new Promise((res) => setTimeout(res, 120 * attempt));
+    // If we've already attempted before, prefer to offset by attempt to avoid repeated collisions
+    const candidateNum = (lastMaxNum || 0) + attempt;
+    const candidateTicketNo = `M-${String(candidateNum).padStart(4, '0')}`;
+
+    // Use candidateTicketNo computed above (this ensures we don't repeatedly try the same one)
+    insertData.ticket_no = candidateTicketNo;
+    insertData.ticket_id = candidateTicketNo;
+
+    try {
+      const { data, error } = await supabase.from('tickets').insert([insertData]);
+
+      if (!error) {
+        return { data, error: null, ticketNo: candidateTicketNo };
+      }
+
+      const msg = String(error?.message || '').toLowerCase();
+      // If unique/duplicate conflict, we retry with increasing offset
+      if (msg.includes('duplicate') || msg.includes('unique') || (error?.status === 409)) {
+        console.warn(`ticket_no collision on attempt ${attempt} (${candidateTicketNo}), retrying...`);
+        // small exponential-ish backoff
+        await new Promise((res) => setTimeout(res, 120 * attempt + Math.floor(Math.random() * 100)));
+        continue;
+      }
+
+      // any other error -> return
+      return { data: null, error, ticketNo: null };
+    } catch (err) {
+      // network / unexpected error: try again (but be cautious)
+      console.warn('Insert attempt threw, retrying if attempts remain', err);
+      await new Promise((res) => setTimeout(res, 150 * attempt));
       continue;
     }
-
-    return { data: null, error, ticketNo: null };
   }
 
   return { data: null, error: new Error('Too many retries generating ticket number'), ticketNo: null };
+}
+
+/* -----------------------
+   Deduplicate tickets by ticketNo (keep first occurrence)
+   ----------------------- */
+function dedupeByTicketNo(tickets = []) {
+  const seen = new Set();
+  const out = [];
+  for (const t of tickets) {
+    const tn = String(t?.data?.ticketNo ?? t?.ticketId ?? '').trim();
+    if (!tn) {
+      out.push(t);
+      continue;
+    }
+    if (seen.has(tn)) continue;
+    seen.add(tn);
+    out.push(t);
+  }
+  return out;
 }
 
 /* -----------------------
@@ -596,8 +641,11 @@ export default function ManualEntry() {
             };
           });
 
+          // dedupe by ticketNo so UI won't show duplicates from DB
+          const deduped = dedupeByTicketNo(mapped);
+
           if (mounted) {
-            setHistory(mapped);
+            setHistory(deduped);
             setPage(1);
           }
         }
@@ -705,7 +753,7 @@ export default function ManualEntry() {
     };
 
     try {
-      const { data, error, ticketNo } = await insertTicketWithRetry(insertData, history, 5);
+      const { data, error, ticketNo } = await insertTicketWithRetry(insertData, history, 7);
       if (error) {
         setHistory((prev) => prev.filter((r) => r.ticketId !== tempId));
         toast({ title: 'Submit failed', description: error.message || String(error), status: 'error', duration: 5000, isClosable: true });
