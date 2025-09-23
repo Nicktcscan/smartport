@@ -1,1677 +1,953 @@
-// src/pages/WeightReports.jsx
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+// src/pages/OutgateReports.jsx
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Box,
-  Container,
-  Heading,
-  Input as ChakraInput,
   Button,
-  IconButton,
   Table,
   Thead,
   Tbody,
   Tr,
   Th,
   Td,
+  Input,
   Text,
+  Flex,
+  Spinner,
   useToast,
   Modal,
   ModalOverlay,
   ModalContent,
   ModalHeader,
-  ModalCloseButton,
   ModalBody,
-  useDisclosure,
   ModalFooter,
+  ModalCloseButton,
+  useDisclosure,
   Stack,
-  Flex,
-  Icon,
+  Divider,
   SimpleGrid,
-  HStack,
-  VStack,
-  FormControl,
   FormLabel,
-  FormErrorMessage,
-  AlertDialog,
-  AlertDialogOverlay,
-  AlertDialogContent,
-  AlertDialogHeader,
-  AlertDialogBody,
-  AlertDialogFooter,
-  Tooltip,
-  Spinner,
+  Select,
+  IconButton,
+  Badge,
+  HStack,
   Stat,
   StatLabel,
   StatNumber,
   StatHelpText,
-  StatGroup,
-  useBreakpointValue,
-  Menu,
-  MenuButton,
-  MenuList,
-  MenuItem,
-  BoxProps,
+  Tooltip,
+  Box as ChakraBox,
 } from '@chakra-ui/react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowForwardIcon } from '@chakra-ui/icons';
 import {
-  FaFileInvoice,
-  FaFilePdf,
-  FaExternalLinkAlt,
-  FaDownload,
-  FaShareAlt,
-  FaEnvelope,
-  FaUserTie,
-  FaTruck,
-  FaBox,
-  FaBalanceScale,
-  FaTrashAlt,
-  FaEdit,
-  FaCheck,
-  FaRedo,
-  FaFilter,
-  FaSearch,
-  FaTimes,
-  FaEllipsisV,
-  FaFileCsv,
-  FaSort,
-  FaSortUp,
-  FaSortDown,
-} from 'react-icons/fa';
-
+  SearchIcon,
+  RepeatIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+} from '@chakra-ui/icons';
+import { FaFilePdf, FaShareAlt, FaEnvelope } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
-import {
-  Document,
-  Page,
-  Text as PdfText,
-  View as PdfView,
-  StyleSheet,
-  pdf as pdfRender,
-  Image as PdfImage,
-} from '@react-pdf/renderer';
 
-const MotionModalContent = motion.create(ModalContent);
+const ITEMS_PER_PAGE = 5;
 
-// ---------------- PDF styles (fixed widths so they sum to 100%) ----------------
-const pdfStyles = StyleSheet.create({
-  page: {
-    paddingTop: 18,
-    paddingBottom: 36,
-    paddingHorizontal: 18,
-    fontSize: 9,
-    fontFamily: 'Helvetica',
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  companyBlock: { flexDirection: 'column', marginLeft: 8 },
-  companyName: { fontSize: 13, fontWeight: 'bold' },
-  reportTitle: { fontSize: 11, fontWeight: 'bold', marginBottom: 6, textAlign: 'center' },
-  summaryBox: { marginBottom: 8, padding: 8, borderWidth: 1, borderColor: '#ddd' },
-  metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  tableHeader: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
-    paddingBottom: 6,
-    marginBottom: 6,
-    alignItems: 'center',
-  },
-  tableRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' },
-
-  // column widths revised so total <= 100%
-  colSad: { width: '8%', fontSize: 8 },
-  colTicket: { width: '10%', fontSize: 8 },
-  colTruck: { width: '12%', fontSize: 8 },
-  colDate: { width: '16%', fontSize: 8 },
-  colGross: { width: '12%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
-  colTare: { width: '12%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
-  colNet: { width: '12%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
-  colDriver: { width: '9%', fontSize: 8, paddingLeft: 4 },
-  colOperator: { width: '9%', fontSize: 8, paddingLeft: 4 },
-
-  footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
-  logo: { width: 64, height: 64, objectFit: 'contain' },
-});
-
-// ---------------- Helpers ----------------
-function numericValue(v) {
-  if (v === null || v === undefined || v === '') return null;
-  const cleaned = String(v).replace(/[,\s]+/g, '').replace(/kg/i, '').trim();
-  const n = Number(cleaned);
+// --- small helpers ---
+function parseNumber(val) {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(String(val).toString().replace(/[, ]+/g, ''));
   return Number.isFinite(n) ? n : null;
 }
-function formatNumber(v) {
-  const n = numericValue(v);
-  if (n === null) return '';
-  return Number.isInteger(n) ? n.toLocaleString('en-US') : n.toFixed(2).toLocaleString('en-US');
-}
-function computeWeightsFromObj({ gross, tare, net }) {
-  let G = numericValue(gross);
-  let T = numericValue(tare);
-  let N = numericValue(net);
 
-  if ((G === null || G === undefined) && T !== null && N !== null) G = T + N;
-  if ((N === null || N === undefined) && G !== null && T !== null) N = G - T;
-  if ((T === null || T === undefined) && G !== null && N !== null) T = G - N;
+function computeWeights(row) {
+  const gross = parseNumber(row.gross);
+  const tare = parseNumber(row.tare);
+  const net = parseNumber(row.net);
 
-  return {
-    grossValue: G !== null ? G : null,
-    tareValue: T !== null ? T : null,
-    netValue: N !== null ? N : null,
-    grossDisplay: G !== null ? formatNumber(G) : '',
-    tareDisplay: T !== null ? formatNumber(T) : '',
-    netDisplay: N !== null ? formatNumber(N) : '',
-  };
-}
-function parseTicketDate(raw) {
-  if (!raw) return null;
-  if (raw instanceof Date) return raw;
-  if (typeof raw === 'number') return new Date(raw);
-  const s = String(raw).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return new Date(s + 'T00:00:00');
-  const d = new Date(s);
-  if (!isNaN(d.getTime())) return d;
-  const maybeNum = Number(s);
-  return !Number.isNaN(maybeNum) ? new Date(maybeNum) : null;
-}
-function sortTicketsByDateDesc(arr) {
-  return (arr || []).slice().sort((a, b) => {
-    const da = parseTicketDate(a?.data?.date);
-    const db = parseTicketDate(b?.data?.date);
-    if (!da && !db) return 0;
-    if (!da) return 1;
-    if (!db) return -1;
-    return db.getTime() - da.getTime();
-  });
+  let G = gross;
+  let T = tare;
+  let N = net;
+
+  if ((G === null || G === undefined) && T != null && N != null) G = T + N;
+  if ((T === null || T === undefined) && G != null && N != null) T = G - N;
+  if ((N === null || N === undefined) && G != null && T != null) N = G - T;
+
+  return { gross: G, tare: T, net: N };
 }
 
-// ---------------- PDF row ----------------
-function PdfTicketRow({ ticket, operatorName }) {
-  const d = ticket.data || {};
-  const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
-  const grossText = computed.grossDisplay || '0';
-  const tareText = computed.tareDisplay || '0';
-  const netText = computed.netDisplay || '0';
-  const driverText = d.driver ?? 'N/A';
-  const operatorText = operatorName ?? d.operator ?? 'N/A';
-  const ticketNo = d.ticketNo ?? ticket.ticketId ?? 'N/A';
-  const truckText = d.gnswTruckNo ?? d.anpr ?? d.truckNo ?? 'N/A';
-  const dateText = d.date ? new Date(d.date).toLocaleString() : 'N/A';
-
-  return (
-    <PdfView style={pdfStyles.tableRow} wrap={false}>
-      <PdfText style={pdfStyles.colSad}>{d.sadNo ?? 'N/A'}</PdfText>
-      <PdfText style={pdfStyles.colTicket}>{ticketNo}</PdfText>
-      <PdfText style={pdfStyles.colTruck}>{truckText}</PdfText>
-      <PdfText style={pdfStyles.colDate}>{dateText}</PdfText>
-      <PdfText style={pdfStyles.colGross}>{grossText}</PdfText>
-      <PdfText style={pdfStyles.colTare}>{tareText}</PdfText>
-      <PdfText style={pdfStyles.colNet}>{netText}</PdfText>
-      <PdfText style={pdfStyles.colDriver}>{driverText}</PdfText>
-      <PdfText style={pdfStyles.colOperator}>{operatorText}</PdfText>
-    </PdfView>
-  );
+function formatWeight(v) {
+  if (v === null || v === undefined) return '—';
+  return Number(v).toLocaleString();
 }
 
-// ---------------- Combined PDF Document ----------------
-function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' }) {
-  const totalNet = tickets.reduce((sum, t) => {
-    const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-    return sum + (c.netValue || 0);
-  }, 0);
+function exportToCSV(rows = [], filename = 'export.csv') {
+  if (!rows || rows.length === 0) return;
+  const headers = Object.keys(rows[0]);
+  const csv = [
+    headers.join(','),
+    ...rows.map((r) =>
+      headers
+        .map((h) => {
+          const v = r[h] ?? '';
+          const s = typeof v === 'string' ? v : String(v);
+          return `"${s.replace(/"/g, '""')}"`;
+        })
+        .join(',')
+    ),
+  ].join('\n');
 
-  const numberOfTransactions = tickets.length;
-  const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
-
-  // sanitize SAD label
-  const rawSad = reportMeta?.sad ?? '';
-  const sadLabel = rawSad ? String(rawSad).replace(/^SAD:\s*/i, '') : 'N/A';
-
-  const manualEntries = tickets.filter(t => t.data.ticketNo?.startsWith('M-'));
-  const totalManualEntries = manualEntries.length;
-  const cumulativeManualNetWeight = manualEntries.reduce((sum, t) => {
-    const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-    return sum + (c.netValue || 0);
-  }, 0);
-
-  const rowsPerSubsequentPage = 20;
-  const firstPageCapacity = 14;
-  const firstPageTickets = tickets.slice(0, firstPageCapacity);
-  const remainingTickets = tickets.slice(firstPageCapacity);
-
-  const remainingPages = [];
-  for (let i = 0; i < remainingTickets.length; i += rowsPerSubsequentPage) {
-    remainingPages.push(remainingTickets.slice(i, i + rowsPerSubsequentPage));
-  }
-
-  const TableHeader = () => (
-    <PdfView style={pdfStyles.tableHeader}>
-      <PdfText style={pdfStyles.colSad}>SAD No</PdfText>
-      <PdfText style={pdfStyles.colTicket}>Ticket No</PdfText>
-      <PdfText style={pdfStyles.colTruck}>Truck No</PdfText>
-      <PdfText style={pdfStyles.colDate}>Date</PdfText>
-      <PdfText style={pdfStyles.colGross}>Gross</PdfText>
-      <PdfText style={pdfStyles.colTare}>Tare</PdfText>
-      <PdfText style={pdfStyles.colNet}>Net</PdfText>
-      <PdfText style={pdfStyles.colDriver}>Driver</PdfText>
-      <PdfText style={pdfStyles.colOperator}>Operator</PdfText>
-    </PdfView>
-  );
-
-  return (
-    <Document>
-      <Page size="A4" style={pdfStyles.page}>
-        <PdfView style={pdfStyles.header}>
-          <PdfImage src={logoUrl} style={pdfStyles.logo} />
-          <PdfView style={pdfStyles.companyBlock}>
-            <PdfText style={pdfStyles.companyName}>NICK TC-SCAN (GAMBIA) LTD</PdfText>
-            <PdfText>WEIGHBRIDGE SITUATION REPORT</PdfText>
-          </PdfView>
-        </PdfView>
-
-        <PdfText style={pdfStyles.reportTitle}>WEIGHBRIDGE SITUATION REPORT</PdfText>
-
-        <PdfView style={pdfStyles.summaryBox}>
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>SAD: {sadLabel}</PdfText>
-            <PdfText>DATE RANGE: {reportMeta.dateRangeText || 'All'}</PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>START: {reportMeta.startTimeLabel || 'N/A'}</PdfText>
-            <PdfText>END: {reportMeta.endTimeLabel || 'N/A'}</PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>NUMBER OF TRANSACTIONS: {numberOfTransactions}</PdfText>
-            <PdfText>TOTAL CUMULATIVE NET (KG): {formatNumber(String(totalNet))} KG</PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>TOTAL MANUAL ENTRIES: {totalManualEntries}</PdfText>
-            <PdfText>CUMULATIVE NET (MANUAL) KG: {formatNumber(String(cumulativeManualNetWeight))}</PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>Operator: {operatorName || 'N/A'}</PdfText>
-            <PdfText />
-          </PdfView>
-        </PdfView>
-
-        {firstPageTickets.length > 0 && (
-          <>
-            <TableHeader />
-            {firstPageTickets.map(t => (
-              <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />
-            ))}
-          </>
-        )}
-
-        <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
-      </Page>
-
-      {remainingPages.map((pageTickets, idx) => (
-        <Page key={`rem-${idx}`} size="A4" style={pdfStyles.page}>
-          <PdfText style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 8 }}>Ticket List</PdfText>
-          <TableHeader />
-          {pageTickets.map(t => (
-            <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />
-          ))}
-          <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
-        </Page>
-      ))}
-    </Document>
-  );
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
-// ---------------- main React component ----------------
-export default function WeightReports() {
-  // search / filter state
-  const [searchSAD, setSearchSAD] = useState('');
-  const [searchDriver, setSearchDriver] = useState('');
-  const [searchTruck, setSearchTruck] = useState('');
+function openPrintableWindow(html, title = 'Report') {
+  const w = window.open('', '_blank', 'width=900,height=700');
+  if (!w) return;
+  w.document.write(`
+    <html>
+      <head>
+        <title>${title}</title>
+        <style>
+          body{ font-family: Arial, Helvetica, sans-serif; padding: 18px; color: #111 }
+          table{ border-collapse: collapse; width: 100% }
+          th, td{ border: 1px solid #ddd; padding: 6px; font-size: 12px }
+          th{ background: #f7fafc; text-align: left }
+        </style>
+      </head>
+      <body>
+        ${html}
+      </body>
+    </html>
+  `);
+  w.document.close();
+  w.focus();
+  setTimeout(() => {
+    w.print();
+  }, 300);
+}
 
-  // tickets
-  const [originalTickets, setOriginalTickets] = useState([]);
-  const [filteredTickets, setFilteredTickets] = useState([]);
-
-  // sorting
-  const [sortBy, setSortBy] = useState('date'); // date/gross/net/ticketNo/sadNo/truck
-  const [sortDir, setSortDir] = useState('desc'); // asc | desc
-
-  // UI state
-  const [selectedTicket, setSelectedTicket] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [pdfGenerating, setPdfGenerating] = useState(false);
-  const { isOpen, onOpen, onClose } = useDisclosure();
-  const toast = useToast();
-  const modalRef = useRef();
-
-  // user/admin
-  const [operatorName, setOperatorName] = useState('');
-  const [currentUserId, setCurrentUserId] = useState(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-
-  // edit
-  const [isEditing, setIsEditing] = useState(false);
-  const [editData, setEditData] = useState({});
-  const [editErrors, setEditErrors] = useState({});
-  const [savingEdit, setSavingEdit] = useState(false);
-
-  // delete
-  const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure();
-  const cancelRef = useRef();
-  const [deleting, setDeleting] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState(null);
-
-  // audit logs
-  const [auditLogs, setAuditLogs] = useState([]);
-  const [loadingAudit, setLoadingAudit] = useState(false);
-
-  // date/time
+export default function OutgateReports() {
+  const [reports, setReports] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
-  const [reportMeta, setReportMeta] = useState({});
+  const [sortField, setSortField] = useState('outgateDateTime');
+  const [sortDirection, setSortDirection] = useState('desc');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(ITEMS_PER_PAGE);
+  const [loading, setLoading] = useState(true);
+  const toast = useToast();
 
-  // responsive
-  const isMobile = useBreakpointValue({ base: true, md: false });
-  const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
-  const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
+  // details modal
+  const { isOpen: isDetailsOpen, onOpen: onDetailsOpen, onClose: onDetailsClose } = useDisclosure();
+  const [selectedReport, setSelectedReport] = useState(null);
 
-  // load user & audit logs
+  // SAD search workflow
+  const [sadQuery, setSadQuery] = useState('');
+  const [sadTickets, setSadTickets] = useState([]); // base after search / date filtering
+  const [sadOriginal, setSadOriginal] = useState([]); // original mapped results
+  const [sadDateFrom, setSadDateFrom] = useState('');
+  const [sadDateTo, setSadDateTo] = useState('');
+  const [sadTimeFrom, setSadTimeFrom] = useState('');
+  const [sadTimeTo, setSadTimeTo] = useState('');
+  const [sadLoading, setSadLoading] = useState(false);
+  const [sadMeta, setSadMeta] = useState({});
+
+  // NEW: status filter + sort order for SAD results
+  const [sadSortStatus, setSadSortStatus] = useState(''); // '', 'Pending', 'Exited'
+  const [sadSortOrder, setSadSortOrder] = useState('none'); // 'none' | 'pending_first' | 'exited_first'
+
+  const sadRef = useRef(null);
+
+  // load outgate records on mount
   useEffect(() => {
     let mounted = true;
-    async function loadUser() {
+    const fetchReports = async () => {
       try {
-        let currentUser = null;
-        if (supabase.auth?.getUser) {
-          const { data, error } = await supabase.auth.getUser();
-          if (!error) currentUser = data?.user ?? null;
-        } else if (supabase.auth?.user) {
-          currentUser = supabase.auth.user();
-        }
-        if (!currentUser) return;
-        if (mounted) setCurrentUserId(currentUser.id);
+        setLoading(true);
+        const { data, error } = await supabase
+          .from('outgate')
+          .select('*')
+          .order('created_at', { ascending: false });
 
-        const { data: userRow } = await supabase.from('users').select('username, role').eq('id', currentUser.id).maybeSingle();
-        const uname = userRow?.username || currentUser.email || currentUser.user_metadata?.full_name || '';
-        const role = (userRow && userRow.role) || '';
-        if (mounted) {
-          setOperatorName(uname);
-          setIsAdmin(String(role).toLowerCase() === 'admin');
-        }
+        if (error) throw error;
+        if (!mounted) return;
+        const mapped = (data || []).map((og) => {
+          const computed = computeWeights(og);
+          return {
+            id: og.id,
+            ticketId: og.ticket_id,
+            ticketNo: og.ticket_no || null,
+            vehicleNumber: og.vehicle_number || '',
+            outgateDateTime: og.created_at || og.created_at || null,
+            driverName: og.driver || og.driver || null,
+            destination: og.consignee || og.destination || null,
+            remarks: og.remarks || '',
+            declaredWeight: og.declared_weight ?? null,
+            gross: computed.gross,
+            tare: computed.tare,
+            net: computed.net,
+            fileUrl: og.file_url || null,
+            containerId: og.container_id || null,
+            sadNo: og.sad_no || null,
+            rawRow: og,
+          };
+        });
+
+        setReports(mapped);
       } catch (err) {
-        console.warn('Failed to load user', err);
+        toast({
+          title: 'Error loading reports',
+          description: err?.message || 'Failed to fetch reports',
+          status: 'error',
+          duration: 4000,
+        });
+      } finally {
+        setLoading(false);
       }
-    }
-    loadUser();
-    fetchAuditLogs();
-    return () => { mounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    };
 
-  // fetch audit logs gracefully
-  const fetchAuditLogs = async () => {
-    setLoadingAudit(true);
-    try {
-      const { data, error } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(20);
-      if (error) {
-        console.debug('audit fetch error', error);
-        setAuditLogs([]);
-      } else {
-        setAuditLogs(data || []);
-      }
-    } catch (err) {
-      console.debug('audit fetch error', err);
-      setAuditLogs([]);
-    } finally {
-      setLoadingAudit(false);
-    }
-  };
+    fetchReports();
+    return () => {
+      mounted = false;
+    };
+  }, [toast]);
 
-  // parse helpers
   const parseTimeToMinutes = (timeStr) => {
     if (!timeStr) return null;
-    const parts = timeStr.split(':');
-    if (parts.length < 2) return null;
-    const hh = parseInt(parts[0], 10);
-    const mm = parseInt(parts[1], 10);
+    const [hh, mm] = String(timeStr).split(':').map((n) => Number(n));
     if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
     return hh * 60 + mm;
   };
-  const startOfDay = (d) => { const dt = new Date(d); dt.setHours(0, 0, 0, 0); return dt; };
-  const endOfDay = (d) => { const dt = new Date(d); dt.setHours(23, 59, 59, 999); return dt; };
 
-  // Sorting UI handler
-  const toggleSort = (key) => {
-    if (sortBy === key) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortBy(key);
-      setSortDir('desc');
+  // Generate SAD tickets from tickets table and inject status
+  const handleGenerateSad = async () => {
+    if (!sadQuery.trim()) {
+      toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
+      return;
+    }
+    try {
+      setSadLoading(true);
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*')
+        .ilike('sad_no', `%${sadQuery.trim()}%`)
+        .order('date', { ascending: true });
+
+      if (error) throw error;
+
+      const mapped = (data || []).map((ticket) => {
+        // Try to infer whether this ticket has exited — look for explicit status or exit-like timestamp
+        const exitCandidate = ticket.status === 'Exited'
+          ? ticket.date // if status explicitly says Exited, use ticket.date as exit indicator
+          : (ticket.exit_date || ticket.outgate_date || ticket.outgate_at || ticket.exited_at || null);
+
+        const inferredStatus = ticket.status ? String(ticket.status) : (exitCandidate ? 'Exited' : 'Pending');
+
+        return {
+          ticketId: ticket.ticket_id || (ticket.id ? String(ticket.id) : `${Math.random()}`),
+          data: {
+            sadNo: ticket.sad_no,
+            ticketNo: ticket.ticket_no,
+            date: ticket.date || ticket.submitted_at || exitCandidate || null,
+            gnswTruckNo: ticket.gnsw_truck_no || ticket.vehicle_number || ticket.truck_no || null,
+            net: ticket.net ?? ticket.net ?? null,
+            tare: ticket.tare ?? ticket.tare ?? null,
+            gross: ticket.gross ?? null,
+            driver: ticket.driver || ticket.driver || 'N/A',
+            consignee: ticket.consignee,
+            operator: ticket.operator,
+            containerNo: ticket.container_no || ticket.container_no_supp || null,
+            fileUrl: ticket.file_url || null,
+            // IMPORTANT: add inferred status here
+            status: inferredStatus,
+          },
+        };
+      });
+
+      setSadOriginal(mapped);
+      setSadTickets(mapped);
+      setSadDateFrom('');
+      setSadDateTo('');
+      setSadTimeFrom('');
+      setSadTimeTo('');
+      setSadMeta({
+        sad: sadQuery.trim(),
+        dateRangeText: mapped.length > 0 && mapped[0].data.date ? new Date(mapped[0].data.date).toLocaleDateString() : 'All',
+        startTimeLabel: '',
+        endTimeLabel: '',
+      });
+
+      if ((mapped || []).length === 0) {
+        toast({ title: 'No tickets found', status: 'info', duration: 2500 });
+      }
+    } catch (err) {
+      console.error(err);
+      toast({ title: 'Search failed', description: err?.message || 'Could not fetch tickets', status: 'error', duration: 4000 });
+    } finally {
+      setSadLoading(false);
     }
   };
 
-  // unified pipeline: filters -> sort
-  const computeFilteredTickets = (baseArr = null) => {
-    if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
-      setFilteredTickets([]);
-      return;
-    }
-    let arr = (baseArr || originalTickets).slice();
+  const applySadRange = () => {
+    if (!sadOriginal || sadOriginal.length === 0) return;
+    const tf = parseTimeToMinutes(sadTimeFrom);
+    const tt = parseTimeToMinutes(sadTimeTo);
+    const hasDateRange = !!(sadDateFrom || sadDateTo);
+    const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
+    const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
 
-    // Driver
-    if (searchDriver && searchDriver.trim()) {
-      const q = searchDriver.trim().toLowerCase();
-      arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
+    const filtered = sadOriginal.filter((t) => {
+      const dRaw = t.data.date;
+      const d = dRaw ? new Date(dRaw) : null;
+      if (!d) return false;
+      if (hasDateRange) {
+        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+        if (sadTimeFrom) {
+          const mins = parseTimeToMinutes(sadTimeFrom);
+          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+        }
+        if (sadTimeTo) {
+          const mins = parseTimeToMinutes(sadTimeTo);
+          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+        }
+        return d >= start && d <= end;
+      } else if (sadTimeFrom || sadTimeTo) {
+        const minutes = d.getHours() * 60 + d.getMinutes();
+        const from = tf != null ? tf : 0;
+        const to = tt != null ? tt : 24 * 60 - 1;
+        return minutes >= from && minutes <= to;
+      }
+      return true;
+    });
+
+    setSadTickets(filtered);
+
+    const startLabel = sadDateFrom ? `${sadTimeFrom || '00:00'} (${sadDateFrom})` : sadTimeFrom ? `${sadTimeFrom}` : '';
+    const endLabel = sadDateTo ? `${sadTimeTo || '23:59'} (${sadDateTo})` : sadTimeTo ? `${sadTimeTo}` : '';
+    let dateRangeText = '';
+    if (sadDateFrom && sadDateTo) dateRangeText = `${sadDateFrom} → ${sadDateTo}`;
+    else if (sadDateFrom) dateRangeText = sadDateFrom;
+    else if (sadDateTo) dateRangeText = sadDateTo;
+
+    setSadMeta((s) => ({ ...s, dateRangeText: dateRangeText || (sadOriginal[0]?.data?.date ? new Date(sadOriginal[0].data.date).toLocaleDateString() : ''), startTimeLabel: startLabel, endTimeLabel: endLabel }));
+  };
+
+  const resetSadRange = () => {
+    setSadDateFrom('');
+    setSadDateTo('');
+    setSadTimeFrom('');
+    setSadTimeTo('');
+    setSadTickets(sadOriginal);
+    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
+  };
+
+  // derived filtered & sorted SAD list based on status and order
+  const filteredSadTickets = useMemo(() => {
+    let arr = Array.isArray(sadTickets) ? sadTickets.slice() : [];
+
+    if (sadSortStatus) {
+      arr = arr.filter((t) => (t.data.status || 'Pending') === sadSortStatus);
     }
 
-    // Truck (multi-field)
-    if (searchTruck && searchTruck.trim()) {
-      const q = searchTruck.trim().toLowerCase();
-      arr = arr.filter((t) => {
-        const trucks = [
-          (t.data.gnswTruckNo || ''),
-          (t.data.truckOnWb || ''),
-          (t.data.anpr || ''),
-          (t.data.truckNo || ''),
-        ].map((s) => s.toString().toLowerCase());
-        return trucks.some((s) => s.includes(q));
+    if (sadSortOrder === 'pending_first') {
+      arr.sort((a, b) => {
+        const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
+        const bIsPending = (b.data.status || 'Pending') === 'Pending' ? 0 : 1;
+        return aIsPending - bIsPending; // pending first
+      });
+    } else if (sadSortOrder === 'exited_first') {
+      arr.sort((a, b) => {
+        const aIsExited = (a.data.status || 'Pending') === 'Exited' ? 0 : 1;
+        const bIsExited = (b.data.status || 'Pending') === 'Exited' ? 0 : 1;
+        return aIsExited - bIsExited; // exited first
       });
     }
 
-    // date/time
-    const hasDateRange = !!(dateFrom || dateTo);
-    const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
-    const tfMinutes = parseTimeToMinutes(timeFrom);
-    const ttMinutes = parseTimeToMinutes(timeTo);
-    const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
-    const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
+    return arr;
+  }, [sadTickets, sadSortStatus, sadSortOrder]);
 
-    arr = arr.filter((ticket) => {
-      const raw = ticket.data.date;
-      const ticketDate = parseTicketDate(raw);
-      if (!ticketDate) return false;
+  const cumulativeNet = useMemo(() => {
+    return filteredSadTickets.reduce((sum, t) => {
+      const { net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+      return sum + (net || 0);
+    }, 0);
+  }, [filteredSadTickets]);
 
-      if (hasDateRange) {
-        let start = startDate ? startOfDay(startDate) : new Date(-8640000000000000);
-        let end = endDate ? endOfDay(endDate) : new Date(8640000000000000);
+  const handleDownloadSadPdf = async () => {
+    if (!filteredSadTickets || filteredSadTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'Nothing to export', status: 'info', duration: 2500 });
+      return;
+    }
 
-        if (timeFrom) {
-          const tf = parseTimeToMinutes(timeFrom);
-          if (tf !== null) start.setHours(Math.floor(tf / 60), tf % 60, 0, 0);
-        }
-        if (timeTo) {
-          const tt = parseTimeToMinutes(timeTo);
-          if (tt !== null) end.setHours(Math.floor(tt / 60), tt % 60, 59, 999);
-        }
+    const rowsHtml = filteredSadTickets
+      .map((t) => {
+        const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+        return `<tr>
+        <td>${t.data.sadNo ?? ''}</td>
+        <td>${t.data.ticketNo ?? ''}</td>
+        <td>${t.data.created_at ? new Date(t.data.created_at).toLocaleString() : ''}</td>
+        <td>${t.data.gnswTruckNo ?? ''}</td>
+        <td style="text-align:right">${gross != null ? Number(gross).toLocaleString() : ''}</td>
+        <td style="text-align:right">${tare != null ? Number(tare).toLocaleString() : ''}</td>
+        <td style="text-align:right">${net != null ? Number(net).toLocaleString() : ''}</td>
+        <td>${t.data.status ?? ''}</td>
+      </tr>`;
+      })
+      .join('');
 
-        return ticketDate >= start && ticketDate <= end;
+    const html = `
+      <h2>Weighbridge SAD Report — ${sadMeta.sad || ''}</h2>
+      <p>Date range: ${sadMeta.dateRangeText || 'All'} ${sadMeta.startTimeLabel ? `• ${sadMeta.startTimeLabel}` : ''} ${sadMeta.endTimeLabel ? `• ${sadMeta.endTimeLabel}` : ''}</p>
+      <table>
+        <thead>
+          <tr>
+            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+          <tr style="font-weight:bold;background:#f0f8ff">
+            <td colspan="7">Cumulative Net</td>
+            <td style="text-align:right">${Number(cumulativeNet || 0).toLocaleString()}</td>
+          </tr>
+        </tbody>
+      </table>
+    `;
+
+    openPrintableWindow(html, `SAD-${sadMeta.sad || 'report'}`);
+  };
+
+  const handleShareSad = async () => {
+    await handleDownloadSadPdf();
+    toast({ title: 'PDF window opened', status: 'info', duration: 3000 });
+  };
+
+  const handleEmailSad = async () => {
+    await handleDownloadSadPdf();
+    const subject = encodeURIComponent(`Weighbridge SAD ${sadMeta.sad} Report`);
+    const body = encodeURIComponent(`Please find Weighbridge report for SAD ${sadMeta.sad}.\n\nTransactions: ${filteredSadTickets.length}\nCumulative Net: ${Number(cumulativeNet || 0).toLocaleString()} kg\n\n(Please attach the downloaded PDF if it wasn't attached automatically)`);
+    window.location.href = `mailto:?subject=${subject}&body=${body}`;
+  };
+
+  // ---- filters, sorting and pagination for main outgate table ----
+  const filteredReports = useMemo(() => {
+    const term = (searchTerm || '').trim().toLowerCase();
+    const df = dateFrom ? new Date(dateFrom) : null;
+    const dtRaw = dateTo ? new Date(dateTo) : null;
+    const dt = dtRaw ? new Date(dtRaw.setHours(23, 59, 59, 999)) : null;
+    const tFrom = parseTimeToMinutes(timeFrom);
+    const tTo = parseTimeToMinutes(timeTo);
+
+    return reports.filter((r) => {
+      if (term) {
+        const hay = [
+          r.vehicleNumber,
+          r.ticketNo,
+          r.driverName,
+          r.sadNo,
+          r.containerId,
+          r.destination,
+        ].filter(Boolean).join(' ').toLowerCase();
+        if (!hay.includes(term)) return false;
       }
 
-      if (hasTimeRangeOnly) {
-        const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
-        const fromM = tfMinutes !== null ? tfMinutes : 0;
-        const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
-        return ticketMinutes >= fromM && ticketMinutes <= toM;
+      if (df || dt || tFrom !== null || tTo !== null) {
+        if (!r.outgateDateTime) return false;
+        const d = new Date(r.outgateDateTime);
+        if (Number.isNaN(d.getTime())) return false;
+        if (df && d < df) return false;
+        if (dt && d > dt) return false;
+        if (tFrom !== null || tTo !== null) {
+          const mins = d.getHours() * 60 + d.getMinutes();
+          if (tFrom !== null && mins < tFrom) return false;
+          if (tTo !== null && mins > tTo) return false;
+        }
       }
 
       return true;
     });
+  }, [reports, searchTerm, dateFrom, dateTo, timeFrom, timeTo]);
 
-    // Sorting based on sortBy/sortDir
-    const comparator = (a, b) => {
-      const dir = sortDir === 'asc' ? 1 : -1;
-      if (sortBy === 'date') {
-        const da = parseTicketDate(a?.data?.date);
-        const db = parseTicketDate(b?.data?.date);
-        if (!da && !db) return 0;
-        if (!da) return 1;
-        if (!db) return -1;
-        return (da.getTime() - db.getTime()) * dir;
+  const sortedReports = useMemo(() => {
+    const arr = filteredReports.slice();
+    arr.sort((a, b) => {
+      let aVal = a[sortField];
+      let bVal = b[sortField];
+      if (sortField === 'outgateDateTime' || sortField === 'date') {
+        aVal = a.outgateDateTime ? new Date(a.outgateDateTime).getTime() : 0;
+        bVal = b.outgateDateTime ? new Date(b.outgateDateTime).getTime() : 0;
+      } else {
+        aVal = (aVal ?? '').toString().toLowerCase();
+        bVal = (bVal ?? '').toString().toLowerCase();
       }
-      if (sortBy === 'gross' || sortBy === 'tare' || sortBy === 'net') {
-        const ka = numericValue(a.data[sortBy]) ?? 0;
-        const kb = numericValue(b.data[sortBy]) ?? 0;
-        return (ka - kb) * dir;
-      }
-      if (sortBy === 'ticketNo') {
-        const sa = String(a.data.ticketNo || '').localeCompare(String(b.data.ticketNo || '')) * dir;
-        return sa;
-      }
-      if (sortBy === 'sadNo') {
-        return String(a.data.sadNo || '').localeCompare(String(b.data.sadNo || '')) * dir;
-      }
-      if (sortBy === 'truck') {
-        const ta = (a.data.gnswTruckNo || a.data.truckOnWb || a.data.anpr || a.data.truckNo || '').toString().toLowerCase();
-        const tb = (b.data.gnswTruckNo || b.data.truckOnWb || b.data.anpr || b.data.truckNo || '').toString().toLowerCase();
-        return ta.localeCompare(tb) * dir;
-      }
+      if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
       return 0;
-    };
+    });
+    return arr;
+  }, [filteredReports, sortField, sortDirection]);
 
-    arr.sort(comparator);
-    setFilteredTickets(arr);
+  const totalPages = Math.max(1, Math.ceil(sortedReports.length / itemsPerPage));
+  const paginatedReports = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return sortedReports.slice(start, start + itemsPerPage);
+  }, [sortedReports, currentPage, itemsPerPage]);
 
-    // update report meta
-    const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
-    const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
-    let dateRangeText = '';
-    if (dateFrom && dateTo) dateRangeText = `${dateFrom} → ${dateTo}`;
-    else if (dateFrom) dateRangeText = dateFrom;
-    else if (dateTo) dateRangeText = dateTo;
-
-    setReportMeta((prev) => ({
-      ...prev,
-      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.date ? new Date(originalTickets[0].data.date).toLocaleDateString() : ''),
-      startTimeLabel: startLabel || prev.startTimeLabel || '',
-      endTimeLabel: endLabel || prev.endTimeLabel || '',
-    }));
-  };
-
-  // SAD search
-  const handleGenerateReport = async () => {
-    if (!searchSAD.trim()) {
-      toast({ title: 'SAD Required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
-      return;
-    }
-    setLoading(true);
-    try {
-      const { data, error } = await supabase
-        .from('tickets')
-        .select('*')
-        .ilike('sad_no', `%${searchSAD.trim()}%`);
-
-      if (error) {
-        toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
-        setLoading(false);
-        return;
-      }
-
-      const mappedTickets = (data || []).map((ticket) => ({
-        ticketId: ticket.ticket_id || ticket.id?.toString() || `${Math.random()}`,
-        data: {
-          sadNo: ticket.sad_no,
-          ticketNo: ticket.ticket_no,
-          date: ticket.date,
-          gnswTruckNo: ticket.gnsw_truck_no,
-          truckOnWb: ticket.truck_on_wb,
-          net: ticket.net ?? ticket.net_weight ?? null,
-          tare: ticket.tare ?? ticket.tare_pt ?? null,
-          gross: ticket.gross ?? null,
-          driver: ticket.driver || 'N/A',
-          consignee: ticket.consignee,
-          operator: ticket.operator,
-          status: ticket.status,
-          consolidated: ticket.consolidated,
-          containerNo: ticket.container_no,
-          passNumber: ticket.pass_number,
-          scaleName: ticket.scale_name,
-          anpr: ticket.truck_on_wb,
-          truckNo: ticket.truck_no,
-          fileUrl: ticket.file_url || null,
-        },
-      }));
-
-      const sortedOriginal = sortTicketsByDateDesc(mappedTickets);
-      setOriginalTickets(sortedOriginal);
-
-      setReportMeta({
-        dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.date ? new Date(sortedOriginal[0].data.date).toLocaleDateString() : '') : '',
-        startTimeLabel: '',
-        endTimeLabel: '',
-        sad: `${searchSAD.trim()}`, // raw SAD (no 'SAD:' prefix)
-      });
-
-      // compute filters & sort on the new original set
-      computeFilteredTickets(sortedOriginal);
-    } catch (err) {
-      console.error('fetch error', err);
-      toast({ title: 'Error', description: err?.message || 'Unexpected error', status: 'error', duration: 4000 });
-    } finally {
-      setLoading(false);
+  const toggleSort = (field) => {
+    if (sortField === field) setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else {
+      setSortField(field);
+      setSortDirection('asc');
     }
   };
 
-  // date/time apply & reset
-  const applyRange = () => computeFilteredTickets();
-  const resetRange = () => {
+  const openDetails = (report) => {
+    setSelectedReport(report);
+    onDetailsOpen();
+  };
+
+  const handleResetAll = () => {
+    setSearchTerm('');
     setDateFrom('');
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
-    computeFilteredTickets();
-    setReportMeta((p) => ({ ...p, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
+    setCurrentPage(1);
+    setSortField('outgateDateTime');
+    setSortDirection('desc');
+    toast({ title: 'Filters reset', status: 'info', duration: 1500 });
   };
 
-  // driver/truck apply/clear
-  const applyDriverTruckFilter = () => {
-    computeFilteredTickets();
-    const driverSummary = searchDriver ? `, Driver: ${searchDriver}` : '';
-    const truckSummary = searchTruck ? `, Truck: ${searchTruck}` : '';
-    setReportMeta((prev) => ({ ...prev, sad: `${searchSAD}${driverSummary}${truckSummary}` }));
-  };
-  const clearDriverTruckFilters = () => { setSearchDriver(''); setSearchTruck(''); computeFilteredTickets(); setReportMeta((prev) => ({ ...prev, sad: `${searchSAD}` })); };
-
-  const clearAll = () => {
-    setSearchSAD('');
-    setSearchDriver('');
-    setSearchTruck('');
-    setOriginalTickets([]);
-    setFilteredTickets([]);
-    setReportMeta({});
-    setDateFrom('');
-    setDateTo('');
-    setTimeFrom('');
-    setTimeTo('');
-  };
-
-  // csv export
-  const exportCsv = () => {
-    if (!filteredTickets || filteredTickets.length === 0) {
-      toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
-      return;
+  const totals = useMemo(() => {
+    let gross = 0, tare = 0, net = 0;
+    let grossCount = 0, tareCount = 0, netCount = 0;
+    for (const r of filteredReports) {
+      const w = computeWeights(r);
+      if (w.gross != null) { gross += w.gross; grossCount++; }
+      if (w.tare != null) { tare += w.tare; tareCount++; }
+      if (w.net != null) { net += w.net; netCount++; }
     }
-    const header = ['sadNo', 'ticketNo', 'date', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'containerNo', 'passNumber', 'scaleName'];
-    const rows = filteredTickets.map((t) => {
-      const d = t.data || {};
-      const truck = d.gnswTruckNo || d.truckOnWb || d.anpr || d.truckNo || '';
-      return [
-        d.sadNo ?? '',
-        d.ticketNo ?? t.ticketId ?? '',
-        d.date ? new Date(d.date).toISOString() : '',
-        truck,
-        d.driver ?? '',
-        d.gross ?? '',
-        d.tare ?? '',
-        d.net ?? '',
-        d.consignee ?? '',
-        d.operator ?? '',
-        d.containerNo ?? '',
-        d.passNumber ?? '',
-        d.scaleName ?? '',
-      ];
-    });
-
-    const csv = [header, ...rows].map((r) => r.map((cell) => {
-      if (cell === null || cell === undefined) return '';
-      const s = String(cell).replace(/"/g, '""');
-      return `"${s}"`;
-    }).join(',')).join('\n');
-
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `SAD-${searchSAD || 'report'}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    toast({ title: 'CSV exported', status: 'success', duration: 3000 });
-  };
-
-  // cumulative net weight (memo)
-  const cumulativeNetWeight = useMemo(() => {
-    return filteredTickets.reduce((total, ticket) => {
-      const computed = computeWeightsFromObj({
-        gross: ticket.data.gross,
-        tare: ticket.data.tare,
-        net: ticket.data.net,
-      });
-      const net = computed.netValue || 0;
-      return total + net;
-    }, 0);
-  }, [filteredTickets]);
-
-  // open modal
-  const openModalWithTicket = (ticket) => {
-    setSelectedTicket(ticket);
-    setIsEditing(false);
-    setEditData({});
-    setEditErrors({});
-    onOpen();
-  };
-
-  // PDF generation helpers
-  const generatePdfBlob = async (ticketsToRender = [], meta = {}, opName = '') => {
-    const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} operatorName={opName} />;
-    const asPdf = pdfRender(doc);
-    const blob = await asPdf.toBlob();
-    return blob;
-  };
-
-  const handleDownloadPdf = async () => {
-    if (!filteredTickets || filteredTickets.length === 0) {
-      toast({ title: 'No tickets', description: 'No tickets to export', status: 'info', duration: 3000 });
-      return;
-    }
-    try {
-      setPdfGenerating(true);
-      const blob = await generatePdfBlob(filteredTickets, reportMeta, operatorName);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `SAD-${searchSAD || 'report'}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      toast({ title: 'Download started', status: 'success', duration: 3000 });
-    } catch (err) {
-      console.error('PDF generation failed', err);
-      toast({ title: 'PDF generation failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
-    } finally {
-      setPdfGenerating(false);
-    }
-  };
-
-  const handleNativeShare = async () => {
-    if (!filteredTickets || filteredTickets.length === 0) {
-      toast({ title: 'No tickets', description: 'No tickets to share', status: 'info', duration: 3000 });
-      return;
-    }
-    if (!navigator || !navigator.canShare) {
-      toast({ title: 'Not supported', description: 'Native file sharing is not supported on this device/browser', status: 'warning', duration: 4000 });
-      return;
-    }
-    try {
-      setPdfGenerating(true);
-      const blob = await generatePdfBlob(filteredTickets, reportMeta, operatorName);
-      const file = new File([blob], `SAD-${searchSAD || 'report'}.pdf`, { type: 'application/pdf' });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: `SAD ${searchSAD} Report`,
-          text: `Weighbridge report for SAD ${searchSAD} — ${filteredTickets.length} transactions.`,
-        });
-        toast({ title: 'Shared', status: 'success', duration: 3000 });
-      } else {
-        toast({ title: 'Share failed', description: 'Device does not support sharing files', status: 'warning', duration: 4000 });
-      }
-    } catch (err) {
-      console.error('Share error', err);
-      toast({ title: 'Share failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
-    } finally {
-      setPdfGenerating(false);
-    }
-  };
-
-  const handleEmailComposer = async () => {
-    if (!filteredTickets || filteredTickets.length === 0) {
-      toast({ title: 'No tickets', description: 'No tickets to email', status: 'info', duration: 3000 });
-      return;
-    }
-    try {
-      setPdfGenerating(true);
-      const blob = await generatePdfBlob(filteredTickets, reportMeta, operatorName);
-      const url = URL.createObjectURL(blob);
-      const filename = `SAD-${searchSAD || 'report'}.pdf`;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      const subject = encodeURIComponent(`Weighbridge Report for SAD ${searchSAD}`);
-      const body = encodeURIComponent(`Please find (or attach) the Weighbridge report for SAD ${searchSAD}.\n\nNumber of transactions: ${filteredTickets.length}\nCumulative net weight: ${formatNumber(String(cumulativeNetWeight))} KG\n\n(If your mail client does not auto-attach the PDF, please attach the downloaded file: ${filename})`);
-      window.location.href = `mailto:?subject=${subject}&body=${body}`;
-
-      toast({ title: 'Composer opened', description: 'PDF downloaded — attach to your email if not auto-attached', status: 'info', duration: 5000 });
-    } catch (err) {
-      console.error('Email/Download error', err);
-      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
-    } finally {
-      setPdfGenerating(false);
-    }
-  };
-
-  // ---------- Edit / Delete (kept) ----------
-  const isTicketEditable = (ticket) => {
-    const status = String(ticket?.data?.status || '').toLowerCase();
-    return status !== 'exited';
-  };
-
-  const startEditing = () => {
-    if (!selectedTicket) return;
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can edit tickets', status: 'warning', duration: 3000 });
-      return;
-    }
-    if (!isTicketEditable(selectedTicket)) {
-      toast({ title: 'Cannot edit', description: "This ticket has status 'Exited' and cannot be edited", status: 'warning', duration: 3000 });
-      return;
-    }
-    const d = selectedTicket.data || {};
-    const operator = d.operator ? d.operator.replace(/^-+/, "").trim() : '';
-    const driverName = d.driver ? d.driver.replace(/^-+/, "").trim() : '';
-
-    setEditData({
-      consignee: d.consignee ?? '',
-      containerNo: d.containerNo ?? '',
-      operator: operator || '',
-      driver: driverName || '',
-      gross: d.gross ?? '',
-      tare: d.tare ?? '',
-      net: d.net ?? '',
-    });
-    setEditErrors({});
-    setIsEditing(true);
-  };
-
-  const cancelEditing = () => { setIsEditing(false); setEditErrors({}); setEditData({}); };
-  const handleEditChange = (field, val) => { setEditData((p) => ({ ...p, [field]: val })); setEditErrors((p) => { const cp = { ...p }; delete cp[field]; return cp; }); };
-
-  const validateEdit = () => {
-    const errs = {};
-    const g = numericValue(editData.gross);
-    const t = numericValue(editData.tare);
-    let n = numericValue(editData.net);
-
-    if (g === null) errs.gross = 'Invalid gross';
-    if (t === null) errs.tare = 'Invalid tare';
-    if (n === null) {
-      if (g !== null && t !== null) {
-        const computedNet = g - t;
-        if (!Number.isFinite(computedNet)) errs.net = 'Invalid net';
-        else n = computedNet;
-      } else {
-        errs.net = 'Invalid net';
-      }
-    }
-
-    if (g !== null && t !== null && !(g > t)) {
-      errs.gross = 'Gross must be greater than Tare';
-      errs.tare = 'Tare must be less than Gross';
-    }
-
-    setEditErrors(errs);
-    return Object.keys(errs).length === 0;
-  };
-
-  const saveEdits = async () => {
-    if (!selectedTicket) return;
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can save edits', status: 'warning', duration: 3000 });
-      return;
-    }
-    if (!validateEdit()) {
-      toast({ title: 'Validation error', description: 'Please correct fields before saving', status: 'error', duration: 3500 });
-      return;
-    }
-
-    setSavingEdit(true);
-    const before = selectedTicket;
-    const payload = {
-      consignee: editData.consignee || null,
-      container_no: editData.containerNo || null,
-      operator: editData.operator || null,
+    const uniqueSads = new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean));
+    const uniqueTickets = new Set(reports.filter(Boolean).map(r => r.ticketNo).filter(Boolean));
+    return {
+      reportsCount: filteredReports.length,
+      totalGross: grossCount ? gross : null,
+      totalTare: tareCount ? tare : null,
+      totalNet: netCount ? net : null,
+      totalSads: uniqueSads.size,
+      totalExits: reports.length,
+      totalTickets: uniqueTickets.size,
     };
+  }, [filteredReports, reports]);
 
-    const g = numericValue(editData.gross);
-    const t = numericValue(editData.tare);
-    let n = numericValue(editData.net);
-    if ((n === null || n === undefined) && g !== null && t !== null) n = g - t;
-
-    payload.gross = g !== null ? g : null;
-    payload.tare = t !== null ? t : null;
-    payload.net = n !== null ? n : null;
-
-    try {
-      const ticketIdValue = selectedTicket.ticketId ?? selectedTicket.data.ticketNo ?? null;
-      if (!ticketIdValue) throw new Error('Missing ticket identifier');
-
-      let usedRpc = false;
-      try {
-        const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_update_ticket', {
-          p_ticket_id: ticketIdValue,
-          p_gross: payload.gross,
-          p_tare: payload.tare,
-          p_net: payload.net,
-          p_consignee: payload.consignee,
-          p_container_no: payload.container_no,
-          p_operator: payload.operator,
-          p_driver: payload.driver,
-        });
-        if (!rpcErr) usedRpc = true;
-      } catch (rpcErr) {
-        console.debug('RPC update failed', rpcErr);
-      }
-
-      if (!usedRpc) {
-        const { data: roleRow, error: roleErr } = await supabase.from('users').select('role').eq('id', currentUserId).maybeSingle();
-        if (roleErr) throw roleErr;
-        const role = (roleRow && roleRow.role) || '';
-        if (String(role).toLowerCase() !== 'admin') throw new Error('Server role check failed — only admins may edit tickets');
-
-        let { error } = await supabase.from('tickets').update({
-          gross: payload.gross,
-          tare: payload.tare,
-          net: payload.net,
-          consignee: payload.consignee,
-          container_no: payload.container_no,
-          driver: payload.driver,
-          operator: payload.operator,
-        }).eq('ticket_id', ticketIdValue);
-
-        if (error) {
-          const fallback = await supabase.from('tickets').update({
-            gross: payload.gross,
-            tare: payload.tare,
-            net: payload.net,
-            consignee: payload.consignee,
-            container_no: payload.container_no,
-            driver: payload.driver,
-            operator: payload.operator,
-          }).eq('ticket_no', ticketIdValue);
-          if (fallback.error) throw fallback.error;
-        }
-      }
-
-      const updatedTicket = {
-        ...selectedTicket,
-        data: {
-          ...selectedTicket.data,
-          consignee: payload.consignee,
-          containerNo: payload.container_no,
-          operator: payload.operator,
-          driver: payload.driver,
-          gross: payload.gross,
-          tare: payload.tare,
-          net: payload.net,
-        },
+  const handleExportCsv = () => {
+    const rows = sortedReports.map(r => {
+      return {
+        'Ticket No': r.ticketNo ?? '',
+        'Truck No': r.vehicleNumber ?? '',
+        'SAD No': r.sadNo ?? '',
+        'Container': r.containerId ?? '',
+        'Exit Date': r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '',
+        'Gross (kg)': r.gross ?? '',
+        'Tare (kg)': r.tare ?? '',
+        'Net (kg)': r.net ?? '',
+        'Driver': r.driverName ?? '',
       };
-
-      setOriginalTickets((prev) => prev.map((t) => (String(t.ticketId) === String(selectedTicket.ticketId) ? updatedTicket : t)));
-      setTimeout(() => computeFilteredTickets(), 0);
-
-      setSelectedTicket(updatedTicket);
-      setIsEditing(false);
-
-      try {
-        const auditEntry = {
-          action: 'update',
-          ticket_id: ticketIdValue,
-          ticket_no: selectedTicket.data?.ticketNo ?? null,
-          user_id: currentUserId || null,
-          username: operatorName || null,
-          details: JSON.stringify({ before: before.data || null, after: updatedTicket.data || null }),
-          created_at: new Date().toISOString(),
-        };
-        await supabase.from('audit_logs').insert([auditEntry]);
-        fetchAuditLogs();
-      } catch (auditErr) {
-        console.debug('Audit log insertion failed', auditErr);
-      }
-
-      toast({ title: 'Saved', description: 'Ticket updated', status: 'success', duration: 2500 });
-    } catch (err) {
-      console.error('Update failed', err);
-      toast({ title: 'Update failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
-    } finally {
-      setSavingEdit(false);
-    }
-  };
-
-  // delete flow
-  const confirmDelete = () => {
-    if (!selectedTicket) return;
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 3000 });
-      return;
-    }
-    onDeleteOpen();
-  };
-
-  const performDelete = async () => {
-    if (!selectedTicket) return;
-    if (!isAdmin) {
-      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 3000 });
-      onDeleteClose();
-      return;
-    }
-    onDeleteClose();
-
-    const ticketToDelete = selectedTicket;
-    setOriginalTickets((prev) => prev.filter((t) => String(t.ticketId) !== String(ticketToDelete.ticketId)));
-    setFilteredTickets((prev) => prev.filter((t) => String(t.ticketId) !== String(ticketToDelete.ticketId)));
-    setSelectedTicket(null);
-
-    const DELAY = 8000;
-    const timeoutId = setTimeout(async () => {
-      try {
-        const ticketIdValue = ticketToDelete.ticketId ?? ticketToDelete.data.ticketNo ?? null;
-        if (!ticketIdValue) throw new Error('Missing ticket identifier');
-
-        let usedRpc = false;
-        try {
-          const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_delete_ticket', { p_ticket_id: ticketIdValue });
-          if (!rpcErr) usedRpc = true;
-        } catch (rpcErr) {
-          console.debug('RPC delete failed', rpcErr);
-        }
-
-        if (!usedRpc) {
-          const { data: roleRow, error: roleErr } = await supabase.from('users').select('role').eq('id', currentUserId).maybeSingle();
-          if (roleErr) throw roleErr;
-          const role = (roleRow && roleRow.role) || '';
-          if (String(role).toLowerCase() !== 'admin') throw new Error('Server role check failed — only admins may delete tickets');
-
-          let { error } = await supabase.from('tickets').delete().eq('ticket_id', ticketIdValue);
-          if (error) {
-            const fallback = await supabase.from('tickets').delete().eq('ticket_no', ticketIdValue);
-            if (fallback.error) throw fallback.error;
-          }
-        }
-
-        try {
-          const auditEntry = {
-            action: 'delete',
-            ticket_id: ticketIdValue,
-            ticket_no: ticketToDelete.data?.ticketNo ?? null,
-            user_id: currentUserId || null,
-            username: operatorName || null,
-            details: JSON.stringify({ before: ticketToDelete.data || null }),
-            created_at: new Date().toISOString(),
-          };
-          await supabase.from('audit_logs').insert([auditEntry]);
-        } catch (auditErr) {
-          console.debug('Audit log insertion failed (delete)', auditErr);
-        }
-
-        setPendingDelete((pd) => (pd && pd.ticket && String(pd.ticket.ticketId) === String(ticketToDelete.ticketId) ? null : pd));
-        fetchAuditLogs();
-        toast({ title: 'Deleted', description: `Ticket ${ticketToDelete.ticketId} deleted`, status: 'success', duration: 3000 });
-      } catch (err) {
-        console.error('Final delete failed', err);
-        setOriginalTickets((prev) => [ticketToDelete, ...prev]);
-        setFilteredTickets((prev) => [ticketToDelete, ...prev]);
-        setPendingDelete(null);
-        toast({ title: 'Delete failed', description: err?.message || 'Could not delete ticket from server', status: 'error', duration: 6000 });
-      }
-    }, DELAY);
-
-    setPendingDelete({ ticket: ticketToDelete, timeoutId });
-
-    toast({
-      duration: DELAY,
-      isClosable: true,
-      position: 'top-right',
-      render: ({ onClose }) => (
-        <Box color="white" bg="red.500" p={3} borderRadius="md" boxShadow="md">
-          <HStack justify="space-between" align="center">
-            <Box>
-              <Text fontWeight="bold">Ticket deleted</Text>
-              <Text fontSize="sm">Ticket {ticketToDelete.ticketId} scheduled for deletion — <Text as="span" fontWeight="bold">Undo</Text> to restore.</Text>
-            </Box>
-            <HStack>
-              <Button size="sm" colorScheme="whiteAlpha" onClick={() => {
-                clearTimeout(timeoutId);
-                setOriginalTickets((prev) => [ticketToDelete, ...prev]);
-                setFilteredTickets((prev) => [ticketToDelete, ...prev]);
-                setPendingDelete(null);
-                onClose();
-                toast({ title: 'Restored', description: `Ticket ${ticketToDelete.ticketId} restored`, status: 'info', duration: 3000 });
-              }}>
-                Undo
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => { clearTimeout(timeoutId); setPendingDelete(null); onClose(); }}>
-                Close
-              </Button>
-            </HStack>
-          </HStack>
-        </Box>
-      ),
     });
+    if (!rows.length) {
+      toast({ title: 'No rows to export', status: 'info', duration: 2000 });
+      return;
+    }
+    exportToCSV(rows, 'outgate-reports.csv');
+    toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
-  // ----------------- UI -----------------
+  const handleExportSadCsv = () => {
+    if (!filteredSadTickets.length) {
+      toast({ title: 'No rows to export', status: 'info', duration: 2000 });
+      return;
+    }
+    const rows = filteredSadTickets.map(t => {
+      const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+      return {
+        'SAD No': t.data.sadNo ?? '',
+        'Ticket No': t.data.ticketNo ?? '',
+        'Date': t.data.date ? new Date(t.data.date).toLocaleString() : '',
+        'Truck': t.data.gnswTruckNo ?? '',
+        'Gross (kg)': gross ?? '',
+        'Tare (kg)': tare ?? '',
+        'Net (kg)': net ?? '',
+        'Driver': t.data.driver ?? '',
+        'Status': t.data.status ?? '',
+      };
+    });
+    exportToCSV(rows, `SAD-${sadMeta.sad || 'report'}.csv`);
+    toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
+  };
+
   return (
-    <Container maxW="8xl" py={{ base: 4, md: 8 }}>
-      {/* Header */}
-      <Flex direction={{ base: 'column', md: 'row' }} align={{ base: 'stretch', md: 'center' }} gap={4} mb={6}>
-        <Box>
-          <Heading size={headingSize}>SAD Report Generator</Heading>
-          <Text mt={2} color="gray.600">Search SAD → then filter by driver or truck. Results persist until cleared.</Text>
-        </Box>
+    <Box p={{ base: 4, md: 8 }}>
+      <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
+        <Stack spacing={1}>
+          <Text fontSize="2xl" fontWeight="bold">Outgate Reports</Text>
+          <Text color="gray.500">Clean, sortable, and exportable list of all confirmed exits.</Text>
+        </Stack>
 
-        <Flex ml="auto" gap={4} align="center" wrap="wrap">
-          <StatGroup display="flex" alignItems="center" gap={4}>
-            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
-              <StatLabel>Total Transactions</StatLabel>
-              <StatNumber>{filteredTickets.length}</StatNumber>
-              <StatHelpText>{originalTickets.length > 0 ? `of ${originalTickets.length} returned` : ''}</StatHelpText>
-            </Stat>
-
-            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
-              <StatLabel>Cumulative Net (kg)</StatLabel>
-              <StatNumber>{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
-              <StatHelpText>From current filtered results</StatHelpText>
-            </Stat>
-          </StatGroup>
-        </Flex>
+        <HStack spacing={2}>
+          <Tooltip label="Export current view as CSV">
+            <Button leftIcon={<DownloadIcon />} colorScheme="teal" variant="ghost" onClick={handleExportCsv}>Export CSV</Button>
+          </Tooltip>
+          <Button leftIcon={<RepeatIcon />} variant="outline" onClick={handleResetAll} aria-label="Reset filters">
+            Reset
+          </Button>
+        </HStack>
       </Flex>
 
-      {/* Main card */}
-      <Box bg="white" p={{ base: 4, md: 6 }} borderRadius="md" boxShadow="sm">
-        {/* Search & filters */}
-        <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={3} alignItems="end">
-          <ChakraInput
-            placeholder="Type SAD No (required)"
-            value={searchSAD}
-            onChange={(e) => setSearchSAD(e.target.value)}
-            isDisabled={loading || pdfGenerating}
-            borderRadius="md"
-            size="md"
-            aria-label="Search SAD"
-          />
+      <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={6}>
+        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel>Total SADs</StatLabel>
+          <StatNumber>{totals.totalSads}</StatNumber>
+          <StatHelpText>distinct SAD numbers</StatHelpText>
+        </Stat>
+        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel>Total Exits</StatLabel>
+          <StatNumber>{totals.totalExits}</StatNumber>
+          <StatHelpText>outgate rows</StatHelpText>
+        </Stat>
+        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel>Total Tickets</StatLabel>
+          <StatNumber>{totals.totalTickets}</StatNumber>
+          <StatHelpText>tickets referenced</StatHelpText>
+        </Stat>
+        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel>Filtered Results</StatLabel>
+          <StatNumber>{totals.reportsCount}</StatNumber>
+          <StatHelpText>matching current filters</StatHelpText>
+        </Stat>
+      </SimpleGrid>
 
-          {originalTickets.length > 0 ? (
-            <>
-              <ChakraInput
-                placeholder="Driver Name (filter)"
-                value={searchDriver}
-                onChange={(e) => setSearchDriver(e.target.value)}
-                isDisabled={loading || pdfGenerating}
-                borderRadius="md"
-                size="md"
-                aria-label="Filter by driver"
-              />
-              <ChakraInput
-                placeholder="Truck No (filter)"
-                value={searchTruck}
-                onChange={(e) => setSearchTruck(e.target.value)}
-                isDisabled={loading || pdfGenerating}
-                borderRadius="md"
-                size="md"
-                aria-label="Filter by truck"
-              />
-            </>
-          ) : (
-            <>
-              <Box />
-              <Box />
-            </>
-          )}
-        </SimpleGrid>
-
-        {/* Buttons */}
-        <Flex gap={3} wrap="wrap" align="center" mb={4}>
-          <Button
-            colorScheme="teal"
-            size="md"
-            leftIcon={<FaSearch />}
-            onClick={handleGenerateReport}
-            isLoading={loading}
-            loadingText="Searching..."
-            minW="160px"
-            aria-label="Generate report"
-          >
-            Generate Report
+      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+        <Text fontWeight="semibold" mb={2}>SAD Report (Search by SAD No)</Text>
+        <Flex gap={3} align="center" mb={3} flexWrap="wrap">
+          <Input placeholder="Type SAD number (partial allowed)" value={sadQuery} onChange={(e) => setSadQuery(e.target.value)} maxW="360px" />
+          <Button colorScheme="teal" leftIcon={<SearchIcon />} onClick={handleGenerateSad} isLoading={sadLoading}>
+            Generate
           </Button>
 
-          {originalTickets.length > 0 && (
-            <>
-              <Button size="md" leftIcon={<FaFilter />} onClick={applyDriverTruckFilter} isDisabled={loading || pdfGenerating}>Apply Filters</Button>
-              <Button size="md" variant="ghost" leftIcon={<FaTimes />} onClick={clearDriverTruckFilters} isDisabled={loading || pdfGenerating}>Clear Filters</Button>
-            </>
-          )}
-
-          <Button size="md" variant="ghost" leftIcon={<FaRedo />} onClick={clearAll} minW="120px">Clear All</Button>
-
-          <HStack spacing={2} ml="auto" wrap="wrap">
-            <Button leftIcon={<FaFilePdf />} onClick={handleDownloadPdf} isLoading={pdfGenerating} size="sm" colorScheme="gray">
-              Download PDF
+          <Box ml="auto" display="flex" gap={2}>
+            <Button size="sm" variant="ghost" onClick={() => { setSadQuery(''); setSadTickets([]); setSadOriginal([]); setSadMeta({}); }}>
+              Clear
             </Button>
-            <Button leftIcon={<FaShareAlt />} onClick={handleNativeShare} isLoading={pdfGenerating} size="sm" colorScheme="blue">
-              Share
-            </Button>
-            <Button leftIcon={<FaEnvelope />} onClick={handleEmailComposer} isLoading={pdfGenerating} size="sm" colorScheme="green">
-              Email 
-            </Button>
-
-            <Menu>
-              <MenuButton as={IconButton} aria-label="more" icon={<FaEllipsisV />} variant="ghost" />
-              <MenuList>
-                <MenuItem icon={<FaFilePdf />} onClick={handleDownloadPdf}>Export PDF</MenuItem>
-                <MenuItem icon={<FaFileCsv />} onClick={exportCsv}>Export CSV</MenuItem>
-                <MenuItem icon={<FaShareAlt />} onClick={handleNativeShare}>Share</MenuItem>
-                <MenuItem icon={<FaEnvelope />} onClick={handleEmailComposer}>Email</MenuItem>
-                <MenuItem onClick={fetchAuditLogs}>Refresh Audit Logs</MenuItem>
-              </MenuList>
-            </Menu>
-          </HStack>
+          </Box>
         </Flex>
 
-        {/* Date/time filters */}
-        <Box border="1px solid" borderColor="gray.100" p={3} borderRadius="md" mb={4}>
-          <Text fontWeight="semibold" mb={2}>Filter by Date & Time Range</Text>
-          <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} alignItems="end">
-            <Box>
-              <Text fontSize="sm" mb={1}>Date From</Text>
-              <ChakraInput type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-            </Box>
-            <Box>
-              <Text fontSize="sm" mb={1}>Date To</Text>
-              <ChakraInput type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-            </Box>
-            <Box>
-              <Text fontSize="sm" mb={1}>Time From</Text>
-              <ChakraInput type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
-            </Box>
-            <Box>
-              <Text fontSize="sm" mb={1}>Time To</Text>
-              <ChakraInput type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
-            </Box>
-          </SimpleGrid>
+        {sadOriginal.length > 0 && (
+          <Box mt={2}>
+            <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
+              <Box>
+                <FormLabel>Date From</FormLabel>
+                <Input type="date" value={sadDateFrom} onChange={(e) => setSadDateFrom(e.target.value)} />
+              </Box>
+              <Box>
+                <FormLabel>Date To</FormLabel>
+                <Input type="date" value={sadDateTo} onChange={(e) => setSadDateTo(e.target.value)} />
+              </Box>
+              <Box>
+                <FormLabel>Time From</FormLabel>
+                <Input type="time" value={sadTimeFrom} onChange={(e) => setSadTimeFrom(e.target.value)} />
+              </Box>
+              <Box>
+                <FormLabel>Time To</FormLabel>
+                <Input type="time" value={sadTimeTo} onChange={(e) => setSadTimeTo(e.target.value)} />
+              </Box>
+            </SimpleGrid>
 
-          <Flex mt={3} gap={2} align="center">
-            <Button size="sm" colorScheme="blue" onClick={applyRange}>Apply Range</Button>
-            <Button size="sm" variant="ghost" onClick={resetRange}>Reset Range</Button>
+            <Flex mt={3} gap={2} align="center">
+              <Button size="sm" colorScheme="blue" onClick={applySadRange}>Apply Range</Button>
+              <Button size="sm" variant="ghost" onClick={resetSadRange}>Reset Range</Button>
 
-            <Text ml="auto" fontSize="sm" color="gray.600">Tip: Narrow by date/time, then export.</Text>
-          </Flex>
-        </Box>
-
-        {/* Results */}
-        {filteredTickets.length > 0 ? (
-          <>
-            {/* header */}
-            <Flex align="center" justify="space-between" mb={3} gap={4} wrap="wrap">
-              <Text fontSize={{ base: 'md', md: 'lg' }} fontWeight="bold">{reportMeta?.sad ? `SAD: ${reportMeta.sad}` : `SAD: ${searchSAD}`}</Text>
-
-              <HStack spacing={3}>
-                <Box textAlign="right">
-                  <Text fontSize="sm" color="gray.500">Showing</Text>
-                  <Text fontWeight="bold">{filteredTickets.length} / {originalTickets.length}</Text>
+              <Flex gap={4} mt={2} align="center">
+                <Box>
+                  <FormLabel mb={1} fontSize="sm">Filter by Status</FormLabel>
+                  <Select size="sm" value={sadSortStatus} onChange={(e) => setSadSortStatus(e.target.value)}>
+                    <option value="">All</option>
+                    <option value="Pending">Pending</option>
+                    <option value="Exited">Exited</option>
+                  </Select>
                 </Box>
-                <Box textAlign="right" minW="140px">
-                  <Text fontSize="sm" color="gray.500">Cumulative Net</Text>
-                  <Text fontWeight="bold">{formatNumber(String(cumulativeNetWeight)) || '0'} kg</Text>
+
+                <Box>
+                  <FormLabel mb={1} fontSize="sm">Sort by Status</FormLabel>
+                  <Select size="sm" value={sadSortOrder} onChange={(e) => setSadSortOrder(e.target.value)}>
+                    <option value="none">None</option>
+                    <option value="pending_first">Pending first</option>
+                    <option value="exited_first">Exited first</option>
+                  </Select>
                 </Box>
+              </Flex>
+
+              <HStack ml="auto" spacing={2}>
+                <Button size="sm" leftIcon={<DownloadIcon />} onClick={handleExportSadCsv}>Export CSV</Button>
+                <Button size="sm" leftIcon={<FaFilePdf />} onClick={handleDownloadSadPdf}>Download PDF</Button>
+                <Button size="sm" leftIcon={<FaShareAlt />} onClick={handleShareSad}>Share</Button>
+                <Button size="sm" leftIcon={<FaEnvelope />} onClick={handleEmailSad}>Email</Button>
               </HStack>
             </Flex>
 
-            {/* Mobile cards */}
-            {isMobile ? (
-              <VStack spacing={3} align="stretch">
-                {filteredTickets.map((t) => {
-                  const computed = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-                  const displayTruck = t.data.gnswTruckNo || t.data.truckOnWb || t.data.anpr || t.data.truckNo || 'N/A';
-                  const displayDriver = t.data.driver || 'N/A';
-                  return (
-                    <Box key={t.ticketId} borderWidth="1px" borderColor="gray.100" borderRadius="md" p={3} bg="white" boxShadow="xs">
-                      <Flex justify="space-between" align="start" gap={3} wrap="wrap">
-                        <Box>
-                          <Text fontSize="sm" color="gray.500">Ticket</Text>
-                          <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
-                          <Text fontSize="sm" color="gray.500">{t.data.date ? new Date(t.data.date).toLocaleString() : 'N/A'}</Text>
-                        </Box>
-
-                        <Box textAlign="right">
-                          <Text fontSize="sm" color="gray.500">Truck</Text>
-                          <Text fontWeight="semibold">{displayTruck}</Text>
-                          <Text fontSize="sm" color="gray.500">Driver</Text>
-                          <Text>{displayDriver}</Text>
-                        </Box>
-                      </Flex>
-
-                      <Flex mt={3} gap={3} justify="space-between" align="center" wrap="wrap">
-                        <HStack spacing={3}>
-                          <Box>
-                            <Text fontSize="xs" color="gray.500">Gross</Text>
-                            <Text fontWeight="bold">{computed.grossDisplay || '0'}</Text>
-                          </Box>
-                          <Box>
-                            <Text fontSize="xs" color="gray.500">Tare</Text>
-                            <Text fontWeight="bold">{computed.tareDisplay || '0'}</Text>
-                          </Box>
-                          <Box>
-                            <Text fontSize="xs" color="gray.500">Net</Text>
-                            <Text fontWeight="bold">{computed.netDisplay || '0'}</Text>
-                          </Box>
-                        </HStack>
-
-                        <HStack spacing={2} ml="auto">
-                          <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
-                          {t.data.fileUrl && (
-                            <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>
-                              Open PDF
-                            </Button>
-                          )}
-                        </HStack>
-                      </Flex>
-                    </Box>
-                  );
-                })}
-              </VStack>
-            ) : (
-              /* Desktop/tablet table */
-              <Box overflowX="auto" borderRadius="md" bg="white" boxShadow="sm">
-                <Table variant="striped" colorScheme="teal" size="sm" sx={{
-                  'th': {
-                    position: 'sticky',
-                    top: 0,
-                    background: 'white',
-                    zIndex: 2,
-                  }
-                }}>
-                  <Thead bg="gray.50">
-                    <Tr>
-                      <Th onClick={() => toggleSort('sadNo')} cursor="pointer">
-                        <HStack spacing={2}><Text>SAD No</Text> {sortBy === 'sadNo' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th onClick={() => toggleSort('ticketNo')} cursor="pointer">
-                        <HStack spacing={2}><Text>Ticket No</Text> {sortBy === 'ticketNo' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th onClick={() => toggleSort('date')} cursor="pointer">
-                        <HStack spacing={2}><Text>Date & Time</Text> {sortBy === 'date' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th onClick={() => toggleSort('truck')} cursor="pointer">
-                        <HStack spacing={2}><Text>Truck No</Text> {sortBy === 'truck' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th isNumeric onClick={() => toggleSort('gross')} cursor="pointer">
-                        <HStack spacing={2} justify="flex-end"><Text>Gross (kg)</Text> {sortBy === 'gross' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th isNumeric onClick={() => toggleSort('tare')} cursor="pointer">
-                        <HStack spacing={2} justify="flex-end"><Text>Tare (kg)</Text> {sortBy === 'tare' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th isNumeric onClick={() => toggleSort('net')} cursor="pointer">
-                        <HStack spacing={2} justify="flex-end"><Text>Net (kg)</Text> {sortBy === 'net' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
-                      </Th>
-                      <Th>Driver</Th>
-                      <Th>Actions</Th>
-                    </Tr>
-                  </Thead>
-
-                  <Tbody>
-                    {filteredTickets.map((ticket) => {
-                      const computed = computeWeightsFromObj({
-                        gross: ticket.data.gross,
-                        tare: ticket.data.tare,
-                        net: ticket.data.net,
-                      });
-                      const displayDriver = ticket.data.driver || 'N/A';
-                      const displayTruck = ticket.data.gnswTruckNo || ticket.data.truckOnWb || ticket.data.anpr || ticket.data.truckNo || 'N/A';
-
-                      return (
-                        <Tr key={ticket.ticketId}>
-                          <Td>{ticket.data.sadNo}</Td>
-                          <Td>{ticket.data.ticketNo}</Td>
-                          <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
-                          <Td>{displayTruck}</Td>
-                          <Td isNumeric>{computed.grossDisplay || '0'}</Td>
-                          <Td isNumeric>{computed.tareDisplay || '0'}</Td>
-                          <Td isNumeric>{computed.netDisplay || '0'}</Td>
-                          <Td>{displayDriver}</Td>
-                          <Td>
-                            <HStack spacing={2} flexWrap="wrap">
-                              <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
-                              {ticket.data.fileUrl && (
-                                <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
-                                  Open
-                                </Button>
-                              )}
-                            </HStack>
-                          </Td>
-                        </Tr>
-                      );
-                    })}
-
-                    <Tr fontWeight="bold" bg="teal.50">
-                      <Td colSpan={6}>Cumulative Net Weight</Td>
-                      <Td isNumeric>{formatNumber(cumulativeNetWeight) || '0'} kg</Td>
-                      <Td colSpan={2} />
-                    </Tr>
-                  </Tbody>
-                </Table>
-              </Box>
-            )}
-
-            {/* Audit logs */}
-            <Box mt={6} p={4} borderRadius="md" border="1px solid" borderColor="gray.100" bg="white">
-              <Flex align="center" mb={3}>
-                <Heading size="sm">Recent Audit Logs</Heading>
-                <Button size="sm" ml="auto" onClick={fetchAuditLogs} leftIcon={<FaRedo />}>Refresh</Button>
-              </Flex>
-
-              {loadingAudit ? (
-                <Flex align="center" justify="center" p={4}><Spinner /></Flex>
-              ) : auditLogs.length === 0 ? (
-                <Text fontSize="sm" color="gray.500">No audit logs yet.</Text>
-              ) : (
-                <Box overflowX="auto">
-                  <Table size="sm" variant="simple">
-                    <Thead>
-                      <Tr>
-                        <Th>When</Th>
-                        <Th>User</Th>
-                        <Th>Action</Th>
-                        <Th>Ticket</Th>
-                        <Th>Details</Th>
-                      </Tr>
-                    </Thead>
-                    <Tbody>
-                      {auditLogs.map((a) => (
-                        <Tr key={a.id || `${a.ticket_id}-${a.created_at}`}>
-                          <Td>{a.created_at ? new Date(a.created_at).toLocaleString() : '—'}</Td>
-                          <Td>{a.username ?? a.user_id ?? '—'}</Td>
-                          <Td>{a.action}</Td>
-                          <Td>{a.ticket_no ?? a.ticket_id ?? '—'}</Td>
-                          <Td style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {a.details ? a.details : '—'}
-                          </Td>
-                        </Tr>
-                      ))}
-                    </Tbody>
-                  </Table>
-                </Box>
-              )}
-            </Box>
-          </>
-        ) : (
-          !loading && (searchSAD || searchDriver || searchTruck) && (
-            <Text mt={6} fontStyle="italic">
-              No records found for: <Text as="span" fontWeight="bold"> {reportMeta?.sad || [searchSAD, searchDriver, searchTruck].filter(Boolean).join(', ')}</Text>
-            </Text>
-          )
+            <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time to narrow results before exporting. You can also filter or sort by Ticket Status.</Text>
+          </Box>
         )}
       </Box>
 
-      {/* Ticket modal */}
-      <Modal isOpen={isOpen} onClose={() => { onClose(); setIsEditing(false); setEditData({}); setEditErrors({}); }} size={modalSize} isCentered scrollBehavior="inside">
-        <ModalOverlay />
-        <AnimatePresence>
-          {isOpen && (
-            <MotionModalContent
-              ref={modalRef}
-              borderRadius="lg"
-              p={4}
-              initial={{ opacity: 0, y: 30 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 30 }}
-              transition={{ duration: 0.25 }}
-            >
-              <ModalHeader>
-                <Flex align="center" gap={3}>
-                  <Icon as={FaFileInvoice} color="teal.500" boxSize={5} />
-                  <Box>
-                    <Text fontWeight="bold">Ticket Details</Text>
-                    <Text fontSize="sm" color="gray.500">
-                      {selectedTicket?.ticketId} • {selectedTicket?.data?.date ? new Date(selectedTicket.data.date).toLocaleString() : ''}
-                    </Text>
-                  </Box>
-                </Flex>
-              </ModalHeader>
-              <ModalCloseButton />
-              <ModalBody>
-                {selectedTicket ? (
-                  <Stack spacing={3} fontSize="sm">
-                    <HStack>
-                      <Icon as={FaTruck} />
-                      <Text><b>Truck No:</b> {selectedTicket.data.gnswTruckNo || selectedTicket.data.truckOnWb || selectedTicket.data.anpr || selectedTicket.data.truckNo || 'N/A'}</Text>
-                    </HStack>
-
-                    {isEditing ? (
-                      <>
-                        <FormControl isInvalid={!!editErrors.operator}>
-                          <FormLabel><Icon as={FaUserTie} mr={2} /> Operator</FormLabel>
-                          <ChakraInput value={editData.operator ?? ''} onChange={(e) => handleEditChange('operator', e.target.value)} />
-                          <FormErrorMessage>{editErrors.operator}</FormErrorMessage>
-                        </FormControl>
-
-                        <FormControl>
-                          <FormLabel><Icon as={FaBox} mr={2} /> Consignee</FormLabel>
-                          <ChakraInput value={editData.consignee ?? ''} onChange={(e) => handleEditChange('consignee', e.target.value)} />
-                        </FormControl>
-
-                        <FormControl>
-                          <FormLabel><Icon as={FaBox} mr={2} /> Container No</FormLabel>
-                          <ChakraInput value={editData.containerNo ?? ''} onChange={(e) => handleEditChange('containerNo', e.target.value)} />
-                        </FormControl>
-
-                        <SimpleGrid columns={[1, 3]} spacing={3}>
-                          <FormControl isInvalid={!!editErrors.gross}>
-                            <FormLabel><Icon as={FaBalanceScale} mr={2} /> Gross (kg)</FormLabel>
-                            <ChakraInput value={editData.gross ?? ''} onChange={(e) => handleEditChange('gross', e.target.value)} />
-                            <FormErrorMessage>{editErrors.gross}</FormErrorMessage>
-                          </FormControl>
-                          <FormControl isInvalid={!!editErrors.tare}>
-                            <FormLabel><Icon as={FaBalanceScale} mr={2} /> Tare (kg)</FormLabel>
-                            <ChakraInput value={editData.tare ?? ''} onChange={(e) => handleEditChange('tare', e.target.value)} />
-                            <FormErrorMessage>{editErrors.tare}</FormErrorMessage>
-                          </FormControl>
-                          <FormControl isInvalid={!!editErrors.net}>
-                            <FormLabel><Icon as={FaBalanceScale} mr={2} /> Net (kg)</FormLabel>
-                            <ChakraInput value={editData.net ?? (numericValue(editData.gross) !== null && numericValue(editData.tare) !== null ? String(numericValue(editData.gross) - numericValue(editData.tare)) : '')} onChange={(e) => handleEditChange('net', e.target.value)} />
-                            <FormErrorMessage>{editErrors.net}</FormErrorMessage>
-                          </FormControl>
-                        </SimpleGrid>
-                      </>
-                    ) : (
-                      <>
-                        <HStack>
-                          <Icon as={FaUserTie} />
-                          <Text><b>Operator:</b> {operatorName || selectedTicket.data.operator || 'N/A'}</Text>
-                        </HStack>
-
-                        <HStack>
-                          <Icon as={FaBox} />
-                          <Text><b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}</Text>
-                        </HStack>
-
-                        {(() => {
-                          const computed = computeWeightsFromObj({
-                            gross: selectedTicket.data.gross,
-                            tare: selectedTicket.data.tare,
-                            net: selectedTicket.data.net,
-                          });
-                          return (
-                            <>
-                              <HStack>
-                                <Icon as={FaBalanceScale} />
-                                <Text><b>Gross Weight:</b> {computed.grossDisplay || '0'} kg</Text>
-                              </HStack>
-                              <HStack>
-                                <Icon as={FaBalanceScale} />
-                                <Text><b>Tare Weight:</b> {computed.tareDisplay || '0'} kg</Text>
-                              </HStack>
-                              <HStack>
-                                <Icon as={FaBalanceScale} />
-                                <Text><b>Net Weight:</b> {computed.netDisplay || '0'} kg</Text>
-                              </HStack>
-                            </>
-                          );
-                        })()}
-                      </>
-                    )}
-
-                    <HStack>
-                      <Icon as={FaBox} />
-                      <Text><b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}</Text>
-                    </HStack>
-                    <HStack>
-                      <Text><b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}</Text>
-                    </HStack>
-                    <HStack>
-                      <Text><b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}</Text>
-                    </HStack>
-                    <HStack>
-                      <Text><b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}</Text>
-                    </HStack>
-                    <HStack>
-                      <Text><b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}</Text>
-                    </HStack>
-
-                    {selectedTicket.data.fileUrl && (
-                      <Box pt={2}>
-                        {/* Stored ticket open also red as requested */}
-                        <Button size="sm" colorScheme="red" leftIcon={<FaExternalLinkAlt />} onClick={() => window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')}>
-                          Open Stored Ticket PDF
+      {filteredSadTickets.length > 0 && (
+        <Box mb={6} bg="white" p={4} borderRadius="md" boxShadow="sm">
+          <Text fontWeight="semibold" mb={3}>SAD Results — {sadMeta.sad} ({filteredSadTickets.length} records)</Text>
+          <Table variant="striped" size="sm">
+            <Thead>
+              <Tr>
+                <Th>SAD No</Th>
+                <Th>Ticket No</Th>
+                <Th>Date & Time</Th>
+                <Th>Truck No</Th>
+                <Th isNumeric>Gross (KG)</Th>
+                <Th isNumeric>Tare (KG)</Th>
+                <Th isNumeric>Net (KG)</Th>
+                <Th>Status</Th>
+                <Th>Actions</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {filteredSadTickets.map((t) => {
+                const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+                return (
+                  <Tr key={t.ticketId}>
+                    <Td>{t.data.sadNo}</Td>
+                    <Td>{t.data.ticketNo}</Td>
+                    <Td>{t.data.created_at ? new Date(t.data.date).toLocaleString() : 'N/A'}</Td>
+                    <Td>{t.data.gnswTruckNo}</Td>
+                    <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'} KG</Td>
+                    <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'} KG</Td>
+                    <Td isNumeric>{net != null ? Number(net).toLocaleString() : '—'} KG</Td>
+                    <Td>
+                      <Badge colorScheme={(t.data.status === 'Exited') ? 'green' : (t.data.status === 'Pending') ? 'yellow' : 'gray'}>
+                        {t.data.status}
+                      </Badge>
+                    </Td>
+                    <Td>
+                      <HStack spacing={2}>
+                        <Button size="sm" variant="outline" onClick={() => { if (t.data.fileUrl) window.open(t.data.fileUrl, '_blank', 'noopener'); }}>
+                          Open Ticket
                         </Button>
-                      </Box>
-                    )}
+                      </HStack>
+                    </Td>
+                  </Tr>
+                );
+              })}
+              <Tr fontWeight="bold" bg="gray.50">
+                <Td colSpan={6}>Cumulative Net</Td>
+                <Td isNumeric>{Number(cumulativeNet || 0).toLocaleString()}</Td>
+                <Td />
+              </Tr>
+            </Tbody>
+          </Table>
+        </Box>
+      )}
+
+      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+        <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4}>
+          <Box>
+            <FormLabel>Search</FormLabel>
+            <Input placeholder="vehicle, ticket, driver, SAD, container..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }} />
+          </Box>
+
+          <Box>
+            <FormLabel>Date range</FormLabel>
+            <Flex gap={2}>
+              <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }} />
+              <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }} />
+            </Flex>
+          </Box>
+
+          <Box>
+            <FormLabel>Time range</FormLabel>
+            <Flex gap={2}>
+              <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); setCurrentPage(1); }} />
+              <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
+            </Flex>
+          </Box>
+
+          <Box>
+            <FormLabel>Page size / Sort</FormLabel>
+            <HStack>
+              <Select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}>
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
+              </Select>
+              <Select value={sortField} onChange={(e) => { setSortField(e.target.value); }}>
+                <option value="outgateDateTime">Exit Date</option>
+                <option value="ticketNo">Ticket No</option>
+                <option value="vehicleNumber">Truck No</option>
+              </Select>
+              <Select value={sortDirection} onChange={(e) => setSortDirection(e.target.value)}>
+                <option value="desc">Descending</option>
+                <option value="asc">Ascending</option>
+              </Select>
+            </HStack>
+          </Box>
+        </SimpleGrid>
+      </Box>
+
+      {loading ? (
+        <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
+      ) : (
+        <>
+          <Box overflowX="auto" borderRadius="md" border="1px solid" borderColor="gray.200" bg="white">
+            <Table variant="striped" size="sm">
+              <Thead bg="gray.50">
+                <Tr>
+                  <Th>Ticket</Th>
+                  <Th>SAD</Th>
+                  <Th>Truck</Th>
+                  <Th>Exit Date & Time</Th>
+                  <Th>Driver</Th>
+                  <Th isNumeric>Gross (KG)</Th>
+                  <Th isNumeric>Tare (KG)</Th>
+                  <Th isNumeric>Net (KG)</Th>
+                  <Th>Status</Th>
+                  <Th>Actions</Th>
+                </Tr>
+              </Thead>
+
+              <Tbody>
+                {paginatedReports.map((report) => {
+                  const { gross, tare, net } = computeWeights(report);
+                  return (
+                    <Tr key={report.id}>
+                      <Td>{report.ticketNo ?? <Badge>Manual</Badge>}</Td>
+                      <Td>{report.sadNo ?? '—'}</Td>
+                      <Td>{report.vehicleNumber || '—'}</Td>
+                      <Td>{report.outgateDateTime ? new Date(report.outgateDateTime).toLocaleString() : '—'}</Td>
+                      <Td>{report.driver ?? '—'}</Td>
+                      <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'}</Td>
+                      <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'}</Td>
+                      <Td isNumeric>{net != null ? Number(net).toLocaleString() : '—'}</Td>
+                      <Td>{report.Satus ?? '—'}</Td>
+                      <Td>
+                        <HStack spacing={2}>
+                          <Button size="sm" colorScheme="blue" onClick={() => openDetails(report)}>Details</Button>
+                          {report.fileUrl && (
+                            <IconButton aria-label="Open attachment" icon={<FaFilePdf />} size="sm" variant="ghost" onClick={() => window.open(report.fileUrl, '_blank', 'noopener')} />
+                          )}
+                        </HStack>
+                      </Td>
+                    </Tr>
+                  );
+                })}
+              </Tbody>
+            </Table>
+          </Box>
+
+          <Flex justify="space-between" align="center" mt={4} gap={4} flexWrap="wrap">
+            <Flex gap={2} align="center">
+              <IconButton aria-label="Previous" icon={<ChevronLeftIcon />} onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={currentPage === 1} size="sm" />
+              <Text>Page {currentPage} of {totalPages}</Text>
+              <IconButton aria-label="Next" icon={<ChevronRightIcon />} onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))} isDisabled={currentPage === totalPages} size="sm" />
+            </Flex>
+
+            <Text color="gray.600" fontSize="sm">Showing {paginatedReports.length} of {filteredReports.length} results</Text>
+          </Flex>
+        </>
+      )}
+
+      <Modal isOpen={isDetailsOpen} onClose={onDetailsClose} size="4xl" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent maxW="90vw">
+          <ModalHeader>Report Details</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            {selectedReport ? (
+              <Stack spacing={3}>
+                <Flex justify="space-between" align="center" gap={4} flexWrap="wrap">
+                  <Stack>
+                    <Text fontSize="lg" fontWeight="bold">{selectedReport.vehicleNumber || '—'}</Text>
+                    <Text color="gray.600">{selectedReport.ticketNo ? `Ticket: ${selectedReport.ticketNo}` : 'No ticket'}</Text>
+                    <Text color="gray.600">{selectedReport.destination}</Text>
                   </Stack>
-                ) : (
-                  <Text>No data</Text>
-                )}
-              </ModalBody>
+                  <Stack textAlign="right">
+                    <Text fontSize="sm" color="gray.500">Exit</Text>
+                    <Text fontWeight="semibold">{selectedReport.outgateDateTime ? new Date(selectedReport.outgateDateTime).toLocaleString() : '—'}</Text>
+                    <Badge colorScheme="teal">{selectedReport.sadNo ?? 'No SAD'}</Badge>
+                  </Stack>
+                </Flex>
 
-              <ModalFooter>
-                {/* Admin-only Edit/Delete controls */}
-                {selectedTicket && !isEditing && (
+                <Divider />
+
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
+                  <Box>
+                    <Text fontWeight="semibold">Driver</Text>
+                    <Text>{selectedReport.driverName ?? '—'}</Text>
+                    <Text mt={3} fontWeight="semibold">Consignee</Text>
+                    <Text>{selectedReport.destination ?? '—'}</Text>
+                  </Box>
+
+                  <Box>
+                    <Text fontWeight="semibold">Container</Text>
+                    <Text>{selectedReport.containerId ?? '—'}</Text>
+
+                    <Text mt={3} fontWeight="semibold">Remarks</Text>
+                    <Text>{selectedReport.remarks || '—'}</Text>
+                  </Box>
+                </SimpleGrid>
+
+                <Divider />
+
+                <Text fontWeight="semibold">Weight Details (kg)</Text>
+                <Box>
+                  {(() => {
+                    const { gross, tare, net } = computeWeights(selectedReport);
+                    return (
+                      <>
+                        <Text><b>Gross (KG):</b> {formatWeight(gross)}</Text>
+                        <Text><b>Tare (KG):</b> {formatWeight(tare)}</Text>
+                        <Text><b>Net (KG):</b> {formatWeight(net)}</Text>
+                      </>
+                    );
+                  })()}
+                </Box>
+
+                {selectedReport.fileUrl && (
                   <>
-                    {isAdmin ? (
-                      isTicketEditable(selectedTicket) ? (
-                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={startEditing}>Edit</Button>
-                      ) : (
-                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>
-                      )
-                    ) : (<Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>)}
-
-                    {isAdmin ? (
-                      <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} onClick={confirmDelete}>Delete</Button>
-                    ) : (
-                      <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>Delete</Button>
-                    )}
+                    <Divider />
+                    <Text fontWeight="semibold">Attachment</Text>
+                    <Box border="1px solid" borderColor="gray.200" borderRadius="md" overflow="hidden" minH="300px">
+                      <iframe
+                        src={selectedReport.fileUrl}
+                        width="100%"
+                        height="100%"
+                        style={{ border: 'none', minHeight: 300 }}
+                        title="Outgate attachment"
+                      />
+                    </Box>
                   </>
                 )}
-
-                {isEditing && (
-                  <>
-                    <Button leftIcon={<FaCheck />} colorScheme="green" mr={2} onClick={saveEdits} isLoading={savingEdit}>Save</Button>
-                    <Button variant="ghost" mr={2} onClick={cancelEditing}>Cancel</Button>
-                  </>
-                )}
-
-                <Button onClick={() => { onClose(); setIsEditing(false); setEditData({}); setEditErrors({}); }}>Close</Button>
-              </ModalFooter>
-            </MotionModalContent>
-          )}
-        </AnimatePresence>
+              </Stack>
+            ) : (
+              <Text>No report selected.</Text>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onDetailsClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
       </Modal>
-
-      {/* Delete confirmation */}
-      <AlertDialog isOpen={isDeleteOpen} leastDestructiveRef={cancelRef} onClose={onDeleteClose} isCentered>
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">Delete Ticket</AlertDialogHeader>
-            <AlertDialogBody>
-              Are you sure you want to delete ticket <b>{selectedTicket?.ticketId}</b>? It will be removed from the list and scheduled for deletion. You can undo for a few seconds.
-            </AlertDialogBody>
-            <AlertDialogFooter>
-              <Button ref={cancelRef} onClick={onDeleteClose} isDisabled={deleting}>Cancel</Button>
-              <Button colorScheme="red" onClick={performDelete} ml={3} isLoading={deleting}>Delete</Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
-    </Container>
+    </Box>
   );
 }
