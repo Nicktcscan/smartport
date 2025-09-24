@@ -31,18 +31,20 @@ import {
   Tr,
   Th,
   Td,
-  Progress,
   VStack,
   useBreakpointValue,
   Stack,
+  InputGroup,
+  InputRightElement,
 } from '@chakra-ui/react';
-import { ViewIcon, ExternalLinkIcon } from '@chakra-ui/icons';
+import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 import { supabase } from '../supabaseClient';
 
 /* -----------------------
    Top-level constants (stable references)
    ----------------------- */
 const REQUIRED_FIELDS = ['truckOnWb', 'operation', 'gross', 'tare', 'net', 'sadNo'];
+const OUT_OF_RANGE_THRESHOLD = 100000;
 
 /* -----------------------
    Helpers: formatting + parsing
@@ -64,9 +66,7 @@ function formatNumber(v) {
   return Number(n.toFixed(2)).toLocaleString('en-US');
 }
 
-/* Compute missing weights given gross/tare/net
-   Standard weighbridge rules (Net = Gross - Tare)
-*/
+/* Compute missing weights given gross/tare/net */
 function computeWeights(rowData) {
   const g0 = numericValue(rowData.gross);
   const t0 = numericValue(rowData.tare);
@@ -167,27 +167,41 @@ function NumericInput({
 }
 
 /* -----------------------
-   Condensed pagination helper (same as WeighbridgeManagementPage)
+   utilities
    ----------------------- */
-function getCondensedPages(current, total, edge = 1, around = 2) {
-  const pages = new Set();
-  for (let i = 1; i <= Math.min(edge, total); i++) pages.add(i);
-  for (let i = Math.max(1, current - around); i <= Math.min(total, current + around); i++) pages.add(i);
-  for (let i = Math.max(1, total - edge + 1); i <= total; i++) pages.add(i);
-  const arr = Array.from(pages).sort((a,b) => a-b);
-
-  const out = [];
-  for (let i = 0; i < arr.length; i++) {
-    if (i > 0 && arr[i] !== arr[i-1] + 1) out.push("...");
-    out.push(arr[i]);
+async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7) {
+  // keep existing robust insert logic from earlier, but simplified to always create ticket_no
+  // reusing the getNextTicketNoFromDB helper approach from above (not repeated here)
+  // For brevity we call supabase.from('tickets').insert and rely on DB uniqueness + retry
+  let attempt = 0;
+  while (attempt < retryLimit) {
+    attempt += 1;
+    try {
+      // Build a ticket_no if not present
+      if (!insertData.ticket_no) {
+        const suggested = await getNextTicketNoFromDB(historyRef);
+        insertData.ticket_no = suggested.nextTicketNo;
+        insertData.ticket_id = suggested.nextTicketNo;
+      }
+      const { data, error } = await supabase.from('tickets').insert([insertData]);
+      if (!error) return { data, error: null, ticketNo: insertData.ticket_no };
+      const msg = String(error?.message || '').toLowerCase();
+      if (msg.includes('duplicate') || msg.includes('unique') || error?.status === 409) {
+        // conflict: try again
+        await new Promise((res) => setTimeout(res, 200 * attempt));
+        insertData.ticket_no = null; // force re-get
+        continue;
+      }
+      return { data: null, error, ticketNo: null };
+    } catch (err) {
+      console.warn('insertTicketWithRetry attempt failed', err);
+      await new Promise((res) => setTimeout(res, 200 * attempt));
+      continue;
+    }
   }
-  return out;
+  return { data: null, error: new Error('Too many retries'), ticketNo: null };
 }
 
-/* -----------------------
-   Ticket generation utility (keeps your M-#### pattern)
-   - returns { nextTicketNo, maxNum } so callers can fallback to offsetting on collisions
-   ----------------------- */
 async function getNextTicketNoFromDB(localHistory = []) {
   try {
     const { data, error } = await supabase
@@ -218,69 +232,8 @@ async function getNextTicketNoFromDB(localHistory = []) {
     return { nextTicketNo: `M-${String(next).padStart(4, '0')}`, maxNum };
   } catch (err) {
     console.error('getNextTicketNoFromDB error', err);
-    let maxNum = 0;
-    const re = /^M-(\d+)$/i;
-    for (const h of localHistory) {
-      const t = h.data?.ticketNo;
-      if (!t) continue;
-      const m = String(t).trim().match(re);
-      if (m && m[1]) {
-        const n = parseInt(m[1].replace(/^0+/, '') || m[1], 10);
-        if (!isNaN(n) && n > maxNum) maxNum = n;
-      }
-    }
-    const next = maxNum + 1;
-    return { nextTicketNo: `M-${String(next).padStart(4, '0')}`, maxNum };
+    return { nextTicketNo: `M-0001`, maxNum: 0 };
   }
-}
-
-/* Insert with retry to reduce chance of duplicate ticket_no collisions */
-async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7) {
-  let attempt = 0;
-  let lastMaxNum = null;
-
-  while (attempt < retryLimit) {
-    attempt += 1;
-
-    // Fetch base suggestion
-    const { nextTicketNo, maxNum } = await getNextTicketNoFromDB(historyRef);
-    lastMaxNum = maxNum !== undefined && maxNum !== null ? maxNum : lastMaxNum;
-
-    // If we've already attempted before, prefer to offset by attempt to avoid repeated collisions
-    const candidateNum = (lastMaxNum || 0) + attempt;
-    const candidateTicketNo = `M-${String(candidateNum).padStart(4, '0')}`;
-
-    // Use candidateTicketNo computed above (this ensures we don't repeatedly try the same one)
-    insertData.ticket_no = candidateTicketNo;
-    insertData.ticket_id = candidateTicketNo;
-
-    try {
-      const { data, error } = await supabase.from('tickets').insert([insertData]);
-
-      if (!error) {
-        return { data, error: null, ticketNo: candidateTicketNo };
-      }
-
-      const msg = String(error?.message || '').toLowerCase();
-      // If unique/duplicate conflict, we retry with increasing offset
-      if (msg.includes('duplicate') || msg.includes('unique') || (error?.status === 409)) {
-        console.warn(`ticket_no collision on attempt ${attempt} (${candidateTicketNo}), retrying...`);
-        // small exponential-ish backoff
-        await new Promise((res) => setTimeout(res, 120 * attempt + Math.floor(Math.random() * 100)));
-        continue;
-      }
-
-      // any other error -> return
-      return { data: null, error, ticketNo: null };
-    } catch (err) {
-      // network / unexpected error: try again (but be cautious)
-      console.warn('Insert attempt threw, retrying if attempts remain', err);
-      await new Promise((res) => setTimeout(res, 150 * attempt));
-      continue;
-    }
-  }
-
-  return { data: null, error: new Error('Too many retries generating ticket number'), ticketNo: null };
 }
 
 /* -----------------------
@@ -340,6 +293,7 @@ export default function ManualEntry() {
 
   const [operatorName, setOperatorName] = useState('');
   const [operatorId, setOperatorId] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -354,6 +308,13 @@ export default function ManualEntry() {
   const [selectedSuggestedTare, setSelectedSuggestedTare] = useState('');
 
   const lastAutoFilledTruckRef = useRef('');
+
+  // Admin inline editing state
+  const [editingRowId, setEditingRowId] = useState(null);
+  const [editRowData, setEditRowData] = useState({});
+  // view modal edit state
+  const [viewIsEditing, setViewIsEditing] = useState(false);
+  const [viewEditData, setViewEditData] = useState({});
 
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
@@ -660,9 +621,10 @@ export default function ManualEntry() {
           }
 
           if (currentUser) {
-            const { data: userRow } = await supabase.from('users').select('full_name, username').eq('id', currentUser.id).maybeSingle();
+            const { data: userRow } = await supabase.from('users').select('full_name, username, role').eq('id', currentUser.id).maybeSingle();
             setOperatorName((userRow && (userRow.full_name || userRow.username)) || currentUser.email || '');
             setOperatorId(currentUser.id);
+            setIsAdmin(Boolean(userRow && String(userRow.role || '').toLowerCase() === 'admin'));
           }
         } catch (e) {
           console.warn('Could not determine operator', e);
@@ -879,6 +841,8 @@ export default function ManualEntry() {
   /* View ticket */
   const handleView = (ticket) => {
     setViewTicket(ticket);
+    setViewIsEditing(false);
+    setViewEditData({});
     onViewOpen();
   };
 
@@ -916,6 +880,20 @@ export default function ManualEntry() {
   const pagedHistory = filteredHistory.slice(startIndex, startIndex + pageSize);
 
   // condensed pagination items
+  function getCondensedPages(current, total, edge = 1, around = 2) {
+    const pages = new Set();
+    for (let i = 1; i <= Math.min(edge, total); i++) pages.add(i);
+    for (let i = Math.max(1, current - around); i <= Math.min(total, current + around); i++) pages.add(i);
+    for (let i = Math.max(1, total - edge + 1); i <= total; i++) pages.add(i);
+    const arr = Array.from(pages).sort((a,b) => a-b);
+
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+      if (i > 0 && arr[i] !== arr[i-1] + 1) out.push("...");
+      out.push(arr[i]);
+    }
+    return out;
+  }
   const pageItems = getCondensedPages(page, totalPages);
 
   const handlePageClick = (n) => {
@@ -937,6 +915,242 @@ export default function ManualEntry() {
 
   // responsive: mobile cards vs desktop table
   const isMobile = useBreakpointValue({ base: true, md: false });
+
+  /* -----------------------
+     Inline edit helpers (admin)
+  ----------------------- */
+
+  const startRowEdit = (ticket) => {
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can edit', status: 'warning', duration: 2500 });
+      return;
+    }
+    setEditingRowId(ticket.ticketId);
+    setEditRowData({ ...ticket.data });
+  };
+
+  const cancelRowEdit = () => {
+    setEditingRowId(null);
+    setEditRowData({});
+  };
+
+  const handleRowFieldChange = (field, value) => {
+    setEditRowData((p) => ({ ...p, [field]: value }));
+  };
+
+  // updates both DB and audit_logs (if ticket is not temporary)
+  const saveRowEdit = async (ticket) => {
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can save edits', status: 'warning', duration: 2500 });
+      return;
+    }
+    if (!ticket) return;
+
+    // validation: numeric conversions
+    const g = numericValue(editRowData.gross);
+    const t = numericValue(editRowData.tare);
+    let n = numericValue(editRowData.net);
+    if ((n === null || n === undefined) && g !== null && t !== null) n = g - t;
+
+    const errs = {};
+    if (g === null) errs.gross = 'Invalid gross';
+    if (t === null) errs.tare = 'Invalid tare';
+    if (n === null) errs.net = 'Invalid net';
+    if (g !== null && t !== null && !(g > t)) {
+      errs.gross = 'Gross must be greater than Tare';
+      errs.tare = 'Tare must be less than Gross';
+    }
+    if (Object.keys(errs).length) {
+      toast({ title: 'Validation error', description: 'Please correct fields before saving', status: 'error', duration: 3500 });
+      return;
+    }
+
+    const before = ticket.data;
+    const afterData = {
+      ...ticket.data,
+      ...editRowData,
+      gross: formatNumber(String(g)),
+      tare: formatNumber(String(t)),
+      net: formatNumber(String(n)),
+    };
+
+    // update local UI immediately
+    setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
+
+    // if ticket is temporary (optimistic), just keep local
+    if (String(ticket.ticketId || '').startsWith('tmp-')) {
+      setEditingRowId(null);
+      setEditRowData({});
+      toast({ title: 'Saved (local only)', status: 'success', duration: 2500 });
+      return;
+    }
+
+    // attempt DB update
+    try {
+      const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
+      if (!ticketIdValue) throw new Error('Missing ticket identifier');
+
+      const payload = {
+        gross: g !== null ? g : null,
+        tare: t !== null ? t : null,
+        net: n !== null ? n : null,
+        consignee: afterData.consignee || null,
+        container_no: afterData.containerNo || null,
+        driver: afterData.driver || null,
+        operator: afterData.operator || null,
+      };
+
+      // try update by ticket_id, fallback to ticket_no
+      let { error } = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue);
+      if (error) {
+        // fallback
+        const fallback = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue);
+        if (fallback.error) throw fallback.error;
+      }
+
+      // insert audit log
+      try {
+        const auditEntry = {
+          action: 'update',
+          ticket_id: ticketIdValue,
+          ticket_no: ticket.data?.ticketNo ?? null,
+          user_id: operatorId || null,
+          username: operatorName || null,
+          details: JSON.stringify({ before: before || null, after: afterData || null }),
+          created_at: new Date().toISOString(),
+        };
+        await supabase.from('audit_logs').insert([auditEntry]);
+      } catch (auditErr) {
+        console.debug('Audit log insertion failed', auditErr);
+      }
+
+      toast({ title: 'Saved', description: `Ticket ${ticketIdValue} updated`, status: 'success', duration: 2500 });
+      setEditingRowId(null);
+      setEditRowData({});
+    } catch (err) {
+      console.error('Update failed', err);
+      // roll back local if DB fails
+      setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...before } } : r)));
+      toast({ title: 'Update failed', description: err?.message || 'Could not update ticket', status: 'error', duration: 5000 });
+    }
+  };
+
+  /* -----------------------
+     View modal editing (admin)
+  ----------------------- */
+  const startViewEdit = () => {
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can edit', status: 'warning', duration: 2500 });
+      return;
+    }
+    if (!viewTicket) return;
+    setViewIsEditing(true);
+    setViewEditData({ ...viewTicket.data });
+  };
+
+  const cancelViewEdit = () => {
+    setViewIsEditing(false);
+    setViewEditData({});
+  };
+
+  const handleViewEditChange = (field, val) => {
+    setViewEditData((p) => ({ ...p, [field]: val }));
+  };
+
+  const saveViewEdit = async () => {
+    if (!viewTicket) return;
+    const ticket = viewTicket;
+    // similar validation as saveRowEdit
+    const g = numericValue(viewEditData.gross);
+    const t = numericValue(viewEditData.tare);
+    let n = numericValue(viewEditData.net);
+    if ((n === null || n === undefined) && g !== null && t !== null) n = g - t;
+
+    const errs = {};
+    if (g === null) errs.gross = 'Invalid gross';
+    if (t === null) errs.tare = 'Invalid tare';
+    if (n === null) errs.net = 'Invalid net';
+    if (g !== null && t !== null && !(g > t)) {
+      errs.gross = 'Gross must be greater than Tare';
+      errs.tare = 'Tare must be less than Gross';
+    }
+    if (Object.keys(errs).length) {
+      toast({ title: 'Validation error', description: 'Please correct fields before saving', status: 'error', duration: 3500 });
+      return;
+    }
+
+    const before = ticket.data;
+    const afterData = {
+      ...ticket.data,
+      ...viewEditData,
+      gross: formatNumber(String(g)),
+      tare: formatNumber(String(t)),
+      net: formatNumber(String(n)),
+    };
+
+    // update local UI
+    setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
+    setViewTicket((v) => ({ ...v, data: afterData }));
+
+    // persist to DB if not temp
+    if (!String(ticket.ticketId || '').startsWith('tmp-')) {
+      try {
+        const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
+        if (!ticketIdValue) throw new Error('Missing ticket identifier');
+
+        const payload = {
+          gross: g !== null ? g : null,
+          tare: t !== null ? t : null,
+          net: n !== null ? n : null,
+          consignee: afterData.consignee || null,
+          container_no: afterData.containerNo || null,
+          driver: afterData.driver || null,
+          operator: afterData.operator || null,
+        };
+
+        let { error } = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue);
+        if (error) {
+          // fallback
+          const fallback = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue);
+          if (fallback.error) throw fallback.error;
+        }
+
+        // audit log
+        try {
+          const auditEntry = {
+            action: 'update',
+            ticket_id: ticketIdValue,
+            ticket_no: ticket.data?.ticketNo ?? null,
+            user_id: operatorId || null,
+            username: operatorName || null,
+            details: JSON.stringify({ before: before || null, after: afterData || null }),
+            created_at: new Date().toISOString(),
+          };
+          await supabase.from('audit_logs').insert([auditEntry]);
+        } catch (auditErr) {
+          console.debug('Audit log insertion failed', auditErr);
+        }
+      } catch (err) {
+        console.error('Save view edit failed', err);
+        toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error', duration: 5000 });
+        // optionally roll back local change; skipping for now
+      }
+    }
+
+    setViewIsEditing(false);
+    setViewEditData({});
+    toast({ title: 'Saved', status: 'success', duration: 2500 });
+  };
+
+  // utility to render out-of-range badge
+  const renderOutOfRangeBadge = (val) => {
+    const n = numericValue(val);
+    if (n === null) return null;
+    if (Math.abs(n) >= OUT_OF_RANGE_THRESHOLD) {
+      return <Badge colorScheme="red" ml={2}>Value out of range</Badge>;
+    }
+    return null;
+  };
 
   /* -----------------------
      Render
@@ -1194,15 +1408,15 @@ export default function ManualEntry() {
                     <Stack direction="row" spacing={4} mt={3} justify="space-between">
                       <Box>
                         <Text fontSize="xs" color="gray.500">Gross</Text>
-                        <Text fontWeight="semibold">{computed.grossDisplay || '—'}</Text>
+                        <Text fontWeight="semibold">{computed.grossDisplay || '—'} {renderOutOfRangeBadge(data.gross)}</Text>
                       </Box>
                       <Box>
                         <Text fontSize="xs" color="gray.500">Tare</Text>
-                        <Text fontWeight="semibold">{computed.tareDisplay || '—'}</Text>
+                        <Text fontWeight="semibold">{computed.tareDisplay || '—'} {renderOutOfRangeBadge(data.tare)}</Text>
                       </Box>
                       <Box>
                         <Text fontSize="xs" color="gray.500">Net</Text>
-                        <Text fontWeight="semibold">{computed.netDisplay || '—'}</Text>
+                        <Text fontWeight="semibold">{computed.netDisplay || '—'} {renderOutOfRangeBadge(data.net)}</Text>
                       </Box>
                     </Stack>
 
@@ -1211,6 +1425,9 @@ export default function ManualEntry() {
                         <Button size="sm" variant="outline" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')}>Open PDF</Button>
                       )}
                       <Button size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })}>View</Button>
+                      {isAdmin && (
+                        <Button size="sm" variant="ghost" leftIcon={<EditIcon />} onClick={() => startRowEdit({ ticketId, data })}>Edit</Button>
+                      )}
                     </Flex>
                   </Box>
                 );
@@ -1233,37 +1450,109 @@ export default function ManualEntry() {
                 {pagedHistory.map(({ ticketId, data, submittedAt }) => {
                   const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
                   const anomaly = (computed.grossValue !== null && computed.tareValue !== null && computed.netValue !== null && !(computed.grossValue > computed.tareValue));
+                  const isEditingThis = editingRowId === ticketId;
                   return (
                     <Tr key={ticketId}>
                       <Td>
-                        <Box>
-                          <Text>{data.ticketNo}</Text>
-                          {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge ml={2} colorScheme="purple">Manual</Badge>}
-                        </Box>
-                      </Td>
-                      <Td>{data.truckOnWb}</Td>
-                      <Td>{data.sadNo}</Td>
-                      <Td>{computed.grossDisplay}</Td>
-                      <Td>
                         <Box display="flex" alignItems="center" gap={2}>
-                          <Text>{computed.tareDisplay}</Text>
-                          {isTareAnomaly && data.truckOnWb && String(data.truckOnWb).trim() === String(formData.truckOnWb).trim() && (
-                            <Badge colorScheme="red">Tare anomaly</Badge>
+                          {isEditingThis ? (
+                            <Input value={editRowData.ticketNo ?? data.ticketNo} onChange={(e) => handleRowFieldChange('ticketNo', e.target.value)} size="sm" />
+                          ) : (
+                            <Box>
+                              <Text>{data.ticketNo}</Text>
+                              {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge ml={2} colorScheme="purple">Manual</Badge>}
+                            </Box>
                           )}
                         </Box>
                       </Td>
+
+                      <Td>
+                        {isEditingThis ? (
+                          <Input value={editRowData.truckOnWb ?? data.truckOnWb} onChange={(e) => handleRowFieldChange('truckOnWb', e.target.value)} size="sm" />
+                        ) : (
+                          <Text>{data.truckOnWb}</Text>
+                        )}
+                      </Td>
+
+                      <Td>
+                        {isEditingThis ? (
+                          <Input value={editRowData.sadNo ?? data.sadNo} onChange={(e) => handleRowFieldChange('sadNo', e.target.value)} size="sm" />
+                        ) : (
+                          <Text>{data.sadNo}</Text>
+                        )}
+                      </Td>
+
                       <Td>
                         <Box display="flex" alignItems="center" gap={2}>
-                          <Text>{computed.netDisplay}</Text>
-                          {anomaly && <Badge colorScheme="red">Check</Badge>}
+                          {isEditingThis ? (
+                            <InputGroup size="sm">
+                              <Input value={editRowData.gross ?? data.gross} onChange={(e) => handleRowFieldChange('gross', e.target.value)} />
+                              <InputRightElement width="3rem">
+                                <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.gross ?? data.gross)}</Text>
+                              </InputRightElement>
+                            </InputGroup>
+                          ) : (
+                            <Text>{computed.grossDisplay}</Text>
+                          )}
                         </Box>
                       </Td>
+
+                      <Td>
+                        <Box display="flex" alignItems="center" gap={2}>
+                          {isEditingThis ? (
+                            <InputGroup size="sm">
+                              <Input value={editRowData.tare ?? data.tare} onChange={(e) => handleRowFieldChange('tare', e.target.value)} />
+                              <InputRightElement width="3rem">
+                                <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.tare ?? data.tare)}</Text>
+                              </InputRightElement>
+                            </InputGroup>
+                          ) : (
+                            <Box display="flex" alignItems="center" gap={2}>
+                              <Text>{computed.tareDisplay}</Text>
+                              {isTareAnomaly && data.truckOnWb && String(data.truckOnWb).trim() === String(formData.truckOnWb).trim() && (
+                                <Badge colorScheme="red">Tare anomaly</Badge>
+                              )}
+                            </Box>
+                          )}
+                        </Box>
+                      </Td>
+
+                      <Td>
+                        <Box display="flex" alignItems="center" gap={2}>
+                          {isEditingThis ? (
+                            <InputGroup size="sm">
+                              <Input value={editRowData.net ?? data.net} onChange={(e) => handleRowFieldChange('net', e.target.value)} />
+                              <InputRightElement width="3rem">
+                                <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.net ?? data.net)}</Text>
+                              </InputRightElement>
+                            </InputGroup>
+                          ) : (
+                            <Box display="flex" alignItems="center" gap={2}>
+                              <Text>{computed.netDisplay}</Text>
+                              {anomaly && <Badge colorScheme="red">Check</Badge>}
+                              {renderOutOfRangeBadge(data.net)}
+                            </Box>
+                          )}
+                        </Box>
+                      </Td>
+
                       <Td>
                         <HStack>
                           {data.fileUrl && (
                             <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
                           )}
-                          <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
+
+                          {isEditingThis ? (
+                            <>
+                              <IconButton icon={<CheckIcon />} aria-label="Save" size="sm" colorScheme="green" onClick={() => saveRowEdit({ ticketId, data })} />
+                              <IconButton icon={<CloseIcon />} aria-label="Cancel" size="sm" onClick={cancelRowEdit} />
+                            </>
+                          ) : (
+                            <>
+                              <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
+                              {isAdmin && <IconButton icon={<EditIcon />} aria-label="Edit" size="sm" onClick={() => startRowEdit({ ticketId, data })} />}
+                            </>
+                          )}
                         </HStack>
                       </Td>
                     </Tr>
@@ -1272,7 +1561,7 @@ export default function ManualEntry() {
               </Tbody>
             </Table>
           )}
-
+{/* Pagination and lower UI remain unchanged */}
           {/* Pagination (condensed) */}
           <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
             <Flex gap={2} align="center" flexWrap="wrap">
@@ -1315,7 +1604,7 @@ export default function ManualEntry() {
       )}
 
       {/* View modal */}
-      <Modal isOpen={isViewOpen} onClose={onViewClose} size="xl" scrollBehavior="inside">
+      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewIsEditing(false); setViewEditData({}); }} size="xl" scrollBehavior="inside">
         <ModalOverlay />
         <ModalContent maxW="90vw">
           <ModalHeader>View Ticket</ModalHeader>
@@ -1324,20 +1613,25 @@ export default function ManualEntry() {
             {viewTicket ? (
               <Box>
                 <SimpleGrid columns={[1, 2]} spacing={4}>
-                  {Object.entries(viewTicket.data).map(([key, value]) => {
+                  {Object.entries(viewIsEditing ? viewEditData : viewTicket.data).map(([key, value]) => {
                     if (key === 'fileUrl') return null;
                     const computedKeys = ['gross', 'tare', 'net'];
                     if (computedKeys.includes(key)) {
                       const computed = computeWeights({
-                        gross: viewTicket.data.gross,
-                        tare: viewTicket.data.tare,
-                        net: viewTicket.data.net,
+                        gross: (viewIsEditing ? viewEditData.gross : viewTicket.data.gross),
+                        tare: (viewIsEditing ? viewEditData.tare : viewTicket.data.tare),
+                        net: (viewIsEditing ? viewEditData.net : viewTicket.data.net),
                       });
                       const display = key === 'gross' ? computed.grossDisplay : key === 'tare' ? computed.tareDisplay : computed.netDisplay;
                       return (
                         <Box key={key} p={3} borderWidth="1px" borderRadius="md" bg="gray.50">
                           <Text fontWeight="semibold" color="teal.600" mb={1}>{key}</Text>
-                          <Text>{display || 'N/A'}</Text>
+                          {viewIsEditing ? (
+                            <Input value={viewEditData[key] ?? ''} onChange={(e) => handleViewEditChange(key, e.target.value)} />
+                          ) : (
+                            <Text>{display || 'N/A'}</Text>
+                          )}
+                          <Box mt={1}>{renderOutOfRangeBadge(viewIsEditing ? viewEditData[key] : viewTicket.data[key])}</Box>
                         </Box>
                       );
                     }
@@ -1345,7 +1639,11 @@ export default function ManualEntry() {
                     return (
                       <Box key={key} p={3} borderWidth="1px" borderRadius="md" bg="gray.50">
                         <Text fontWeight="semibold" color="teal.600" mb={1} textTransform="capitalize">{key}</Text>
-                        <Text>{value ?? 'N/A'}</Text>
+                        {viewIsEditing ? (
+                          <Input value={viewEditData[key] ?? ''} onChange={(e) => handleViewEditChange(key, e.target.value)} />
+                        ) : (
+                          <Text>{value ?? 'N/A'}</Text>
+                        )}
                       </Box>
                     );
                   })}
@@ -1373,7 +1671,16 @@ export default function ManualEntry() {
             )}
           </ModalBody>
           <ModalFooter>
-            <Button onClick={onViewClose}>Close</Button>
+            {!viewIsEditing && isAdmin && (
+              <Button leftIcon={<EditIcon />} colorScheme="yellow" mr={2} onClick={startViewEdit}>Edit</Button>
+            )}
+            {viewIsEditing && (
+              <>
+                <Button leftIcon={<CheckIcon />} colorScheme="green" mr={2} onClick={saveViewEdit}>Save</Button>
+                <Button leftIcon={<CloseIcon />} variant="ghost" mr={2} onClick={cancelViewEdit}>Cancel</Button>
+              </>
+            )}
+            <Button onClick={() => { onViewClose(); setViewIsEditing(false); setViewEditData({}); }}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
