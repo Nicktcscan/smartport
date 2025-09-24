@@ -38,7 +38,6 @@ import {
   AlertDialogHeader,
   AlertDialogBody,
   AlertDialogFooter,
-  Tooltip,
   Spinner,
   Stat,
   StatLabel,
@@ -57,7 +56,6 @@ import {
   FaFileInvoice,
   FaFilePdf,
   FaExternalLinkAlt,
-  FaDownload,
   FaShareAlt,
   FaEnvelope,
   FaUserTie,
@@ -91,7 +89,7 @@ import {
 
 const MotionModalContent = motion.create(ModalContent);
 
-// ---------------- PDF styles (fixed widths so they sum to 100%) ----------------
+// ---------------- PDF styles (same as before) ----------------
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 18,
@@ -118,7 +116,6 @@ const pdfStyles = StyleSheet.create({
   },
   tableRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4, alignItems: 'center' },
 
-  // column widths revised so total <= 100%
   colSad: { width: '8%', fontSize: 8 },
   colTicket: { width: '10%', fontSize: 8 },
   colTruck: { width: '12%', fontSize: 8 },
@@ -164,11 +161,6 @@ function computeWeightsFromObj({ gross, tare, net }) {
   };
 }
 
-/**
- * Robust date parsing helper.
- * - Accepts Date, timestamp, ISO, or many human readable forms.
- * - Tries `new Date()`, and if invalid attempts to clamp seconds > 59.
- */
 function parseTicketDate(raw) {
   if (!raw) return null;
   if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
@@ -176,45 +168,34 @@ function parseTicketDate(raw) {
     const d = new Date(raw);
     return isNaN(d.getTime()) ? null : d;
   }
-
   const s = String(raw).trim();
   if (s === '') return null;
-
-  // ISO-like YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     const d = new Date(s + 'T00:00:00');
     return isNaN(d.getTime()) ? null : d;
   }
-
-  // Try Date.parse first
   const d0 = new Date(s);
   if (!isNaN(d0.getTime())) return d0;
-
-  // Try to detect patterns like "22-Sep-25 12:35:61 AM" and clamp seconds to 59
   const m = s.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)?/i);
   if (m) {
-    let [ , datePart, hh, mm, ss, ampm ] = m;
+    let [, datePart, hh, mm, ss, ampm] = m;
     let secNum = parseInt(ss, 10);
     if (secNum > 59) secNum = 59;
-    // normalize two-digit year to 4-digit if needed
     let yearPart = datePart.split('-')[2];
     if (yearPart.length === 2) {
       const y = Number(yearPart);
-      yearPart = y >= 70 ? `19${String(y).padStart(2,'0')}` : `20${String(y).padStart(2,'0')}`;
-      datePart = datePart.split('-').slice(0,2).concat([yearPart]).join('-');
+      yearPart = y >= 70 ? `19${String(y).padStart(2, '0')}` : `20${String(y).padStart(2, '0')}`;
+      datePart = datePart.split('-').slice(0, 2).concat([yearPart]).join('-');
     }
-    const fixed = `${datePart} ${String(hh).padStart(2,'0')}:${mm}:${String(secNum).padStart(2,'0')}${ampm ? ' ' + ampm : ''}`;
+    const fixed = `${datePart} ${String(hh).padStart(2, '0')}:${mm}:${String(secNum).padStart(2, '0')}${ampm ? ' ' + ampm : ''}`;
     const d1 = new Date(fixed);
     if (!isNaN(d1.getTime())) return d1;
   }
-
-  // Last resort: attempt to parse numbers-only timestamp
   const maybeNum = Number(s);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
     return isNaN(d2.getTime()) ? null : d2;
   }
-
   return null;
 }
 function sortTicketsByDateDesc(arr) {
@@ -227,55 +208,37 @@ function sortTicketsByDateDesc(arr) {
     return db.getTime() - da.getTime();
   });
 }
-
-// ---------------- Duplicate removal helper (by ticket number) ----------------
-/**
- * Deduplicate by ticket number (preferred) or ticketId.
- * Keeps the most recently dated record (by data.date) when duplicates are found.
- * If dates are equal or missing, prefers the record with fileUrl present.
- */
 function removeDuplicatesByTicketNo(tickets = []) {
   const map = new Map();
-
   for (const t of tickets) {
     const rawKey = (t.data && (t.data.ticketNo ?? t.ticketId)) || t.ticketId || '';
     const key = String(rawKey || '').trim().toUpperCase();
-
     if (!key) {
-      // keep items without ticket number, using generated unique id
       const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
       map.set(fallbackKey, t);
       continue;
     }
-
     const existing = map.get(key);
     if (!existing) {
       map.set(key, t);
       continue;
     }
-
-    // choose which to keep: prefer one with later date
     const da = parseTicketDate(existing.data?.date);
     const db = parseTicketDate(t.data?.date);
-
     if (db && (!da || db.getTime() > da.getTime())) {
       map.set(key, t);
       continue;
     }
     if (!da && !db) {
-      // prefer the one with fileUrl
       if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
         map.set(key, t);
       }
-      // else keep existing
     }
-    // otherwise keep existing
   }
-
   return Array.from(map.values());
 }
 
-// ---------------- PDF row ----------------
+// ---------------- PDF components unchanged ----------------
 function PdfTicketRow({ ticket, operatorName }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
@@ -303,7 +266,6 @@ function PdfTicketRow({ ticket, operatorName }) {
   );
 }
 
-// ---------------- Combined PDF Document ----------------
 function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' }) {
   const totalNet = tickets.reduce((sum, t) => {
     const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
@@ -312,8 +274,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
 
   const numberOfTransactions = tickets.length;
   const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
-
-  // sanitize SAD label
   const rawSad = reportMeta?.sad ?? '';
   const sadLabel = rawSad ? String(rawSad).replace(/^SAD:\s*/i, '') : 'N/A';
 
@@ -328,7 +288,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
   const firstPageCapacity = 14;
   const firstPageTickets = tickets.slice(0, firstPageCapacity);
   const remainingTickets = tickets.slice(firstPageCapacity);
-
   const remainingPages = [];
   for (let i = 0; i < remainingTickets.length; i += rowsPerSubsequentPage) {
     remainingPages.push(remainingTickets.slice(i, i + rowsPerSubsequentPage));
@@ -416,20 +375,16 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
 
 // ---------------- main React component ----------------
 export default function WeightReports() {
-  // search / filter state
   const [searchSAD, setSearchSAD] = useState('');
   const [searchDriver, setSearchDriver] = useState('');
   const [searchTruck, setSearchTruck] = useState('');
 
-  // tickets
   const [originalTickets, setOriginalTickets] = useState([]);
   const [filteredTickets, setFilteredTickets] = useState([]);
 
-  // sorting
-  const [sortBy, setSortBy] = useState('date'); // date/gross/net/ticketNo/sadNo/truck
-  const [sortDir, setSortDir] = useState('desc'); // asc | desc
+  const [sortBy, setSortBy] = useState('date');
+  const [sortDir, setSortDir] = useState('desc');
 
-  // UI state
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [loading, setLoading] = useState(false);
   const [pdfGenerating, setPdfGenerating] = useState(false);
@@ -437,35 +392,29 @@ export default function WeightReports() {
   const toast = useToast();
   const modalRef = useRef();
 
-  // user/admin
   const [operatorName, setOperatorName] = useState('');
   const [currentUserId, setCurrentUserId] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
 
-  // edit
   const [isEditing, setIsEditing] = useState(false);
   const [editData, setEditData] = useState({});
   const [editErrors, setEditErrors] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
 
-  // delete
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure();
   const cancelRef = useRef();
   const [deleting, setDeleting] = useState(false);
   const [pendingDelete, setPendingDelete] = useState(null);
 
-  // audit logs
   const [auditLogs, setAuditLogs] = useState([]);
   const [loadingAudit, setLoadingAudit] = useState(false);
 
-  // date/time
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
   const [reportMeta, setReportMeta] = useState({});
 
-  // responsive
   const isMobile = useBreakpointValue({ base: true, md: false });
   const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
   const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
@@ -502,7 +451,6 @@ export default function WeightReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // fetch audit logs gracefully
   const fetchAuditLogs = async () => {
     setLoadingAudit(true);
     try {
@@ -521,7 +469,6 @@ export default function WeightReports() {
     }
   };
 
-  // parse helpers
   const parseTimeToMinutes = (timeStr) => {
     if (!timeStr) return null;
     const parts = timeStr.split(':');
@@ -534,7 +481,6 @@ export default function WeightReports() {
   const startOfDay = (d) => { const dt = new Date(d); dt.setHours(0, 0, 0, 0); return dt; };
   const endOfDay = (d) => { const dt = new Date(d); dt.setHours(23, 59, 59, 999); return dt; };
 
-  // Sorting UI handler
   const toggleSort = (key) => {
     if (sortBy === key) {
       setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
@@ -544,7 +490,6 @@ export default function WeightReports() {
     }
   };
 
-  // unified pipeline: filters -> sort
   const computeFilteredTickets = (baseArr = null) => {
     if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
       setFilteredTickets([]);
@@ -552,13 +497,11 @@ export default function WeightReports() {
     }
     let arr = (baseArr || originalTickets).slice();
 
-    // Driver
     if (searchDriver && searchDriver.trim()) {
       const q = searchDriver.trim().toLowerCase();
       arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
 
-    // Truck (multi-field)
     if (searchTruck && searchTruck.trim()) {
       const q = searchTruck.trim().toLowerCase();
       arr = arr.filter((t) => {
@@ -572,7 +515,6 @@ export default function WeightReports() {
       });
     }
 
-    // date/time
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
     const tfMinutes = parseTimeToMinutes(timeFrom);
@@ -611,7 +553,6 @@ export default function WeightReports() {
       return true;
     });
 
-    // Sorting based on sortBy/sortDir
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
@@ -645,7 +586,6 @@ export default function WeightReports() {
     arr.sort(comparator);
     setFilteredTickets(arr);
 
-    // update report meta
     const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
     const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
     let dateRangeText = '';
@@ -661,7 +601,6 @@ export default function WeightReports() {
     }));
   };
 
-  // SAD search
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
       toast({ title: 'SAD Required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
@@ -705,7 +644,6 @@ export default function WeightReports() {
         },
       }));
 
-      // ✅ Remove duplicates here (at data fetch stage) — by ticket number
       const dedupedTickets = removeDuplicatesByTicketNo(mappedTickets);
       if (dedupedTickets.length < mappedTickets.length) {
         const removed = mappedTickets.length - dedupedTickets.length;
@@ -719,10 +657,9 @@ export default function WeightReports() {
         dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.date ? new Date(sortedOriginal[0].data.date).toLocaleDateString() : '') : '',
         startTimeLabel: '',
         endTimeLabel: '',
-        sad: `${searchSAD.trim()}`, // raw SAD (no 'SAD:' prefix)
+        sad: `${searchSAD.trim()}`,
       });
 
-      // compute filters & sort on the new original set
       computeFilteredTickets(sortedOriginal);
     } catch (err) {
       console.error('fetch error', err);
@@ -732,7 +669,6 @@ export default function WeightReports() {
     }
   };
 
-  // date/time apply & reset
   const applyRange = () => computeFilteredTickets();
   const resetRange = () => {
     setDateFrom('');
@@ -743,7 +679,6 @@ export default function WeightReports() {
     setReportMeta((p) => ({ ...p, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
 
-  // driver/truck apply/clear
   const applyDriverTruckFilter = () => {
     computeFilteredTickets();
     const driverSummary = searchDriver ? `, Driver: ${searchDriver}` : '';
@@ -765,7 +700,6 @@ export default function WeightReports() {
     setTimeTo('');
   };
 
-  // csv export
   const exportCsv = () => {
     if (!filteredTickets || filteredTickets.length === 0) {
       toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
@@ -810,7 +744,6 @@ export default function WeightReports() {
     toast({ title: 'CSV exported', status: 'success', duration: 3000 });
   };
 
-  // cumulative net weight (memo)
   const cumulativeNetWeight = useMemo(() => {
     return filteredTickets.reduce((total, ticket) => {
       const computed = computeWeightsFromObj({
@@ -823,7 +756,6 @@ export default function WeightReports() {
     }, 0);
   }, [filteredTickets]);
 
-  // open modal
   const openModalWithTicket = (ticket) => {
     setSelectedTicket(ticket);
     setIsEditing(false);
@@ -832,7 +764,6 @@ export default function WeightReports() {
     onOpen();
   };
 
-  // PDF generation helpers
   const generatePdfBlob = async (ticketsToRender = [], meta = {}, opName = '') => {
     const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} operatorName={opName} />;
     const asPdf = pdfRender(doc);
@@ -928,27 +859,29 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- Edit / Delete (kept) ----------
+  // ---------- Edit / Delete ----------
   const isTicketEditable = (ticket) => {
     const status = String(ticket?.data?.status || '').toLowerCase();
+    // keep this helper but we will allow admins to edit regardless in UI (the modal edit button)
     return status !== 'exited';
   };
 
-  const startEditing = () => {
-    if (!selectedTicket) return;
+  // startEditing accepts optional ticket param and optional focusField (not used for focus here but could be)
+  const startEditing = (ticketParam = null) => {
+    const ticket = ticketParam || selectedTicket;
+    if (!ticket) return;
+
     if (!isAdmin) {
       toast({ title: 'Permission denied', description: 'Only admins can edit tickets', status: 'warning', duration: 3000 });
       return;
     }
-    if (!isTicketEditable(selectedTicket)) {
-      toast({ title: 'Cannot edit', description: "This ticket has status 'Exited' and cannot be edited", status: 'warning', duration: 3000 });
-      return;
-    }
-    const d = selectedTicket.data || {};
-    const operator = d.operator ? d.operator.replace(/^-+/, "").trim() : '';
-    const driverName = d.driver ? d.driver.replace(/^-+/, "").trim() : '';
 
-    setEditData({
+    // allow admins to edit regardless of status; for non-admins we would have prevented above
+    const d = ticket.data || {};
+    const operator = d.operator ? d.operator.replace(/^-+/, '').trim() : '';
+    const driverName = d.driver ? d.driver.replace(/^-+/, '').trim() : '';
+
+    const initialEditData = {
       consignee: d.consignee ?? '',
       containerNo: d.containerNo ?? '',
       operator: operator || '',
@@ -956,13 +889,23 @@ export default function WeightReports() {
       gross: d.gross ?? '',
       tare: d.tare ?? '',
       net: d.net ?? '',
-    });
+    };
+
+    setSelectedTicket(ticket);
+    setEditData(initialEditData);
     setEditErrors({});
     setIsEditing(true);
+
+    // ensure modal open
+    onOpen();
   };
 
   const cancelEditing = () => { setIsEditing(false); setEditErrors({}); setEditData({}); };
-  const handleEditChange = (field, val) => { setEditData((p) => ({ ...p, [field]: val })); setEditErrors((p) => { const cp = { ...p }; delete cp[field]; return cp; }); };
+
+  const handleEditChange = (field, val) => {
+    setEditData((p) => ({ ...p, [field]: val }));
+    setEditErrors((p) => { const cp = { ...p }; delete cp[field]; return cp; });
+  };
 
   const validateEdit = () => {
     const errs = {};
@@ -1008,6 +951,7 @@ export default function WeightReports() {
       consignee: editData.consignee || null,
       container_no: editData.containerNo || null,
       operator: editData.operator || null,
+      driver: editData.driver || null,
     };
 
     const g = numericValue(editData.gross);
@@ -1115,7 +1059,6 @@ export default function WeightReports() {
     }
   };
 
-  // delete flow
   const confirmDelete = () => {
     if (!selectedTicket) return;
     if (!isAdmin) {
@@ -1227,7 +1170,24 @@ export default function WeightReports() {
     });
   };
 
-  // ---------------------- UI (unchanged) ----------------------
+  // Helper to render a table cell with an edit icon for admins
+  const renderEditableCell = (ticket, children) => {
+    if (!isAdmin) return <>{children}</>;
+    return (
+      <HStack spacing={2} align="center">
+        <Box>{children}</Box>
+        <IconButton
+          size="xs"
+          aria-label="Edit record"
+          icon={<FaEdit />}
+          onClick={() => startEditing(ticket)}
+          variant="ghost"
+        />
+      </HStack>
+    );
+  };
+
+  // ---------------------- UI ----------------------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }}>
       {/* Header */}
@@ -1239,17 +1199,21 @@ export default function WeightReports() {
 
         <Flex ml="auto" gap={4} align="center" wrap="wrap">
           <StatGroup display="flex" alignItems="center" gap={4}>
-            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
-              <StatLabel>Total Transactions</StatLabel>
-              <StatNumber>{filteredTickets.length}</StatNumber>
-              <StatHelpText>{originalTickets.length > 0 ? `of ${originalTickets.length} returned` : ''}</StatHelpText>
-            </Stat>
+            <Box>
+              <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                <StatLabel>Total Transactions</StatLabel>
+                <StatNumber>{filteredTickets.length}</StatNumber>
+                <StatHelpText>{originalTickets.length > 0 ? `of ${originalTickets.length} returned` : ''}</StatHelpText>
+              </Stat>
+            </Box>
 
-            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
-              <StatLabel>Cumulative Net (kg)</StatLabel>
-              <StatNumber>{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
-              <StatHelpText>From current filtered results</StatHelpText>
-            </Stat>
+            <Box>
+              <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                <StatLabel>Cumulative Net (kg)</StatLabel>
+                <StatNumber>{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
+                <StatHelpText>From current filtered results</StatHelpText>
+              </Stat>
+            </Box>
           </StatGroup>
         </Flex>
       </Flex>
@@ -1329,7 +1293,7 @@ export default function WeightReports() {
               Share
             </Button>
             <Button leftIcon={<FaEnvelope />} onClick={handleEmailComposer} isLoading={pdfGenerating} size="sm" colorScheme="green">
-              Email 
+              Email
             </Button>
 
             <Menu>
@@ -1378,7 +1342,6 @@ export default function WeightReports() {
         {/* Results */}
         {filteredTickets.length > 0 ? (
           <>
-            {/* header */}
             <Flex align="center" justify="space-between" mb={3} gap={4} wrap="wrap">
               <Text fontSize={{ base: 'md', md: 'lg' }} fontWeight="bold">{reportMeta?.sad ? `SAD: ${reportMeta.sad}` : `SAD: ${searchSAD}`}</Text>
 
@@ -1394,7 +1357,7 @@ export default function WeightReports() {
               </HStack>
             </Flex>
 
-            {/* Mobile cards */}
+            {/* Mobile */}
             {isMobile ? (
               <VStack spacing={3} align="stretch">
                 {filteredTickets.map((t) => {
@@ -1406,15 +1369,24 @@ export default function WeightReports() {
                       <Flex justify="space-between" align="start" gap={3} wrap="wrap">
                         <Box>
                           <Text fontSize="sm" color="gray.500">Ticket</Text>
-                          <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
+                          <HStack>
+                            <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
+                            {isAdmin && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(t)} variant="ghost" />}
+                          </HStack>
                           <Text fontSize="sm" color="gray.500">{t.data.date ? new Date(t.data.date).toLocaleString() : 'N/A'}</Text>
                         </Box>
 
                         <Box textAlign="right">
                           <Text fontSize="sm" color="gray.500">Truck</Text>
-                          <Text fontWeight="semibold">{displayTruck}</Text>
+                          <HStack justify="flex-end">
+                            <Text fontWeight="semibold">{displayTruck}</Text>
+                            {isAdmin && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(t)} variant="ghost" />}
+                          </HStack>
                           <Text fontSize="sm" color="gray.500">Driver</Text>
-                          <Text>{displayDriver}</Text>
+                          <HStack justify="flex-end">
+                            <Text>{displayDriver}</Text>
+                            {isAdmin && <IconButton size="xs" aria-label="Edit driver" icon={<FaEdit />} onClick={() => startEditing(t)} variant="ghost" />}
+                          </HStack>
                         </Box>
                       </Flex>
 
@@ -1436,6 +1408,7 @@ export default function WeightReports() {
 
                         <HStack spacing={2} ml="auto">
                           <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
+                          <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(t)} isDisabled={!isAdmin}>Edit</Button>
                           {t.data.fileUrl && (
                             <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>
                               Open PDF
@@ -1448,7 +1421,7 @@ export default function WeightReports() {
                 })}
               </VStack>
             ) : (
-              /* Desktop/tablet table */
+              // Desktop/table
               <Box overflowX="auto" borderRadius="md" bg="white" boxShadow="sm">
                 <Table variant="striped" colorScheme="teal" size="sm" sx={{
                   'th': {
@@ -1498,17 +1471,20 @@ export default function WeightReports() {
 
                       return (
                         <Tr key={ticket.ticketId}>
-                          <Td>{ticket.data.sadNo}</Td>
-                          <Td>{ticket.data.ticketNo}</Td>
-                          <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
-                          <Td>{displayTruck}</Td>
-                          <Td isNumeric>{computed.grossDisplay || '0'}</Td>
-                          <Td isNumeric>{computed.tareDisplay || '0'}</Td>
-                          <Td isNumeric>{computed.netDisplay || '0'}</Td>
-                          <Td>{displayDriver}</Td>
+                          <Td>{renderEditableCell(ticket, ticket.data.sadNo)}</Td>
+                          <Td>{renderEditableCell(ticket, ticket.data.ticketNo)}</Td>
+                          <Td>{renderEditableCell(ticket, ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A')}</Td>
+                          <Td>{renderEditableCell(ticket, displayTruck)}</Td>
+                          <Td isNumeric>{renderEditableCell(ticket, computed.grossDisplay || '0')}</Td>
+                          <Td isNumeric>{renderEditableCell(ticket, computed.tareDisplay || '0')}</Td>
+                          <Td isNumeric>{renderEditableCell(ticket, computed.netDisplay || '0')}</Td>
+                          <Td>{renderEditableCell(ticket, displayDriver)}</Td>
                           <Td>
                             <HStack spacing={2} flexWrap="wrap">
                               <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
+                              <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(ticket)} isDisabled={!isAdmin}>
+                                Edit
+                              </Button>
                               {ticket.data.fileUrl && (
                                 <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
                                   Open
@@ -1579,7 +1555,8 @@ export default function WeightReports() {
           )
         )}
       </Box>
-{/* Ticket modal */}
+
+      {/* Ticket modal */}
       <Modal isOpen={isOpen} onClose={() => { onClose(); setIsEditing(false); setEditData({}); setEditErrors({}); }} size={modalSize} isCentered scrollBehavior="inside">
         <ModalOverlay />
         <AnimatePresence>
@@ -1611,6 +1588,7 @@ export default function WeightReports() {
                     <HStack>
                       <Icon as={FaTruck} />
                       <Text><b>Truck No:</b> {selectedTicket.data.gnswTruckNo || selectedTicket.data.truckOnWb || selectedTicket.data.anpr || selectedTicket.data.truckNo || 'N/A'}</Text>
+                      {isAdmin && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
 
                     {isEditing ? (
@@ -1654,11 +1632,13 @@ export default function WeightReports() {
                         <HStack>
                           <Icon as={FaUserTie} />
                           <Text><b>Operator:</b> {operatorName || selectedTicket.data.operator || 'N/A'}</Text>
+                          {isAdmin && <IconButton size="xs" aria-label="Edit operator" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                         </HStack>
 
                         <HStack>
                           <Icon as={FaBox} />
                           <Text><b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}</Text>
+                          {isAdmin && <IconButton size="xs" aria-label="Edit consignee" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                         </HStack>
 
                         {(() => {
@@ -1672,14 +1652,17 @@ export default function WeightReports() {
                               <HStack>
                                 <Icon as={FaBalanceScale} />
                                 <Text><b>Gross Weight:</b> {computed.grossDisplay || '0'} kg</Text>
+                                {isAdmin && <IconButton size="xs" aria-label="Edit gross" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                               </HStack>
                               <HStack>
                                 <Icon as={FaBalanceScale} />
                                 <Text><b>Tare Weight:</b> {computed.tareDisplay || '0'} kg</Text>
+                                {isAdmin && <IconButton size="xs" aria-label="Edit tare" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                               </HStack>
                               <HStack>
                                 <Icon as={FaBalanceScale} />
                                 <Text><b>Net Weight:</b> {computed.netDisplay || '0'} kg</Text>
+                                {isAdmin && <IconButton size="xs" aria-label="Edit net" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                               </HStack>
                             </>
                           );
@@ -1690,15 +1673,19 @@ export default function WeightReports() {
                     <HStack>
                       <Icon as={FaBox} />
                       <Text><b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}</Text>
+                      {isAdmin && <IconButton size="xs" aria-label="Edit container" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}</Text>
+                      {isAdmin && <IconButton size="xs" aria-label="Edit pass number" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}</Text>
+                      {isAdmin && <IconButton size="xs" aria-label="Edit scale" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}</Text>
+                      {isAdmin && <IconButton size="xs" aria-label="Edit anpr" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}</Text>
@@ -1706,7 +1693,6 @@ export default function WeightReports() {
 
                     {selectedTicket.data.fileUrl && (
                       <Box pt={2}>
-                        {/* Stored ticket open also red as requested */}
                         <Button size="sm" colorScheme="red" leftIcon={<FaExternalLinkAlt />} onClick={() => window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')}>
                           Open Stored Ticket PDF
                         </Button>
@@ -1719,16 +1705,16 @@ export default function WeightReports() {
               </ModalBody>
 
               <ModalFooter>
-                {/* Admin-only Edit/Delete controls */}
+                {/* Admin-only Edit/Delete controls (Edit in modal now opens edit mode reliably for admins) */}
                 {selectedTicket && !isEditing && (
                   <>
                     {isAdmin ? (
-                      isTicketEditable(selectedTicket) ? (
-                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={startEditing}>Edit</Button>
-                      ) : (
-                        <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>
-                      )
-                    ) : (<Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>)}
+                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={() => startEditing()}>
+                        Edit
+                      </Button>
+                    ) : (
+                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>
+                    )}
 
                     {isAdmin ? (
                       <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} onClick={confirmDelete}>Delete</Button>
