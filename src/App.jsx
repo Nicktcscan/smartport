@@ -3,6 +3,7 @@ import React from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Box, Center, Spinner, Text } from '@chakra-ui/react';
 import { useAuth } from './context/AuthContext';
+import { PersistedStateProvider } from './context/PersistedStateContext';
 
 import Layout from './components/Layout';
 import Header from './components/Header';
@@ -48,12 +49,12 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
         return <Navigate to="/admin" replace />;
       case 'customs':
         return <Navigate to="/customs" replace />;
+      case 'agent':
+        return <Navigate to="/agent" replace />;
       case 'outgate':
         return <Navigate to="/outgate" replace />;
       case 'weighbridge':
         return <Navigate to="/weighbridge" replace />;
-      case 'agent':
-        return <Navigate to="/agent" replace />;
       default:
         return <Navigate to="/login" replace />;
     }
@@ -82,415 +83,417 @@ function App() {
   // Helper to detect if path is a static asset (file extensions)
   const isStaticAsset = location.pathname.match(/\.(js|css|png|jpg|jpeg|gif|ico|json|svg|txt|woff|woff2|ttf|eot|map)$/);
 
-  // Guest (unauthenticated) routes
-  if (!user) {
-    return (
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route
-          path="/register"
-          element={
-            <Layout>
-              <Box as="main" p={4} bg="gray.50">
-                <Register />
-              </Box>
-            </Layout>
-          }
-        />
-        {/* Only redirect if not a static asset */}
-        <Route
-          path="*"
-          element={isStaticAsset ? null : <Navigate to="/login" replace />}
-        />
-      </Routes>
-    );
-  }
-
-  // Authenticated routes
+  // Wrap the app in PersistedStateProvider so persisted state is available everywhere.
+  // This provider should be implemented at src/context/PersistedStateContext.jsx
   return (
-    <>
-      <Header />
-      <Routes>
-        <Route
-          path="/"
-          element={
-            user.role === 'admin' ? (
-              <Navigate to="/admin" replace />
-            ) : user.role === 'customs' ? (
-              <Navigate to="/customs" replace />
-            ) : user.role === 'outgate' ? (
-              <Navigate to="/outgate" replace />
-            ) : user.role === 'weighbridge' ? (
-              <Navigate to="/weighbridge" replace />
-            ) : user.role === 'agent' ? (
-              <Navigate to="/agent" replace />
-            ) : (
-              <Navigate to="/dashboard" replace />
-            )
-          }
-        />
+    <PersistedStateProvider>
+      {/* Guest (unauthenticated) routes */}
+      {!user ? (
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route
+            path="/register"
+            element={
+              <Layout>
+                <Box as="main" p={4} bg="gray.50">
+                  <Register />
+                </Box>
+              </Layout>
+            }
+          />
+          {/* Only redirect if not a static asset */}
+          <Route
+            path="*"
+            element={isStaticAsset ? null : <Navigate to="/login" replace />}
+          />
+        </Routes>
+      ) : (
+        // Authenticated routes
+        <>
+          <Header />
+          <Routes>
+            <Route
+              path="/"
+              element={
+                user.role === 'admin' ? (
+                  <Navigate to="/admin" replace />
+                ) : user.role === 'customs' ? (
+                  <Navigate to="/customs" replace />
+                ) : user.role === 'outgate' ? (
+                  <Navigate to="/outgate" replace />
+                ) : user.role === 'weighbridge' ? (
+                  <Navigate to="/weighbridge" replace />
+                ) : user.role === 'agent' ? (
+                  <Navigate to="/agent" replace />
+                ) : (
+                  <Navigate to="/dashboard" replace />
+                )
+              }
+            />
 
-        {/* Weighbridge */}
-        <Route
-          path="/weighbridge"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <WeighbridgeManagementPage />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            {/* Weighbridge */}
+            <Route
+              path="/weighbridge"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <WeighbridgeManagementPage />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        <Route
-          path="/ocr"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <OCRComponent />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            <Route
+              path="/ocr"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <OCRComponent />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute allowedRoles={['weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <Dashboard />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/tickets/:id"
-          element={
-            <ProtectedRoute allowedRoles={['weighbridge','admin']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <TicketDetails />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/hold-release-requests"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <HoldReleaseRequests />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/cargo-verification"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <CargoVerification />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/weighbridge-records"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <WeighbridgeRecords />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/reports"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <WeighbridgeManagementPage />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/manual-entry"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <ManualEntry />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/weightreports"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <WeightReports />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/exit-trucks"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <ExitTrucks />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            <Route
+              path="/dashboard"
+              element={
+                <ProtectedRoute allowedRoles={['weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Dashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/tickets/:id"
+              element={
+                <ProtectedRoute allowedRoles={['weighbridge','admin']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <TicketDetails />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/hold-release-requests"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <HoldReleaseRequests />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/cargo-verification"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <CargoVerification />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/weighbridge-records"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <WeighbridgeRecords />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/reports"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <WeighbridgeManagementPage />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/manual-entry"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <ManualEntry />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/weightreports"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <WeightReports />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/exit-trucks"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <ExitTrucks />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        {/* Outgate */}
-        <Route
-          path="/outgate"
-          element={
-            <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <OutgateDashboard />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route path="/outgate/tickets" element={<Navigate to="/outgate/search" replace />} />
-        <Route
-          path="/outgate/tickets/:id"
-          element={
-            <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <OutgateTicketDetails />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/outgate/search"
-          element={
-            <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <OutgateSearchTickets />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-      
-        <Route
-          path="/outgate/confirm-exit"
-          element={
-            <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <ConfirmExit />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/outgate/reports"
-          element={
-            <ProtectedRoute allowedRoles={['outgate', 'admin', 'customs','agent']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <OutgateReports />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            {/* Outgate */}
+            <Route
+              path="/outgate"
+              element={
+                <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <OutgateDashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route path="/outgate/tickets" element={<Navigate to="/outgate/search" replace />} />
+            <Route
+              path="/outgate/tickets/:id"
+              element={
+                <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <OutgateTicketDetails />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/outgate/search"
+              element={
+                <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <OutgateSearchTickets />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+          
+            <Route
+              path="/outgate/confirm-exit"
+              element={
+                <ProtectedRoute allowedRoles={['outgate','admin','customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <ConfirmExit />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/outgate/reports"
+              element={
+                <ProtectedRoute allowedRoles={['outgate', 'admin', 'customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <OutgateReports />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        {/* Customs */}
-        <Route
-          path="/customs"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <OutgateDashboard />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/dashboard"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <CustomsDashboard />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/vehicle-records"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <VehicleRecords />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/cargo-inspection"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <CargoVerification />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/validation"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <DigitalValidation />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/movement-logs"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <MovementLogs />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/audit-trail"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <AuditTrail />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/customs/notifications"
-          element={
-            <ProtectedRoute allowedRoles={['customs']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <CustomsNotifications />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            {/* Customs */}
+            <Route
+              path="/customs"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <OutgateDashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/dashboard"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <CustomsDashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/vehicle-records"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <VehicleRecords />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/cargo-inspection"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <CargoVerification />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/validation"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <DigitalValidation />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/movement-logs"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <MovementLogs />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/audit-trail"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <AuditTrail />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/customs/notifications"
+              element={
+                <ProtectedRoute allowedRoles={['customs']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <CustomsNotifications />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        {/* Admin */}
-        <Route
-          path="/admin"
-          element={
-            <ProtectedRoute allowedRoles={['admin']}>
-              <AdminPanelPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/users"
-          element={
-            <ProtectedRoute allowedRoles={['admin']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <UsersPage />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/roles"
-          element={
-            <ProtectedRoute allowedRoles={['admin']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <RolesPermissionsPage />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/gate-operations"
-          element={
-            <ProtectedRoute allowedRoles={['admin']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <GateOperationsPage />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            {/* Admin */}
+            <Route
+              path="/admin"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <AdminPanelPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/users"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <UsersPage />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/roles"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <RolesPermissionsPage />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/gate-operations"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <GateOperationsPage />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        <Route
-          path="/agent"
-          element={
-            <ProtectedRoute allowedRoles={['admin', 'agent']}>
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <AgentDashboard />
-                </Box>
-              </Layout>
-            </ProtectedRoute>
-          }
-        />
+            <Route
+              path="/agent"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'agent']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <AgentDashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
 
-        {/* Fallback */}
-        <Route path="/login" element={<Navigate to="/" replace />} />
-      </Routes>
-    </>
+            {/* Fallback */}
+            <Route path="/login" element={<Navigate to="/" replace />} />
+          </Routes>
+        </>
+      )}
+    </PersistedStateProvider>
   );
 }
 
