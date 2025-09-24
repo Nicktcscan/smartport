@@ -15,16 +15,20 @@ const AuthContext = createContext();
 /**
  * AuthProvider
  *
- * Responsibilities:
- * - determine current session / user & role (from Supabase session + users table)
- * - provide login/logout helpers
- * - maintain inactivity timeout (auto logout)
- * - expose `loading` so the app can avoid rendering routes until auth is resolved
+ * - Resolves Supabase session -> local user object (id, email, role)
+ * - Persists minimal user to localStorage
+ * - Starts inactivity timer (auto-logout)
+ * - Listens to auth state changes from Supabase while avoiding noisy re-resolves
+ *
+ * Key fix:
+ * - Uses lastResolvedUserRef to avoid relying on `user` from a stale closure inside
+ *   an async effect/listener. This prevents UI resets when the SDK refreshes tokens
+ *   or when switching tabs.
  */
 export const AuthProvider = ({ children }) => {
   const navigate = useNavigate();
 
-  // Start with `null` to avoid trusting stale localStorage and causing route flicker.
+  // application user object (null when unauthenticated)
   const [user, setUser] = useState(null);
 
   // loading indicates we're resolving the session / user information
@@ -33,6 +37,9 @@ export const AuthProvider = ({ children }) => {
   // inactivity timer + guard for intentional logout
   const timeoutRef = useRef(null);
   const justLoggedOutRef = useRef(false);
+
+  // track last resolved user/role to avoid redundant fetches and avoid stale closures
+  const lastResolvedUserRef = useRef({ id: null, role: null });
 
   // Helper: navigate to role's landing page (use replace to avoid polluting history)
   const redirectToDashboard = useCallback(
@@ -68,17 +75,27 @@ export const AuthProvider = ({ children }) => {
     // clear local timers / state
     clearTimeout(timeoutRef.current);
     setUser(null);
-    localStorage.removeItem('user');
+    try {
+      localStorage.removeItem('user');
+    } catch (e) {
+      // ignore localStorage errors
+    }
 
     try {
       // sign out at Supabase (this will also emit a SIGNED_OUT event)
-      await supabase.auth.signOut();
+      if (supabase?.auth && typeof supabase.auth.signOut === 'function') {
+        await supabase.auth.signOut();
+      }
     } catch (err) {
       console.error('Supabase signOut error:', err);
     }
 
     // navigate to login (replace so Back doesn't return to restricted page)
-    navigate('/login', { replace: true });
+    try {
+      navigate('/login', { replace: true });
+    } catch (e) {
+      // ignore navigation errors
+    }
 
     // allow future sign-outs to proceed
     justLoggedOutRef.current = false;
@@ -88,13 +105,11 @@ export const AuthProvider = ({ children }) => {
   const resetInactivityTimer = useCallback(() => {
     clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
-      // friendly alert then logout
       try {
-        // keep UX simple for now
-        // You can replace alert with a nicer Chakra modal if desired.
+        // simple alert for now — swap with nicer UI if desired
         alert('You have been logged out due to 30 minutes of inactivity.');
       } catch (e) {
-        // ignore UI alert failures
+        // ignore UI errors
       }
       logout();
     }, 30 * 60 * 1000);
@@ -106,7 +121,7 @@ export const AuthProvider = ({ children }) => {
       if (!userObj) return;
       const authUser = {
         id: userObj.id,
-        email: userObj.email,
+        email: userObj.email ?? null,
         role: userObj.role ?? null,
       };
       setUser(authUser);
@@ -126,7 +141,7 @@ export const AuthProvider = ({ children }) => {
       if (!userObj) return;
       const authUser = {
         id: userObj.id,
-        email: userObj.email,
+        email: userObj.email ?? null,
         role: userObj.role ?? null,
       };
       setUser(authUser);
@@ -142,28 +157,66 @@ export const AuthProvider = ({ children }) => {
     [redirectToDashboard, resetInactivityTimer]
   );
 
-  // On mount: resolve session -> user -> role. Also attach auth state change listener.
+  // Effect: resolve session -> user -> role, and attach auth state change listener.
   useEffect(() => {
     let isMounted = true;
 
     const getSessionAndUser = async () => {
+      // mark loading while we check session at least once
       setLoading(true);
       try {
-        const { data } = await supabase.auth.getSession();
-        const session = data?.session ?? null;
+        const resp = await supabase.auth.getSession();
+        const session = resp?.data?.session ?? null;
         const currentUser = session?.user ?? null;
 
         if (!isMounted) return;
 
-        if (currentUser && currentUser.id) {
-          // set a temporary minimal user while we fetch the role
-          setUser({
-            id: currentUser.id,
-            email: currentUser.email ?? null,
-            role: null,
-          });
+        // No session -> clear local user and lastResolved
+        if (!currentUser) {
+          setUser(null);
+          lastResolvedUserRef.current = { id: null, role: null };
+          try {
+            localStorage.removeItem('user');
+          } catch (e) {}
+          return;
+        }
 
-          // fetch role from users table (safer .maybeSingle())
+        // If we've already resolved this user id and role, skip heavy fetch.
+        if (
+          lastResolvedUserRef.current.id === currentUser.id &&
+          lastResolvedUserRef.current.role
+        ) {
+          // already resolved previously; ensure timers are active (but don't clobber user if present)
+          // if local `user` is null for some reason, set it from lastResolvedRef
+          if (!user) {
+            setUser({
+              id: currentUser.id,
+              email: currentUser.email ?? null,
+              role: lastResolvedUserRef.current.role,
+            });
+            try {
+              localStorage.setItem(
+                'user',
+                JSON.stringify({
+                  id: currentUser.id,
+                  email: currentUser.email ?? null,
+                  role: lastResolvedUserRef.current.role,
+                })
+              );
+            } catch (e) {}
+          }
+          return;
+        }
+
+        // Otherwise, set minimal user immediately (role null while we fetch)
+        setUser({
+          id: currentUser.id,
+          email: currentUser.email ?? null,
+          role: null,
+        });
+
+        // Fetch role from users table
+        try {
           const { data: userData, error } = await supabase
             .from('users')
             .select('role')
@@ -174,8 +227,8 @@ export const AuthProvider = ({ children }) => {
             console.error('Error fetching role from users table:', error);
           }
 
-          // if user not present, create a fallback profile row with default role
           if (!userData) {
+            // create fallback row & set role to 'agent'
             try {
               const { error: insertError } = await supabase.from('users').insert({
                 id: currentUser.id,
@@ -184,34 +237,35 @@ export const AuthProvider = ({ children }) => {
               });
               if (insertError) {
                 console.error('Error inserting default user row:', insertError);
-                // still set local user with role 'agent' — best-effort
                 setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+                lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
               } else {
                 setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+                lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
               }
             } catch (e) {
               console.error('Insert fallback user failed:', e);
-              // fallback to setting user with no role
               setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+              lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
             }
           } else if (userData?.role) {
-            // success - set full user object
+            // set full user with role
             setUserOnly({ id: currentUser.id, email: currentUser.email, role: userData.role });
+            lastResolvedUserRef.current = { id: currentUser.id, role: userData.role };
           } else {
-            // no role present -> set default
+            // no role -> default to 'agent'
             setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+            lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
           }
-        } else {
-          // no session -> ensure logged out locally
-          setUser(null);
-          try {
-            localStorage.removeItem('user');
-          } catch (e) {}
+        } catch (err) {
+          console.error('Error resolving users row:', err);
+          setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+          lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
         }
       } catch (err) {
         console.error('Session fetch error:', err);
-        // in error cases, ensure user is null
         setUser(null);
+        lastResolvedUserRef.current = { id: null, role: null };
         try {
           localStorage.removeItem('user');
         } catch (e) {}
@@ -220,53 +274,49 @@ export const AuthProvider = ({ children }) => {
       }
     };
 
-    // run initial resolution
+    // Run the resolution once on mount
     getSessionAndUser();
 
-    // Subscribe to auth state changes
+    // Attach auth state listener
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
-      // NOTE: Do NOT call logout() here - that would call signOut again and risk loops.
-      // Instead, perform lightweight local cleanup when the event originates outside the app.
+      // Signed out: if initiated locally, skip extra handling; otherwise clean local state.
       if (event === 'SIGNED_OUT') {
-        // If this sign-out followed an intentional logout initiated by this app,
-        // just clear the `justLoggedOut` flag and do nothing else (we already cleaned up).
         if (justLoggedOutRef.current) {
           justLoggedOutRef.current = false;
           return;
         }
 
-        // External sign-out (e.g. session expired or signed out in another tab) — clean local state
+        // External sign-out
         setUser(null);
+        lastResolvedUserRef.current = { id: null, role: null };
         try {
           localStorage.removeItem('user');
         } catch (e) {}
-        // navigate to login safely
         try {
           navigate('/login', { replace: true });
         } catch (e) {
-          // ignore navigate errors during teardown
+          // ignore
         }
-        // clear inactivity timer
         clearTimeout(timeoutRef.current);
         return;
       }
 
-      if (event === 'SIGNED_IN' && session?.user) {
-        // when signed in, re-run session resolution to pick up possible role/profile updates
+      // Signed in: re-resolve only when necessary (getSessionAndUser checks lastResolvedUserRef)
+      if (event === 'SIGNED_IN') {
+        // call the same resolution helper to update role/state if needed
         getSessionAndUser();
       }
 
-      // other events (TOKEN_REFRESH etc.) are ignored here (we can add handling if needed)
+      // Ignore other events (TOKEN_REFRESH, USER_UPDATED, etc.) to avoid noisy re-resolves
     });
 
     return () => {
       isMounted = false;
-      // unsubscribe listener
+      // unsubscribe listener (support different supabase SDK shapes)
       try {
         if (listener && listener.subscription && typeof listener.subscription.unsubscribe === 'function') {
           listener.subscription.unsubscribe();
         } else if (listener && typeof listener.unsubscribe === 'function') {
-          // older SDK shapes
           listener.unsubscribe();
         }
       } catch (e) {
@@ -274,6 +324,7 @@ export const AuthProvider = ({ children }) => {
       }
       clearTimeout(timeoutRef.current);
     };
+    // intentionally minimal dependency array; setUserOnly, logout and navigate are stable callbacks
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [setUserOnly, logout, navigate]);
 
