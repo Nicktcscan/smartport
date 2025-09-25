@@ -89,7 +89,7 @@ import {
 
 const MotionModalContent = motion.create(ModalContent);
 
-// ---------------- PDF styles (same as before) ----------------
+// ---------------- PDF styles ----------------
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 18,
@@ -223,12 +223,14 @@ function removeDuplicatesByTicketNo(tickets = []) {
       map.set(key, t);
       continue;
     }
+    // prefer more recent record based on date
     const da = parseTicketDate(existing.data?.date);
     const db = parseTicketDate(t.data?.date);
     if (db && (!da || db.getTime() > da.getTime())) {
       map.set(key, t);
       continue;
     }
+    // if neither have date, prefer the one with fileUrl
     if (!da && !db) {
       if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
         map.set(key, t);
@@ -238,7 +240,7 @@ function removeDuplicatesByTicketNo(tickets = []) {
   return Array.from(map.values());
 }
 
-// ---------------- PDF components unchanged ----------------
+// ---------------- PDF components ----------------
 function PdfTicketRow({ ticket, operatorName }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
@@ -266,31 +268,30 @@ function PdfTicketRow({ ticket, operatorName }) {
   );
 }
 
+/**
+ * CombinedDocument
+ * - Break tickets into pages based on rowsPerPage so pages are filled consistently.
+ * - Display header and summary on the first page; subsequent pages show page header + table header.
+ */
 function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' }) {
+  // cumulative
   const totalNet = tickets.reduce((sum, t) => {
     const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
     return sum + (c.netValue || 0);
   }, 0);
 
   const numberOfTransactions = tickets.length;
+  // serve logo from public root — ensure src/assets/logo.png is copied to public/logo.png in your build or adjust path
   const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
   const rawSad = reportMeta?.sad ?? '';
   const sadLabel = rawSad ? String(rawSad).replace(/^SAD:\s*/i, '') : 'N/A';
 
-  const manualEntries = tickets.filter(t => String(t.data.ticketNo || '').startsWith('M-'));
-  const totalManualEntries = manualEntries.length;
-  const cumulativeManualNetWeight = manualEntries.reduce((sum, t) => {
-    const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-    return sum + (c.netValue || 0);
-  }, 0);
-
-  const rowsPerSubsequentPage = 20;
-  const firstPageCapacity = 14;
-  const firstPageTickets = tickets.slice(0, firstPageCapacity);
-  const remainingTickets = tickets.slice(firstPageCapacity);
-  const remainingPages = [];
-  for (let i = 0; i < remainingTickets.length; i += rowsPerSubsequentPage) {
-    remainingPages.push(remainingTickets.slice(i, i + rowsPerSubsequentPage));
+  // determine rows per page conservatively
+  const rowsPerPage = 30; // choose a value that fits; adjust if your rows are taller
+  // chunk tickets
+  const pages = [];
+  for (let i = 0; i < tickets.length; i += rowsPerPage) {
+    pages.push(tickets.slice(i, i + rowsPerPage));
   }
 
   const TableHeader = () => (
@@ -309,69 +310,57 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
 
   return (
     <Document>
-      <Page size="A4" style={pdfStyles.page}>
-        <PdfView style={pdfStyles.header}>
-          <PdfImage src={logoUrl} style={pdfStyles.logo} />
-          <PdfView style={pdfStyles.companyBlock}>
-            <PdfText style={pdfStyles.companyName}>NICK TC-SCAN (GAMBIA) LTD</PdfText>
-            <PdfText>WEIGHBRIDGE SITUATION REPORT</PdfText>
-          </PdfView>
-        </PdfView>
-
-        <PdfText style={pdfStyles.reportTitle}>WEIGHBRIDGE SITUATION REPORT</PdfText>
-
-        <PdfView style={pdfStyles.summaryBox}>
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>SAD: {sadLabel}</PdfText>
-            <PdfText>DATE RANGE: {reportMeta.dateRangeText || 'All'}</PdfText>
+      {pages.map((pageTickets, idx) => (
+        <Page key={`page-${idx}`} size="A4" style={pdfStyles.page}>
+          {/* header (logo + company block) */}
+          <PdfView style={pdfStyles.header}>
+            <PdfImage src={logoUrl} style={pdfStyles.logo} />
+            <PdfView style={pdfStyles.companyBlock}>
+              <PdfText style={pdfStyles.companyName}>NICK TC-SCAN (GAMBIA) LTD</PdfText>
+              <PdfText>WEIGHBRIDGE SITUATION REPORT</PdfText>
+            </PdfView>
           </PdfView>
 
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>START: {reportMeta.startTimeLabel || 'N/A'}</PdfText>
-            <PdfText>END: {reportMeta.endTimeLabel || 'N/A'}</PdfText>
-          </PdfView>
+          {/* on page 0 show summary block */}
+          {idx === 0 && (
+            <>
+              <PdfText style={pdfStyles.reportTitle}>WEIGHBRIDGE SITUATION REPORT</PdfText>
 
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>NUMBER OF TRANSACTIONS: {numberOfTransactions}</PdfText>
-            <PdfText>TOTAL CUMULATIVE NET (KG): {formatNumber(String(totalNet))} KG</PdfText>
-          </PdfView>
+              <PdfView style={pdfStyles.summaryBox}>
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>SAD: {sadLabel}</PdfText>
+                  <PdfText>DATE RANGE: {reportMeta.dateRangeText || 'All'}</PdfText>
+                </PdfView>
 
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>TOTAL MANUAL ENTRIES: {totalManualEntries}</PdfText>
-            <PdfText>CUMULATIVE NET (MANUAL) KG: {formatNumber(String(cumulativeManualNetWeight))}</PdfText>
-          </PdfView>
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>START: {reportMeta.startTimeLabel || 'N/A'}</PdfText>
+                  <PdfText>END: {reportMeta.endTimeLabel || 'N/A'}</PdfText>
+                </PdfView>
 
-          <PdfView style={pdfStyles.metaRow}>
-            <PdfText>Operator: {operatorName || 'N/A'}</PdfText>
-            <PdfText />
-          </PdfView>
-        </PdfView>
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>NUMBER OF TRANSACTIONS: {numberOfTransactions}</PdfText>
+                  <PdfText>TOTAL CUMULATIVE NET (KG): {formatNumber(String(totalNet))} KG</PdfText>
+                </PdfView>
 
-        {firstPageTickets.length > 0 && (
-          <>
-            <TableHeader />
-            {firstPageTickets.map(t => (
-              <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />
-            ))}
-          </>
-        )}
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>Operator: {operatorName || 'N/A'}</PdfText>
+                  <PdfText />
+                </PdfView>
+              </PdfView>
+            </>
+          )}
 
-        <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
-      </Page>
-
-      {remainingPages.map((pageTickets, idx) => (
-        <Page key={`rem-${idx}`} size="A4" style={pdfStyles.page}>
-          <PdfText style={{ fontSize: 12, fontWeight: 'bold', marginBottom: 8 }}>Ticket List</PdfText>
+          {/* Table header then rows */}
           <TableHeader />
-          {pageTickets.map(t => (
-            <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />
-          ))}
+          {pageTickets.map((t) => <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />)}
+
           <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
         </Page>
       ))}
     </Document>
   );
 }
+
 
 // ---------------- main React component ----------------
 export default function WeightReports() {
@@ -435,7 +424,7 @@ export default function WeightReports() {
         if (mounted) setCurrentUserId(currentUser.id);
 
         const { data: userRow } = await supabase.from('users').select('username, role').eq('id', currentUser.id).maybeSingle();
-        const uname = userRow?.username || currentUser.email || currentUser.user_metadata?.full_name || '';
+        const uname = userRow?.username || currentUser.email || (currentUser.user_metadata && currentUser.user_metadata.full_name) || '';
         const role = (userRow && userRow.role) || '';
         if (mounted) {
           setOperatorName(uname);
@@ -569,8 +558,7 @@ export default function WeightReports() {
         return (ka - kb) * dir;
       }
       if (sortBy === 'ticketNo' || sortBy === 'ticketno') {
-        const sa = String(a.data.ticketNo || '').localeCompare(String(b.data.ticketNo || '')) * dir;
-        return sa;
+        return String(a.data.ticketNo || '').localeCompare(String(b.data.ticketNo || '')) * dir;
       }
       if (sortBy === 'sadNo' || sortBy === 'sadNo') {
         return String(a.data.sadNo || '').localeCompare(String(b.data.sadNo || '')) * dir;
@@ -644,12 +632,14 @@ export default function WeightReports() {
         },
       }));
 
+      // Deduplicate
       const dedupedTickets = removeDuplicatesByTicketNo(mappedTickets);
       if (dedupedTickets.length < mappedTickets.length) {
         const removed = mappedTickets.length - dedupedTickets.length;
         toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
       }
 
+      // Sort newest-first
       const sortedOriginal = sortTicketsByDateDesc(dedupedTickets);
       setOriginalTickets(sortedOriginal);
 
@@ -859,14 +849,12 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- Edit / Delete ----------
+  // ---------- Edit / Delete (unchanged logic) ----------
   const isTicketEditable = (ticket) => {
     const status = String(ticket?.data?.status || '').toLowerCase();
-    // keep this helper but we will allow admins to edit regardless in UI (the modal edit button)
     return status !== 'exited';
   };
 
-  // startEditing accepts optional ticket param and optional focusField (not used for focus here but could be)
   const startEditing = (ticketParam = null) => {
     const ticket = ticketParam || selectedTicket;
     if (!ticket) return;
@@ -876,7 +864,6 @@ export default function WeightReports() {
       return;
     }
 
-    // allow admins to edit regardless of status; for non-admins we would have prevented above
     const d = ticket.data || {};
     const operator = d.operator ? d.operator.replace(/^-+/, '').trim() : '';
     const driverName = d.driver ? d.driver.replace(/^-+/, '').trim() : '';
@@ -896,7 +883,6 @@ export default function WeightReports() {
     setEditErrors({});
     setIsEditing(true);
 
-    // ensure modal open
     onOpen();
   };
 
@@ -1170,24 +1156,7 @@ export default function WeightReports() {
     });
   };
 
-  // Helper to render a table cell with an edit icon for admins
-  const renderEditableCell = (ticket, children) => {
-    if (!isAdmin) return <>{children}</>;
-    return (
-      <HStack spacing={2} align="center">
-        <Box>{children}</Box>
-        <IconButton
-          size="xs"
-          aria-label="Edit record"
-          icon={<FaEdit />}
-          onClick={() => startEditing(ticket)}
-          variant="ghost"
-        />
-      </HStack>
-    );
-  };
-
-  // ---------------------- UI ----------------------
+  // ---------- UI render ----------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }}>
       {/* Header */}
@@ -1371,7 +1340,6 @@ export default function WeightReports() {
                           <Text fontSize="sm" color="gray.500">Ticket</Text>
                           <HStack>
                             <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
-                            {isAdmin && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(t)} variant="ghost" />}
                           </HStack>
                           <Text fontSize="sm" color="gray.500">{t.data.date ? new Date(t.data.date).toLocaleString() : 'N/A'}</Text>
                         </Box>
@@ -1380,12 +1348,10 @@ export default function WeightReports() {
                           <Text fontSize="sm" color="gray.500">Truck</Text>
                           <HStack justify="flex-end">
                             <Text fontWeight="semibold">{displayTruck}</Text>
-                            {isAdmin && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(t)} variant="ghost" />}
                           </HStack>
                           <Text fontSize="sm" color="gray.500">Driver</Text>
                           <HStack justify="flex-end">
                             <Text>{displayDriver}</Text>
-                            {isAdmin && <IconButton size="xs" aria-label="Edit driver" icon={<FaEdit />} onClick={() => startEditing(t)} variant="ghost" />}
                           </HStack>
                         </Box>
                       </Flex>
@@ -1471,14 +1437,14 @@ export default function WeightReports() {
 
                       return (
                         <Tr key={ticket.ticketId}>
-                          <Td>{renderEditableCell(ticket, ticket.data.sadNo)}</Td>
-                          <Td>{renderEditableCell(ticket, ticket.data.ticketNo)}</Td>
-                          <Td>{renderEditableCell(ticket, ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A')}</Td>
-                          <Td>{renderEditableCell(ticket, displayTruck)}</Td>
-                          <Td isNumeric>{renderEditableCell(ticket, computed.grossDisplay || '0')}</Td>
-                          <Td isNumeric>{renderEditableCell(ticket, computed.tareDisplay || '0')}</Td>
-                          <Td isNumeric>{renderEditableCell(ticket, computed.netDisplay || '0')}</Td>
-                          <Td>{renderEditableCell(ticket, displayDriver)}</Td>
+                          <Td>{ticket.data.sadNo}</Td>
+                          <Td>{ticket.data.ticketNo}</Td>
+                          <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
+                          <Td>{displayTruck}</Td>
+                          <Td isNumeric>{computed.grossDisplay || '0'}</Td>
+                          <Td isNumeric>{computed.tareDisplay || '0'}</Td>
+                          <Td isNumeric>{computed.netDisplay || '0'}</Td>
+                          <Td>{displayDriver}</Td>
                           <Td>
                             <HStack spacing={2} flexWrap="wrap">
                               <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
@@ -1705,11 +1671,11 @@ export default function WeightReports() {
               </ModalBody>
 
               <ModalFooter>
-                {/* Admin-only Edit/Delete controls (Edit in modal now opens edit mode reliably for admins) */}
+                {/* Admin-only Edit/Delete controls (single Edit button persists) */}
                 {selectedTicket && !isEditing && (
                   <>
                     {isAdmin ? (
-                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={() => startEditing()}>
+                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={() => startEditing(selectedTicket)}>
                         Edit
                       </Button>
                     ) : (
