@@ -36,7 +36,7 @@ const adminNavItems = [
   { path: '/weightreports', label: 'Ticket Records', icon: Search2Icon },
   { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
-  { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
+  { path: '/outgate/reports', label: 'Outgate Records', icon: InfoIcon },
   { path: '/settings', label: 'System Settings', icon: QuestionIcon },
 ];
 
