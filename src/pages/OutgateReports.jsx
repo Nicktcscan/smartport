@@ -1,5 +1,5 @@
 // src/pages/OutgateReports.jsx
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Box,
   Button,
@@ -35,21 +35,23 @@ import {
   StatNumber,
   StatHelpText,
   Tooltip,
-  Box as ChakraBox,
 } from '@chakra-ui/react';
 import {
-  SearchIcon,
   RepeatIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   DownloadIcon,
+  SearchIcon,
 } from '@chakra-ui/icons';
-import { FaFilePdf, FaShareAlt, FaEnvelope } from 'react-icons/fa';
+import { FaFilePdf } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
+import logoUrl from '../assets/logo.png';
 
 const ITEMS_PER_PAGE = 5;
 
-// --- small helpers ---
+/* -----------------------
+   Helpers
+----------------------- */
 function parseNumber(val) {
   if (val === null || val === undefined || val === '') return null;
   const n = Number(String(val).toString().replace(/[, ]+/g, ''));
@@ -57,9 +59,9 @@ function parseNumber(val) {
 }
 
 function computeWeights(row) {
-  const gross = parseNumber(row.gross);
-  const tare = parseNumber(row.tare);
-  const net = parseNumber(row.net);
+  const gross = parseNumber(row.gross ?? row.gross_value ?? row.grossValue ?? row.gross_val);
+  const tare = parseNumber(row.tare ?? row.tare_value ?? row.tareValue ?? row.tare_val);
+  const net = parseNumber(row.net ?? row.net_value ?? row.netValue ?? row.net_val);
 
   let G = gross;
   let T = tare;
@@ -74,7 +76,8 @@ function computeWeights(row) {
 
 function formatWeight(v) {
   if (v === null || v === undefined) return '—';
-  return Number(v).toLocaleString();
+  if (Number.isInteger(v)) return Number(v).toLocaleString();
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function exportToCSV(rows = [], filename = 'export.csv') {
@@ -114,14 +117,15 @@ function openPrintableWindow(html, title = 'Report') {
         <title>${title}</title>
         <style>
           body{ font-family: Arial, Helvetica, sans-serif; padding: 18px; color: #111 }
+          .header{ display:flex; align-items:center; gap:12px; margin-bottom:18px }
+          .logo{ height:60px; width:auto; }
+          .company{ font-size:18px; font-weight:700; color:#0a6b63 }
           table{ border-collapse: collapse; width: 100% }
           th, td{ border: 1px solid #ddd; padding: 6px; font-size: 12px }
           th{ background: #f7fafc; text-align: left }
         </style>
       </head>
-      <body>
-        ${html}
-      </body>
+      <body>${html}</body>
     </html>
   `);
   w.document.close();
@@ -131,6 +135,37 @@ function openPrintableWindow(html, title = 'Report') {
   }, 300);
 }
 
+/* Deduplicate outgate rows by ticket number.
+   - If ticket_no exists, keep only one row per ticket_no (choose newest outgateDateTime).
+   - If ticket_no is absent (manual rows), keep them (keyed by manual:id) — they are not deduplicated by ticket_no.
+*/
+function dedupeReportsByTicketNo(rows = []) {
+  const map = new Map();
+  const manualRows = [];
+
+  for (const r of rows) {
+    const tn = (r.ticketNo ?? r.ticket_no ?? r.rawRow?.ticket_no ?? '').toString().trim();
+    if (tn) {
+      const existing = map.get(tn);
+      const rTime = r.outgateDateTime ? new Date(r.outgateDateTime).getTime() : 0;
+      if (!existing) map.set(tn, r);
+      else {
+        const existingTime = existing.outgateDateTime ? new Date(existing.outgateDateTime).getTime() : 0;
+        if (rTime >= existingTime) map.set(tn, r); // keep newest
+      }
+    } else {
+      // keep manual rows as-is; they don't have ticketNo to dedupe by
+      manualRows.push(r);
+    }
+  }
+
+  // return combined: first ticket-based unique rows, then manual rows
+  return [...Array.from(map.values()), ...manualRows];
+}
+
+/* -----------------------
+   Component
+----------------------- */
 export default function OutgateReports() {
   const [reports, setReports] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -138,8 +173,6 @@ export default function OutgateReports() {
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
-  const [sortField, setSortField] = useState('outgateDateTime');
-  const [sortDirection, setSortDirection] = useState('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(ITEMS_PER_PAGE);
   const [loading, setLoading] = useState(true);
@@ -149,45 +182,40 @@ export default function OutgateReports() {
   const { isOpen: isDetailsOpen, onOpen: onDetailsOpen, onClose: onDetailsClose } = useDisclosure();
   const [selectedReport, setSelectedReport] = useState(null);
 
-  // SAD search workflow
-  const [sadQuery, setSadQuery] = useState('');
-  const [sadTickets, setSadTickets] = useState([]); // base after search / date filtering
-  const [sadOriginal, setSadOriginal] = useState([]); // original mapped results
-  const [sadDateFrom, setSadDateFrom] = useState('');
-  const [sadDateTo, setSadDateTo] = useState('');
-  const [sadTimeFrom, setSadTimeFrom] = useState('');
-  const [sadTimeTo, setSadTimeTo] = useState('');
+  // SAD search results (deduped)
+  const [sadResults, setSadResults] = useState([]);
+  const [sadTotals, setSadTotals] = useState({ transactions: 0, cumulativeNet: 0 });
   const [sadLoading, setSadLoading] = useState(false);
-  const [sadMeta, setSadMeta] = useState({});
+  const sadDebounceRef = useRef(null);
 
-  // NEW: status filter + sort order for SAD results
-  const [sadSortStatus, setSadSortStatus] = useState(''); // '', 'Pending', 'Exited'
-  const [sadSortOrder, setSadSortOrder] = useState('none'); // 'none' | 'pending_first' | 'exited_first'
+  // tickets mapping and total transactions (deduplicated)
+  const [ticketStatusMap, setTicketStatusMap] = useState({}); // ticket_no -> status
+  const [totalTransactions, setTotalTransactions] = useState(0); // unique ticket_no count across system
 
-  const sadRef = useRef(null);
-
-  // load outgate records on mount
   useEffect(() => {
     let mounted = true;
-    const fetchReports = async () => {
+
+    const fetchReportsAndTickets = async () => {
       try {
         setLoading(true);
-        const { data, error } = await supabase
+
+        // fetch outgate rows
+        const { data: outData, error: outErr } = await supabase
           .from('outgate')
           .select('*')
           .order('created_at', { ascending: false });
 
-        if (error) throw error;
-        if (!mounted) return;
-        const mapped = (data || []).map((og) => {
+        if (outErr) throw outErr;
+
+        const mapped = (outData || []).map((og) => {
           const computed = computeWeights(og);
           return {
             id: og.id,
             ticketId: og.ticket_id,
-            ticketNo: og.ticket_no || null,
-            vehicleNumber: og.vehicle_number || '',
-            outgateDateTime: og.created_at || og.created_at || null,
-            driverName: og.driver || og.driver || null,
+            ticketNo: og.ticket_no || og.ticketNo || null,
+            vehicleNumber: og.vehicle_number || og.vehicleNo || '',
+            outgateDateTime: og.created_at || og.outgate_at || null,
+            driverName: og.driver || og.driverName || null,
             destination: og.consignee || og.destination || null,
             remarks: og.remarks || '',
             declaredWeight: og.declared_weight ?? null,
@@ -195,13 +223,41 @@ export default function OutgateReports() {
             tare: computed.tare,
             net: computed.net,
             fileUrl: og.file_url || null,
-            containerId: og.container_id || null,
-            sadNo: og.sad_no || null,
+            containerId: og.container_id ?? null,
+            sadNo: og.sad_no ?? null,
             rawRow: og,
           };
         });
 
+        if (!mounted) return;
         setReports(mapped);
+
+        // fetch tickets statuses (Pending/Exited) to create map of ticket_no -> status
+        const { data: ticketsData, error: ticketsErr } = await supabase
+          .from('tickets')
+          .select('ticket_no,status');
+
+        if (ticketsErr) {
+          console.warn('Failed to load tickets for status summary', ticketsErr);
+          setTicketStatusMap({});
+          setTotalTransactions(0);
+        } else {
+          const map = {};
+          (ticketsData || []).forEach((t) => {
+            const tn = (t.ticket_no ?? '').toString().trim();
+            if (!tn) return;
+            map[tn] = t.status ?? map[tn] ?? 'Pending';
+          });
+
+          // also include ticket_nos present in outgate that may not exist in tickets table
+          for (const r of mapped) {
+            if (r.ticketNo && !map[r.ticketNo]) map[r.ticketNo] = r.rawRow?.status ?? 'Exited';
+          }
+
+          if (!mounted) return;
+          setTicketStatusMap(map);
+          setTotalTransactions(Object.keys(map).length);
+        }
       } catch (err) {
         toast({
           title: 'Error loading reports',
@@ -209,12 +265,15 @@ export default function OutgateReports() {
           status: 'error',
           duration: 4000,
         });
+        setReports([]);
+        setTicketStatusMap({});
+        setTotalTransactions(0);
       } finally {
-        setLoading(false);
+        if (mounted) setLoading(false);
       }
     };
 
-    fetchReports();
+    fetchReportsAndTickets();
     return () => {
       mounted = false;
     };
@@ -227,218 +286,107 @@ export default function OutgateReports() {
     return hh * 60 + mm;
   };
 
-  // Generate SAD tickets from tickets table and inject status
-  const handleGenerateSad = async () => {
-    if (!sadQuery.trim()) {
-      toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
+  /* SAD search: dedupe by ticket_no, newest-first, compute cumulative net */
+  useEffect(() => {
+    if (sadDebounceRef.current) {
+      clearTimeout(sadDebounceRef.current);
+      sadDebounceRef.current = null;
+    }
+
+    const q = (searchTerm || '').trim();
+    if (!q) {
+      setSadResults([]);
+      setSadTotals({ transactions: 0, cumulativeNet: 0 });
       return;
     }
-    try {
+
+    sadDebounceRef.current = setTimeout(async () => {
       setSadLoading(true);
-      const { data, error } = await supabase
-        .from('tickets')
-        .select('*')
-        .ilike('sad_no', `%${sadQuery.trim()}%`)
-        .order('date', { ascending: true });
+      try {
+        const { data: ticketsData, error } = await supabase
+          .from('tickets')
+          .select('*')
+          .ilike('sad_no', `%${q}%`)
+          .order('date', { ascending: false }); // newest first
 
-      if (error) throw error;
-
-      const mapped = (data || []).map((ticket) => {
-        // Try to infer whether this ticket has exited — look for explicit status or exit-like timestamp
-        const exitCandidate = ticket.status === 'Exited'
-          ? ticket.date // if status explicitly says Exited, use ticket.date as exit indicator
-          : (ticket.exit_date || ticket.outgate_date || ticket.outgate_at || ticket.exited_at || null);
-
-        const inferredStatus = ticket.status ? String(ticket.status) : (exitCandidate ? 'Exited' : 'Pending');
-
-        return {
-          ticketId: ticket.ticket_id || (ticket.id ? String(ticket.id) : `${Math.random()}`),
-          data: {
-            sadNo: ticket.sad_no,
-            ticketNo: ticket.ticket_no,
-            date: ticket.date || ticket.submitted_at || exitCandidate || null,
-            gnswTruckNo: ticket.gnsw_truck_no || ticket.vehicle_number || ticket.truck_no || null,
-            net: ticket.net ?? ticket.net ?? null,
-            tare: ticket.tare ?? ticket.tare ?? null,
-            gross: ticket.gross ?? null,
-            driver: ticket.driver || ticket.driver || 'N/A',
-            consignee: ticket.consignee,
-            operator: ticket.operator,
-            containerNo: ticket.container_no || ticket.container_no_supp || null,
-            fileUrl: ticket.file_url || null,
-            // IMPORTANT: add inferred status here
-            status: inferredStatus,
-          },
-        };
-      });
-
-      setSadOriginal(mapped);
-      setSadTickets(mapped);
-      setSadDateFrom('');
-      setSadDateTo('');
-      setSadTimeFrom('');
-      setSadTimeTo('');
-      setSadMeta({
-        sad: sadQuery.trim(),
-        dateRangeText: mapped.length > 0 && mapped[0].data.date ? new Date(mapped[0].data.date).toLocaleDateString() : 'All',
-        startTimeLabel: '',
-        endTimeLabel: '',
-      });
-
-      if ((mapped || []).length === 0) {
-        toast({ title: 'No tickets found', status: 'info', duration: 2500 });
-      }
-    } catch (err) {
-      console.error(err);
-      toast({ title: 'Search failed', description: err?.message || 'Could not fetch tickets', status: 'error', duration: 4000 });
-    } finally {
-      setSadLoading(false);
-    }
-  };
-
-  const applySadRange = () => {
-    if (!sadOriginal || sadOriginal.length === 0) return;
-    const tf = parseTimeToMinutes(sadTimeFrom);
-    const tt = parseTimeToMinutes(sadTimeTo);
-    const hasDateRange = !!(sadDateFrom || sadDateTo);
-    const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
-    const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
-
-    const filtered = sadOriginal.filter((t) => {
-      const dRaw = t.data.date;
-      const d = dRaw ? new Date(dRaw) : null;
-      if (!d) return false;
-      if (hasDateRange) {
-        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
-        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
-        if (sadTimeFrom) {
-          const mins = parseTimeToMinutes(sadTimeFrom);
-          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+        if (error) {
+          console.warn('SAD lookup error', error);
+          setSadResults([]);
+          setSadTotals({ transactions: 0, cumulativeNet: 0 });
+          setSadLoading(false);
+          return;
         }
-        if (sadTimeTo) {
-          const mins = parseTimeToMinutes(sadTimeTo);
-          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
-        }
-        return d >= start && d <= end;
-      } else if (sadTimeFrom || sadTimeTo) {
-        const minutes = d.getHours() * 60 + d.getMinutes();
-        const from = tf != null ? tf : 0;
-        const to = tt != null ? tt : 24 * 60 - 1;
-        return minutes >= from && minutes <= to;
+
+        // Deduplicate by ticket_no: keep newest (by date/submitted_at)
+        const dedupeMap = new Map();
+        (ticketsData || []).forEach((t) => {
+          const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
+          if (!ticketNo) return;
+          const thisDate = new Date(t.date ?? t.submitted_at ?? t.created_at ?? 0).getTime();
+          const existing = dedupeMap.get(ticketNo);
+          if (!existing) dedupeMap.set(ticketNo, t);
+          else {
+            const existingDate = new Date(existing.date ?? existing.submitted_at ?? existing.created_at ?? 0).getTime();
+            if (thisDate >= existingDate) dedupeMap.set(ticketNo, t);
+          }
+        });
+
+        const deduped = Array.from(dedupeMap.values());
+
+        // Map to UI-friendly shape and compute cumulative net
+        let cumulativeNet = 0;
+        const mapped = deduped
+          .sort((a, b) => {
+            const aT = new Date(a.date ?? a.submitted_at ?? a.created_at ?? 0).getTime();
+            const bT = new Date(b.date ?? b.submitted_at ?? b.created_at ?? 0).getTime();
+            return bT - aT; // newest first
+          })
+          .map((t) => {
+            const computed = computeWeights({
+              gross: t.gross,
+              tare: t.tare,
+              net: t.net,
+            });
+            const netVal = computed.net ?? 0;
+            cumulativeNet += netVal;
+            return {
+              ticketId: t.ticket_id ?? t.id ?? t.ticket_no ?? `${Math.random()}`,
+              ticketNo: t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null),
+              sadNo: t.sad_no ?? t.sadNo ?? null,
+              date: t.date ?? t.submitted_at ?? t.created_at ?? null,
+              truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
+              gross: computed.gross,
+              tare: computed.tare,
+              net: computed.net,
+              driver: t.driver ?? null,
+              raw: t,
+            };
+          });
+
+        setSadResults(mapped);
+        setSadTotals({ transactions: mapped.length, cumulativeNet });
+      } catch (err) {
+        console.error('SAD search failed', err);
+        setSadResults([]);
+        setSadTotals({ transactions: 0, cumulativeNet: 0 });
+      } finally {
+        setSadLoading(false);
       }
-      return true;
-    });
+    }, 600);
 
-    setSadTickets(filtered);
+    return () => {
+      if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
+    };
+  }, [searchTerm]);
 
-    const startLabel = sadDateFrom ? `${sadTimeFrom || '00:00'} (${sadDateFrom})` : sadTimeFrom ? `${sadTimeFrom}` : '';
-    const endLabel = sadDateTo ? `${sadTimeTo || '23:59'} (${sadDateTo})` : sadTimeTo ? `${sadTimeTo}` : '';
-    let dateRangeText = '';
-    if (sadDateFrom && sadDateTo) dateRangeText = `${sadDateFrom} → ${sadDateTo}`;
-    else if (sadDateFrom) dateRangeText = sadDateFrom;
-    else if (sadDateTo) dateRangeText = sadDateTo;
+  /* -----------------------
+     Apply filters to deduplicated reports
+     - First dedupe full reports by ticket_no
+     - Then filter by search/date/time
+     - Then sort newest-first and paginate
+  ----------------------- */
+  const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
 
-    setSadMeta((s) => ({ ...s, dateRangeText: dateRangeText || (sadOriginal[0]?.data?.date ? new Date(sadOriginal[0].data.date).toLocaleDateString() : ''), startTimeLabel: startLabel, endTimeLabel: endLabel }));
-  };
-
-  const resetSadRange = () => {
-    setSadDateFrom('');
-    setSadDateTo('');
-    setSadTimeFrom('');
-    setSadTimeTo('');
-    setSadTickets(sadOriginal);
-    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
-  };
-
-  // derived filtered & sorted SAD list based on status and order
-  const filteredSadTickets = useMemo(() => {
-    let arr = Array.isArray(sadTickets) ? sadTickets.slice() : [];
-
-    if (sadSortStatus) {
-      arr = arr.filter((t) => (t.data.status || 'Pending') === sadSortStatus);
-    }
-
-    if (sadSortOrder === 'pending_first') {
-      arr.sort((a, b) => {
-        const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        const bIsPending = (b.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        return aIsPending - bIsPending; // pending first
-      });
-    } else if (sadSortOrder === 'exited_first') {
-      arr.sort((a, b) => {
-        const aIsExited = (a.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        const bIsExited = (b.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        return aIsExited - bIsExited; // exited first
-      });
-    }
-
-    return arr;
-  }, [sadTickets, sadSortStatus, sadSortOrder]);
-
-  const cumulativeNet = useMemo(() => {
-    return filteredSadTickets.reduce((sum, t) => {
-      const { net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-      return sum + (net || 0);
-    }, 0);
-  }, [filteredSadTickets]);
-
-  const handleDownloadSadPdf = async () => {
-    if (!filteredSadTickets || filteredSadTickets.length === 0) {
-      toast({ title: 'No tickets', description: 'Nothing to export', status: 'info', duration: 2500 });
-      return;
-    }
-
-    const rowsHtml = filteredSadTickets
-      .map((t) => {
-        const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-        return `<tr>
-        <td>${t.data.sadNo ?? ''}</td>
-        <td>${t.data.ticketNo ?? ''}</td>
-        <td>${t.data.created_at ? new Date(t.data.created_at).toLocaleString() : ''}</td>
-        <td>${t.data.gnswTruckNo ?? ''}</td>
-        <td style="text-align:right">${gross != null ? Number(gross).toLocaleString() : ''}</td>
-        <td style="text-align:right">${tare != null ? Number(tare).toLocaleString() : ''}</td>
-        <td style="text-align:right">${net != null ? Number(net).toLocaleString() : ''}</td>
-        <td>${t.data.status ?? ''}</td>
-      </tr>`;
-      })
-      .join('');
-
-    const html = `
-      <h2>Weighbridge SAD Report — ${sadMeta.sad || ''}</h2>
-      <p>Date range: ${sadMeta.dateRangeText || 'All'} ${sadMeta.startTimeLabel ? `• ${sadMeta.startTimeLabel}` : ''} ${sadMeta.endTimeLabel ? `• ${sadMeta.endTimeLabel}` : ''}</p>
-      <table>
-        <thead>
-          <tr>
-            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rowsHtml}
-          <tr style="font-weight:bold;background:#f0f8ff">
-            <td colspan="7">Cumulative Net</td>
-            <td style="text-align:right">${Number(cumulativeNet || 0).toLocaleString()}</td>
-          </tr>
-        </tbody>
-      </table>
-    `;
-
-    openPrintableWindow(html, `SAD-${sadMeta.sad || 'report'}`);
-  };
-
-  const handleShareSad = async () => {
-    await handleDownloadSadPdf();
-    toast({ title: 'PDF window opened', status: 'info', duration: 3000 });
-  };
-
-  const handleEmailSad = async () => {
-    await handleDownloadSadPdf();
-    const subject = encodeURIComponent(`Weighbridge SAD ${sadMeta.sad} Report`);
-    const body = encodeURIComponent(`Please find Weighbridge report for SAD ${sadMeta.sad}.\n\nTransactions: ${filteredSadTickets.length}\nCumulative Net: ${Number(cumulativeNet || 0).toLocaleString()} kg\n\n(Please attach the downloaded PDF if it wasn't attached automatically)`);
-    window.location.href = `mailto:?subject=${subject}&body=${body}`;
-  };
-
-  // ---- filters, sorting and pagination for main outgate table ----
   const filteredReports = useMemo(() => {
     const term = (searchTerm || '').trim().toLowerCase();
     const df = dateFrom ? new Date(dateFrom) : null;
@@ -447,7 +395,7 @@ export default function OutgateReports() {
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
-    return reports.filter((r) => {
+    return dedupedReports.filter((r) => {
       if (term) {
         const hay = [
           r.vehicleNumber,
@@ -475,40 +423,33 @@ export default function OutgateReports() {
 
       return true;
     });
-  }, [reports, searchTerm, dateFrom, dateTo, timeFrom, timeTo]);
+  }, [dedupedReports, searchTerm, dateFrom, dateTo, timeFrom, timeTo]);
 
+  // newest-first sort
   const sortedReports = useMemo(() => {
     const arr = filteredReports.slice();
     arr.sort((a, b) => {
-      let aVal = a[sortField];
-      let bVal = b[sortField];
-      if (sortField === 'outgateDateTime' || sortField === 'date') {
-        aVal = a.outgateDateTime ? new Date(a.outgateDateTime).getTime() : 0;
-        bVal = b.outgateDateTime ? new Date(b.outgateDateTime).getTime() : 0;
-      } else {
-        aVal = (aVal ?? '').toString().toLowerCase();
-        bVal = (bVal ?? '').toString().toLowerCase();
-      }
-      if (aVal < bVal) return sortDirection === 'asc' ? -1 : 1;
-      if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
-      return 0;
+      const aT = a.outgateDateTime ? new Date(a.outgateDateTime).getTime() : 0;
+      const bT = b.outgateDateTime ? new Date(b.outgateDateTime).getTime() : 0;
+      return bT - aT;
     });
     return arr;
-  }, [filteredReports, sortField, sortDirection]);
+  }, [filteredReports]);
+
+  const displayedUniqueTicketCount = useMemo(() => {
+    // Count unique ticketNo values present in sortedReports (excluding null/empty)
+    const set = new Set();
+    for (const r of sortedReports) {
+      if (r.ticketNo) set.add(r.ticketNo);
+    }
+    return set.size;
+  }, [sortedReports]);
 
   const totalPages = Math.max(1, Math.ceil(sortedReports.length / itemsPerPage));
   const paginatedReports = useMemo(() => {
     const start = (currentPage - 1) * itemsPerPage;
     return sortedReports.slice(start, start + itemsPerPage);
   }, [sortedReports, currentPage, itemsPerPage]);
-
-  const toggleSort = (field) => {
-    if (sortField === field) setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
-    else {
-      setSortField(field);
-      setSortDirection('asc');
-    }
-  };
 
   const openDetails = (report) => {
     setSelectedReport(report);
@@ -522,8 +463,6 @@ export default function OutgateReports() {
     setTimeFrom('');
     setTimeTo('');
     setCurrentPage(1);
-    setSortField('outgateDateTime');
-    setSortDirection('desc');
     toast({ title: 'Filters reset', status: 'info', duration: 1500 });
   };
 
@@ -537,15 +476,12 @@ export default function OutgateReports() {
       if (w.net != null) { net += w.net; netCount++; }
     }
     const uniqueSads = new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean));
-    const uniqueTickets = new Set(reports.filter(Boolean).map(r => r.ticketNo).filter(Boolean));
     return {
-      reportsCount: filteredReports.length,
+      reportsCount: filteredReports.length, // number of unique rows after dedupe (includes manuals)
       totalGross: grossCount ? gross : null,
       totalTare: tareCount ? tare : null,
       totalNet: netCount ? net : null,
       totalSads: uniqueSads.size,
-      totalExits: reports.length,
-      totalTickets: uniqueTickets.size,
     };
   }, [filteredReports, reports]);
 
@@ -561,6 +497,7 @@ export default function OutgateReports() {
         'Tare (kg)': r.tare ?? '',
         'Net (kg)': r.net ?? '',
         'Driver': r.driverName ?? '',
+        'Status': (r.ticketNo && ticketStatusMap[r.ticketNo]) ? ticketStatusMap[r.ticketNo] : (r.rawRow?.status ?? ''),
       };
     });
     if (!rows.length) {
@@ -571,26 +508,71 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
+  const handlePrintSad = () => {
+    if (!sadResults || sadResults.length === 0) {
+      toast({ title: 'No SAD results', status: 'info', duration: 2000 });
+      return;
+    }
+
+    const rowsHtml = sadResults.map((t) => {
+      return `<tr>
+        <td>${t.sadNo ?? ''}</td>
+        <td>${t.ticketNo ?? ''}</td>
+        <td>${t.date ? new Date(t.date).toLocaleString() : ''}</td>
+        <td>${t.truck ?? ''}</td>
+        <td style="text-align:right">${t.gross != null ? formatWeight(t.gross) : ''}</td>
+        <td style="text-align:right">${t.tare != null ? formatWeight(t.tare) : ''}</td>
+        <td style="text-align:right">${t.net != null ? formatWeight(t.net) : ''}</td>
+        <td>${t.driver ?? ''}</td>
+      </tr>`;
+    }).join('');
+
+    const html = `
+      <div class="header">
+        <img src="${logoUrl}" class="logo" alt="Company logo" />
+        <div>
+          <div class="company">NICK TC-SCAN (GAMBIA) LTD.</div>
+          <div style="font-size:13px;color:#666;margin-top:4px">Weighbridge SAD Report</div>
+          <div style="font-size:12px;color:#666;margin-top:2px">SAD: ${searchTerm}</div>
+        </div>
+      </div>
+
+      <p style="margin-top:6px;margin-bottom:6px">
+        <strong>Total transactions:</strong> ${sadTotals.transactions} &nbsp; • &nbsp;
+        <strong>Cumulative net:</strong> ${formatWeight(sadTotals.cumulativeNet)} kg
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Driver</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+      </table>
+    `;
+
+    openPrintableWindow(html, `SAD-${searchTerm}`);
+  };
+
   const handleExportSadCsv = () => {
-    if (!filteredSadTickets.length) {
+    if (!sadResults.length) {
       toast({ title: 'No rows to export', status: 'info', duration: 2000 });
       return;
     }
-    const rows = filteredSadTickets.map(t => {
-      const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-      return {
-        'SAD No': t.data.sadNo ?? '',
-        'Ticket No': t.data.ticketNo ?? '',
-        'Date': t.data.date ? new Date(t.data.date).toLocaleString() : '',
-        'Truck': t.data.gnswTruckNo ?? '',
-        'Gross (kg)': gross ?? '',
-        'Tare (kg)': tare ?? '',
-        'Net (kg)': net ?? '',
-        'Driver': t.data.driver ?? '',
-        'Status': t.data.status ?? '',
-      };
-    });
-    exportToCSV(rows, `SAD-${sadMeta.sad || 'report'}.csv`);
+    const rows = sadResults.map(t => ({
+      'SAD No': t.sadNo ?? '',
+      'Ticket No': t.ticketNo ?? '',
+      'Date': t.date ? new Date(t.date).toLocaleString() : '',
+      'Truck': t.truck ?? '',
+      'Gross (kg)': t.gross ?? '',
+      'Tare (kg)': t.tare ?? '',
+      'Net (kg)': t.net ?? '',
+      'Driver': t.driver ?? '',
+    }));
+    exportToCSV(rows, `SAD-${searchTerm || 'report'}.csv`);
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
@@ -599,7 +581,7 @@ export default function OutgateReports() {
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Stack spacing={1}>
           <Text fontSize="2xl" fontWeight="bold">Outgate Reports</Text>
-          <Text color="gray.500">Clean, sortable, and exportable list of all confirmed exits.</Text>
+          <Text color="gray.500">Unique-ticket view (no duplicate ticket numbers). Newest first.</Text>
         </Stack>
 
         <HStack spacing={2}>
@@ -618,155 +600,39 @@ export default function OutgateReports() {
           <StatNumber>{totals.totalSads}</StatNumber>
           <StatHelpText>distinct SAD numbers</StatHelpText>
         </Stat>
+
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Total Exits</StatLabel>
-          <StatNumber>{totals.totalExits}</StatNumber>
-          <StatHelpText>outgate rows</StatHelpText>
+          <StatLabel>Total Transactions</StatLabel>
+          <StatNumber>{totalTransactions}</StatNumber>
+          <StatHelpText>unique ticket numbers (system-wide)</StatHelpText>
         </Stat>
+
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Total Tickets</StatLabel>
-          <StatNumber>{totals.totalTickets}</StatNumber>
-          <StatHelpText>tickets referenced</StatHelpText>
+          <StatLabel>Displayed Unique Tickets</StatLabel>
+          <StatNumber>{displayedUniqueTicketCount}</StatNumber>
+          <StatHelpText>unique ticket numbers in current view</StatHelpText>
         </Stat>
+
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Filtered Results</StatLabel>
-          <StatNumber>{totals.reportsCount}</StatNumber>
-          <StatHelpText>matching current filters</StatHelpText>
+          <StatLabel>Cumulative Net (view)</StatLabel>
+          <StatNumber>{totals.totalNet ? formatWeight(totals.totalNet) + ' kg' : '—'}</StatNumber>
+          <StatHelpText>From current filtered results</StatHelpText>
         </Stat>
       </SimpleGrid>
 
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
-        <Text fontWeight="semibold" mb={2}>SAD Report (Search by SAD No)</Text>
-        <Flex gap={3} align="center" mb={3} flexWrap="wrap">
-          <Input placeholder="Type SAD number (partial allowed)" value={sadQuery} onChange={(e) => setSadQuery(e.target.value)} maxW="360px" />
-          <Button colorScheme="teal" leftIcon={<SearchIcon />} onClick={handleGenerateSad} isLoading={sadLoading}>
-            Generate
-          </Button>
-
-          <Box ml="auto" display="flex" gap={2}>
-            <Button size="sm" variant="ghost" onClick={() => { setSadQuery(''); setSadTickets([]); setSadOriginal([]); setSadMeta({}); }}>
-              Clear
-            </Button>
-          </Box>
-        </Flex>
-
-        {sadOriginal.length > 0 && (
-          <Box mt={2}>
-            <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
-              <Box>
-                <FormLabel>Date From</FormLabel>
-                <Input type="date" value={sadDateFrom} onChange={(e) => setSadDateFrom(e.target.value)} />
-              </Box>
-              <Box>
-                <FormLabel>Date To</FormLabel>
-                <Input type="date" value={sadDateTo} onChange={(e) => setSadDateTo(e.target.value)} />
-              </Box>
-              <Box>
-                <FormLabel>Time From</FormLabel>
-                <Input type="time" value={sadTimeFrom} onChange={(e) => setSadTimeFrom(e.target.value)} />
-              </Box>
-              <Box>
-                <FormLabel>Time To</FormLabel>
-                <Input type="time" value={sadTimeTo} onChange={(e) => setSadTimeTo(e.target.value)} />
-              </Box>
-            </SimpleGrid>
-
-            <Flex mt={3} gap={2} align="center">
-              <Button size="sm" colorScheme="blue" onClick={applySadRange}>Apply Range</Button>
-              <Button size="sm" variant="ghost" onClick={resetSadRange}>Reset Range</Button>
-
-              <Flex gap={4} mt={2} align="center">
-                <Box>
-                  <FormLabel mb={1} fontSize="sm">Filter by Status</FormLabel>
-                  <Select size="sm" value={sadSortStatus} onChange={(e) => setSadSortStatus(e.target.value)}>
-                    <option value="">All</option>
-                    <option value="Pending">Pending</option>
-                    <option value="Exited">Exited</option>
-                  </Select>
-                </Box>
-
-                <Box>
-                  <FormLabel mb={1} fontSize="sm">Sort by Status</FormLabel>
-                  <Select size="sm" value={sadSortOrder} onChange={(e) => setSadSortOrder(e.target.value)}>
-                    <option value="none">None</option>
-                    <option value="pending_first">Pending first</option>
-                    <option value="exited_first">Exited first</option>
-                  </Select>
-                </Box>
-              </Flex>
-
-              <HStack ml="auto" spacing={2}>
-                <Button size="sm" leftIcon={<DownloadIcon />} onClick={handleExportSadCsv}>Export CSV</Button>
-                <Button size="sm" leftIcon={<FaFilePdf />} onClick={handleDownloadSadPdf}>Download PDF</Button>
-                <Button size="sm" leftIcon={<FaShareAlt />} onClick={handleShareSad}>Share</Button>
-                <Button size="sm" leftIcon={<FaEnvelope />} onClick={handleEmailSad}>Email</Button>
-              </HStack>
-            </Flex>
-
-            <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time to narrow results before exporting. You can also filter or sort by Ticket Status.</Text>
-          </Box>
-        )}
-      </Box>
-
-      {filteredSadTickets.length > 0 && (
-        <Box mb={6} bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <Text fontWeight="semibold" mb={3}>SAD Results — {sadMeta.sad} ({filteredSadTickets.length} records)</Text>
-          <Table variant="striped" size="sm">
-            <Thead>
-              <Tr>
-                <Th>SAD No</Th>
-                <Th>Ticket No</Th>
-                <Th>Date & Time</Th>
-                <Th>Truck No</Th>
-                <Th isNumeric>Gross (KG)</Th>
-                <Th isNumeric>Tare (KG)</Th>
-                <Th isNumeric>Net (KG)</Th>
-                <Th>Status</Th>
-                <Th>Actions</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
-              {filteredSadTickets.map((t) => {
-                const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
-                return (
-                  <Tr key={t.ticketId}>
-                    <Td>{t.data.sadNo}</Td>
-                    <Td>{t.data.ticketNo}</Td>
-                    <Td>{t.data.created_at ? new Date(t.data.date).toLocaleString() : 'N/A'}</Td>
-                    <Td>{t.data.gnswTruckNo}</Td>
-                    <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'} KG</Td>
-                    <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'} KG</Td>
-                    <Td isNumeric>{net != null ? Number(net).toLocaleString() : '—'} KG</Td>
-                    <Td>
-                      <Badge colorScheme={(t.data.status === 'Exited') ? 'green' : (t.data.status === 'Pending') ? 'yellow' : 'gray'}>
-                        {t.data.status}
-                      </Badge>
-                    </Td>
-                    <Td>
-                      <HStack spacing={2}>
-                        <Button size="sm" variant="outline" onClick={() => { if (t.data.fileUrl) window.open(t.data.fileUrl, '_blank', 'noopener'); }}>
-                          Open Ticket
-                        </Button>
-                      </HStack>
-                    </Td>
-                  </Tr>
-                );
-              })}
-              <Tr fontWeight="bold" bg="gray.50">
-                <Td colSpan={6}>Cumulative Net</Td>
-                <Td isNumeric>{Number(cumulativeNet || 0).toLocaleString()}</Td>
-                <Td />
-              </Tr>
-            </Tbody>
-          </Table>
-        </Box>
-      )}
-
-      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
-        <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4}>
+        <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
           <Box>
             <FormLabel>Search</FormLabel>
-            <Input placeholder="vehicle, ticket, driver, SAD, container..." value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }} />
+            <Flex>
+              <Input
+                placeholder="vehicle, ticket_no, driver, SAD, container..."
+                value={searchTerm}
+                onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+              />
+              <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { setCurrentPage(1); }} />
+            </Flex>
+            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number (partial allowed) to see SAD totals and deduped transactions below.</Text>
           </Box>
 
           <Box>
@@ -786,24 +652,71 @@ export default function OutgateReports() {
           </Box>
 
           <Box>
-            <FormLabel>Page size / Sort</FormLabel>
+            <FormLabel>Page size</FormLabel>
             <HStack>
               <Select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}>
                 {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
-              </Select>
-              <Select value={sortField} onChange={(e) => { setSortField(e.target.value); }}>
-                <option value="outgateDateTime">Exit Date</option>
-                <option value="ticketNo">Ticket No</option>
-                <option value="vehicleNumber">Truck No</option>
-              </Select>
-              <Select value={sortDirection} onChange={(e) => setSortDirection(e.target.value)}>
-                <option value="desc">Descending</option>
-                <option value="asc">Ascending</option>
               </Select>
             </HStack>
           </Box>
         </SimpleGrid>
       </Box>
+
+      {sadLoading ? (
+        <Flex justify="center" mb={4}><Spinner /></Flex>
+      ) : (sadResults && sadResults.length > 0) ? (
+        <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+          <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
+            <Box>
+              <Text fontWeight="semibold">SAD Search: <Text as="span" fontWeight="bold">{searchTerm}</Text></Text>
+              <Text fontSize="sm" color="gray.600">Deduplicated transactions for this SAD</Text>
+            </Box>
+
+            <HStack spacing={4}>
+              <Box textAlign="right">
+                <Text fontSize="sm" color="gray.500">Transactions</Text>
+                <Text fontWeight="bold">{sadTotals.transactions}</Text>
+              </Box>
+              <Box textAlign="right">
+                <Text fontSize="sm" color="gray.500">Cumulative Net</Text>
+                <Text fontWeight="bold">{formatWeight(sadTotals.cumulativeNet)} kg</Text>
+              </Box>
+
+              <Button size="sm" leftIcon={<FaFilePdf />} onClick={handlePrintSad}>Print PDF</Button>
+              <Button size="sm" onClick={handleExportSadCsv}>Export CSV</Button>
+            </HStack>
+          </Flex>
+
+          <Box overflowX="auto">
+            <Table variant="striped" size="sm">
+              <Thead>
+                <Tr>
+                  <Th>Ticket</Th>
+                  <Th>Date & Time</Th>
+                  <Th>Truck</Th>
+                  <Th isNumeric>Gross</Th>
+                  <Th isNumeric>Tare</Th>
+                  <Th isNumeric>Net</Th>
+                  <Th>Driver</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {sadResults.map((t) => (
+                  <Tr key={t.ticketId}>
+                    <Td>{t.ticketNo ?? '—'}</Td>
+                    <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
+                    <Td>{t.truck ?? '—'}</Td>
+                    <Td isNumeric>{t.gross != null ? formatWeight(t.gross) : '—'}</Td>
+                    <Td isNumeric>{t.tare != null ? formatWeight(t.tare) : '—'}</Td>
+                    <Td isNumeric>{t.net != null ? formatWeight(t.net) : '—'}</Td>
+                    <Td>{t.driver ?? '—'}</Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          </Box>
+        </Box>
+      ) : null}
 
       {loading ? (
         <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
@@ -829,17 +742,18 @@ export default function OutgateReports() {
               <Tbody>
                 {paginatedReports.map((report) => {
                   const { gross, tare, net } = computeWeights(report);
+                  const status = (report.ticketNo && ticketStatusMap[report.ticketNo]) ? ticketStatusMap[report.ticketNo] : (report.rawRow?.status ?? '—');
                   return (
-                    <Tr key={report.id}>
+                    <Tr key={report.ticketNo ?? `manual-${report.id}`}>
                       <Td>{report.ticketNo ?? <Badge>Manual</Badge>}</Td>
                       <Td>{report.sadNo ?? '—'}</Td>
                       <Td>{report.vehicleNumber || '—'}</Td>
                       <Td>{report.outgateDateTime ? new Date(report.outgateDateTime).toLocaleString() : '—'}</Td>
-                      <Td>{report.driver ?? '—'}</Td>
-                      <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'}</Td>
-                      <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'}</Td>
-                      <Td isNumeric>{net != null ? Number(net).toLocaleString() : '—'}</Td>
-                      <Td>{report.Satus ?? '—'}</Td>
+                      <Td>{report.driverName ?? '—'}</Td>
+                      <Td isNumeric>{gross != null ? formatWeight(gross) : '—'}</Td>
+                      <Td isNumeric>{tare != null ? formatWeight(tare) : '—'}</Td>
+                      <Td isNumeric>{net != null ? formatWeight(net) : '—'}</Td>
+                      <Td>{status}</Td>
                       <Td>
                         <HStack spacing={2}>
                           <Button size="sm" colorScheme="blue" onClick={() => openDetails(report)}>Details</Button>
@@ -862,7 +776,7 @@ export default function OutgateReports() {
               <IconButton aria-label="Next" icon={<ChevronRightIcon />} onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))} isDisabled={currentPage === totalPages} size="sm" />
             </Flex>
 
-            <Text color="gray.600" fontSize="sm">Showing {paginatedReports.length} of {filteredReports.length} results</Text>
+            <Text color="gray.600" fontSize="sm">Showing {paginatedReports.length} of {sortedReports.length} unique rows</Text>
           </Flex>
         </>
       )}
