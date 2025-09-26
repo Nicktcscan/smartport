@@ -615,6 +615,9 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
+  // convenience flag: are we actively searching (SAD search)?
+  const isSearching = Boolean((searchTerm || '').trim());
+
   return (
     <Box p={{ base: 4, md: 8 }}>
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
@@ -701,9 +704,10 @@ export default function OutgateReports() {
         </SimpleGrid>
       </Box>
 
+      {/* SAD results table: shown when searching and results exist */}
       {sadLoading ? (
         <Flex justify="center" mb={4}><Spinner /></Flex>
-      ) : (sadFilteredResults && sadFilteredResults.length > 0) ? (
+      ) : (isSearching && sadFilteredResults && sadFilteredResults.length > 0) ? (
         <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
           <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
             <Box>
@@ -757,66 +761,73 @@ export default function OutgateReports() {
         </Box>
       ) : null}
 
-      {loading ? (
-        <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
-      ) : (
+      {/* Main unique-ticket table: only shown when NOT searching.
+          This prevents the table from appearing before a search as requested.
+      */}
+      {!isSearching && (
         <>
-          <Box overflowX="auto" borderRadius="md" border="1px solid" borderColor="gray.200" bg="white">
-            <Table variant="striped" size="sm">
-              <Thead bg="gray.50">
-                <Tr>
-                  <Th>Ticket</Th>
-                  <Th>SAD</Th>
-                  <Th>Truck</Th>
-                  <Th>Exit Date & Time</Th>
-                  <Th>Driver</Th>
-                  <Th isNumeric>Gross (KG)</Th>
-                  <Th isNumeric>Tare (KG)</Th>
-                  <Th isNumeric>Net (KG)</Th>
-                  <Th>Status</Th>
-                  <Th>Actions</Th>
-                </Tr>
-              </Thead>
-
-              <Tbody>
-                {paginatedReports.map((report) => {
-                  const { gross, tare, net } = computeWeights(report);
-                  const status = (report.ticketNo && ticketStatusMap[report.ticketNo]) ? ticketStatusMap[report.ticketNo] : (report.rawRow?.status ?? '—');
-                  return (
-                    <Tr key={report.ticketNo ?? `manual-${report.id}`}>
-                      <Td>{report.ticketNo ?? <Badge>Manual</Badge>}</Td>
-                      <Td>{report.sadNo ?? '—'}</Td>
-                      <Td>{report.vehicleNumber || '—'}</Td>
-                      <Td>{report.outgateDateTime ? new Date(report.outgateDateTime).toLocaleString() : '—'}</Td>
-                      <Td>{report.driverName ?? '—'}</Td>
-                      <Td isNumeric>{gross != null ? formatWeight(gross) : '—'}</Td>
-                      <Td isNumeric>{tare != null ? formatWeight(tare) : '—'}</Td>
-                      <Td isNumeric>{net != null ? formatWeight(net) : '—'}</Td>
-                      <Td>{status}</Td>
-                      <Td>
-                        <HStack spacing={2}>
-                          <Button size="sm" colorScheme="blue" onClick={() => openDetails(report)}>Details</Button>
-                          {report.fileUrl && (
-                            <IconButton aria-label="Open attachment" icon={<FaFilePdf />} size="sm" variant="ghost" onClick={() => window.open(report.fileUrl, '_blank', 'noopener')} />
-                          )}
-                        </HStack>
-                      </Td>
+          {loading ? (
+            <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
+          ) : (
+            <>
+              <Box overflowX="auto" borderRadius="md" border="1px solid" borderColor="gray.200" bg="white">
+                <Table variant="striped" size="sm">
+                  <Thead bg="gray.50">
+                    <Tr>
+                      <Th>Ticket</Th>
+                      <Th>SAD</Th>
+                      <Th>Truck</Th>
+                      <Th>Exit Date & Time</Th>
+                      <Th>Driver</Th>
+                      <Th isNumeric>Gross (KG)</Th>
+                      <Th isNumeric>Tare (KG)</Th>
+                      <Th isNumeric>Net (KG)</Th>
+                      <Th>Status</Th>
+                      <Th>Actions</Th>
                     </Tr>
-                  );
-                })}
-              </Tbody>
-            </Table>
-          </Box>
+                  </Thead>
 
-          <Flex justify="space-between" align="center" mt={4} gap={4} flexWrap="wrap">
-            <Flex gap={2} align="center">
-              <IconButton aria-label="Previous" icon={<ChevronLeftIcon />} onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={currentPage === 1} size="sm" />
-              <Text>Page {currentPage} of {totalPages}</Text>
-              <IconButton aria-label="Next" icon={<ChevronRightIcon />} onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))} isDisabled={currentPage === totalPages} size="sm" />
-            </Flex>
+                  <Tbody>
+                    {paginatedReports.map((report) => {
+                      const { gross, tare, net } = computeWeights(report);
+                      const status = (report.ticketNo && ticketStatusMap[report.ticketNo]) ? ticketStatusMap[report.ticketNo] : (report.rawRow?.status ?? '—');
+                      return (
+                        <Tr key={report.ticketNo ?? `manual-${report.id}`}>
+                          <Td>{report.ticketNo ?? <Badge>Manual</Badge>}</Td>
+                          <Td>{report.sadNo ?? '—'}</Td>
+                          <Td>{report.vehicleNumber || '—'}</Td>
+                          <Td>{report.outgateDateTime ? new Date(report.outgateDateTime).toLocaleString() : '—'}</Td>
+                          <Td>{report.driverName ?? '—'}</Td>
+                          <Td isNumeric>{gross != null ? formatWeight(gross) : '—'}</Td>
+                          <Td isNumeric>{tare != null ? formatWeight(tare) : '—'}</Td>
+                          <Td isNumeric>{net != null ? formatWeight(net) : '—'}</Td>
+                          <Td>{status}</Td>
+                          <Td>
+                            <HStack spacing={2}>
+                              <Button size="sm" colorScheme="blue" onClick={() => openDetails(report)}>Details</Button>
+                              {report.fileUrl && (
+                                <IconButton aria-label="Open attachment" icon={<FaFilePdf />} size="sm" variant="ghost" onClick={() => window.open(report.fileUrl, '_blank', 'noopener')} />
+                              )}
+                            </HStack>
+                          </Td>
+                        </Tr>
+                      );
+                    })}
+                  </Tbody>
+                </Table>
+              </Box>
 
-            <Text color="gray.600" fontSize="sm">Showing {paginatedReports.length} of {sortedReports.length} unique rows</Text>
-          </Flex>
+              <Flex justify="space-between" align="center" mt={4} gap={4} flexWrap="wrap">
+                <Flex gap={2} align="center">
+                  <IconButton aria-label="Previous" icon={<ChevronLeftIcon />} onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={currentPage === 1} size="sm" />
+                  <Text>Page {currentPage} of {totalPages}</Text>
+                  <IconButton aria-label="Next" icon={<ChevronRightIcon />} onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))} isDisabled={currentPage === totalPages} size="sm" />
+                </Flex>
+
+                <Text color="gray.600" fontSize="sm">Showing {paginatedReports.length} of {sortedReports.length} unique rows</Text>
+              </Flex>
+            </>
+          )}
         </>
       )}
 
