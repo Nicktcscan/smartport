@@ -620,7 +620,7 @@ export default function OutgateReports() {
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Stack spacing={1}>
           <Text fontSize="2xl" fontWeight="bold">Outgate Reports</Text>
-          <Text color="gray.500">Unique-ticket view (no duplicate ticket numbers). Newest first.</Text>
+          <Text color="gray.500">Unique-ticket view. Newest first.</Text>
         </Stack>
 
         <HStack spacing={2}>
@@ -637,13 +637,13 @@ export default function OutgateReports() {
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{totals.totalSads}</StatNumber>
-          <StatHelpText>distinct SAD numbers</StatHelpText>
+          <StatHelpText>Distinct SAD numbers</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>unique ticket numbers (system-wide)</StatHelpText>
+          <StatHelpText>unique ticket numbers</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
@@ -671,7 +671,7 @@ export default function OutgateReports() {
               />
               <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { setCurrentPage(1); }} />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number (partial allowed) to see SAD totals and deduped transactions below.</Text>
+            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see total transactions below.</Text>
           </Box>
 
           <Box>
@@ -708,7 +708,7 @@ export default function OutgateReports() {
           <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
             <Box>
               <Text fontWeight="semibold">SAD Search: <Text as="span" fontWeight="bold">{searchTerm}</Text></Text>
-              <Text fontSize="sm" color="gray.600">Deduplicated transactions for this SAD (respecting date/time filters)</Text>
+              <Text fontSize="sm" color="gray.600">Transactions for this SAD (respecting date/time filters)</Text>
             </Box>
 
             <HStack spacing={4}>
