@@ -184,7 +184,6 @@ export default function OutgateReports() {
 
   // SAD search results (deduped)
   const [sadResults, setSadResults] = useState([]);
-  const [sadTotals, setSadTotals] = useState({ transactions: 0, cumulativeNet: 0 });
   const [sadLoading, setSadLoading] = useState(false);
   const sadDebounceRef = useRef(null);
 
@@ -286,7 +285,9 @@ export default function OutgateReports() {
     return hh * 60 + mm;
   };
 
-  /* SAD search: dedupe by ticket_no, newest-first, compute cumulative net */
+  /* SAD search: dedupe by ticket_no, newest-first, compute cumulative net
+     (this builds `sadResults` - deduplicated and newest-first by ticket date)
+  */
   useEffect(() => {
     if (sadDebounceRef.current) {
       clearTimeout(sadDebounceRef.current);
@@ -296,7 +297,6 @@ export default function OutgateReports() {
     const q = (searchTerm || '').trim();
     if (!q) {
       setSadResults([]);
-      setSadTotals({ transactions: 0, cumulativeNet: 0 });
       return;
     }
 
@@ -312,7 +312,6 @@ export default function OutgateReports() {
         if (error) {
           console.warn('SAD lookup error', error);
           setSadResults([]);
-          setSadTotals({ transactions: 0, cumulativeNet: 0 });
           setSadLoading(false);
           return;
         }
@@ -333,8 +332,7 @@ export default function OutgateReports() {
 
         const deduped = Array.from(dedupeMap.values());
 
-        // Map to UI-friendly shape and compute cumulative net
-        let cumulativeNet = 0;
+        // Map to UI-friendly shape (net/gross/tare computed). Keep newest-first order.
         const mapped = deduped
           .sort((a, b) => {
             const aT = new Date(a.date ?? a.submitted_at ?? a.created_at ?? 0).getTime();
@@ -347,8 +345,6 @@ export default function OutgateReports() {
               tare: t.tare,
               net: t.net,
             });
-            const netVal = computed.net ?? 0;
-            cumulativeNet += netVal;
             return {
               ticketId: t.ticket_id ?? t.id ?? t.ticket_no ?? `${Math.random()}`,
               ticketNo: t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null),
@@ -364,11 +360,9 @@ export default function OutgateReports() {
           });
 
         setSadResults(mapped);
-        setSadTotals({ transactions: mapped.length, cumulativeNet });
       } catch (err) {
         console.error('SAD search failed', err);
         setSadResults([]);
-        setSadTotals({ transactions: 0, cumulativeNet: 0 });
       } finally {
         setSadLoading(false);
       }
@@ -435,6 +429,51 @@ export default function OutgateReports() {
     });
     return arr;
   }, [filteredReports]);
+
+  /* -----------------------
+     SAD filtered results that RESPECT date/time filters
+     - sadResults is deduped by ticket_no already, but it was computed without date/time filtering.
+     - sadFilteredResults applies the date/time filters (dateFrom/dateTo/timeFrom/timeTo)
+       so the SAD totals and table respond to those inputs.
+  ----------------------- */
+  const sadFilteredResults = useMemo(() => {
+    if (!sadResults || sadResults.length === 0) return [];
+
+    const df = dateFrom ? new Date(dateFrom) : null;
+    const dtRaw = dateTo ? new Date(dateTo) : null;
+    const dt = dtRaw ? new Date(dtRaw.setHours(23, 59, 59, 999)) : null;
+    const tFrom = parseTimeToMinutes(timeFrom);
+    const tTo = parseTimeToMinutes(timeTo);
+
+    return sadResults.filter((t) => {
+      if (!t.date) return false;
+      const d = new Date(t.date);
+      if (Number.isNaN(d.getTime())) return false;
+
+      if (df && d < df) return false;
+      if (dt && d > dt) return false;
+
+      if (tFrom !== null || tTo !== null) {
+        const mins = d.getHours() * 60 + d.getMinutes();
+        const from = tFrom != null ? tFrom : 0;
+        const to = tTo != null ? tTo : 24 * 60 - 1;
+        if (mins < from || mins > to) return false;
+      }
+
+      return true;
+    });
+  }, [sadResults, dateFrom, dateTo, timeFrom, timeTo]);
+
+  const sadTotalsMemo = useMemo(() => {
+    if (!sadFilteredResults || sadFilteredResults.length === 0) return { transactions: 0, cumulativeNet: 0 };
+    let cumulativeNet = 0;
+    for (const t of sadFilteredResults) {
+      // t.net should already be numeric from mapping, but guard anyway
+      const { net } = computeWeights({ gross: t.gross, tare: t.tare, net: t.net });
+      cumulativeNet += (net || 0);
+    }
+    return { transactions: sadFilteredResults.length, cumulativeNet };
+  }, [sadFilteredResults]);
 
   const displayedUniqueTicketCount = useMemo(() => {
     // Count unique ticketNo values present in sortedReports (excluding null/empty)
@@ -509,12 +548,12 @@ export default function OutgateReports() {
   };
 
   const handlePrintSad = () => {
-    if (!sadResults || sadResults.length === 0) {
+    if (!sadFilteredResults || sadFilteredResults.length === 0) {
       toast({ title: 'No SAD results', status: 'info', duration: 2000 });
       return;
     }
 
-    const rowsHtml = sadResults.map((t) => {
+    const rowsHtml = sadFilteredResults.map((t) => {
       return `<tr>
         <td>${t.sadNo ?? ''}</td>
         <td>${t.ticketNo ?? ''}</td>
@@ -538,8 +577,8 @@ export default function OutgateReports() {
       </div>
 
       <p style="margin-top:6px;margin-bottom:6px">
-        <strong>Total transactions:</strong> ${sadTotals.transactions} &nbsp; • &nbsp;
-        <strong>Cumulative net:</strong> ${formatWeight(sadTotals.cumulativeNet)} kg
+        <strong>Total transactions:</strong> ${sadTotalsMemo.transactions} &nbsp; • &nbsp;
+        <strong>Cumulative net:</strong> ${formatWeight(sadTotalsMemo.cumulativeNet)} kg
       </p>
 
       <table>
@@ -558,11 +597,11 @@ export default function OutgateReports() {
   };
 
   const handleExportSadCsv = () => {
-    if (!sadResults.length) {
+    if (!sadFilteredResults || sadFilteredResults.length === 0) {
       toast({ title: 'No rows to export', status: 'info', duration: 2000 });
       return;
     }
-    const rows = sadResults.map(t => ({
+    const rows = sadFilteredResults.map(t => ({
       'SAD No': t.sadNo ?? '',
       'Ticket No': t.ticketNo ?? '',
       'Date': t.date ? new Date(t.date).toLocaleString() : '',
@@ -664,22 +703,22 @@ export default function OutgateReports() {
 
       {sadLoading ? (
         <Flex justify="center" mb={4}><Spinner /></Flex>
-      ) : (sadResults && sadResults.length > 0) ? (
+      ) : (sadFilteredResults && sadFilteredResults.length > 0) ? (
         <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
           <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
             <Box>
               <Text fontWeight="semibold">SAD Search: <Text as="span" fontWeight="bold">{searchTerm}</Text></Text>
-              <Text fontSize="sm" color="gray.600">Deduplicated transactions for this SAD</Text>
+              <Text fontSize="sm" color="gray.600">Deduplicated transactions for this SAD (respecting date/time filters)</Text>
             </Box>
 
             <HStack spacing={4}>
               <Box textAlign="right">
                 <Text fontSize="sm" color="gray.500">Transactions</Text>
-                <Text fontWeight="bold">{sadTotals.transactions}</Text>
+                <Text fontWeight="bold">{sadTotalsMemo.transactions}</Text>
               </Box>
               <Box textAlign="right">
                 <Text fontSize="sm" color="gray.500">Cumulative Net</Text>
-                <Text fontWeight="bold">{formatWeight(sadTotals.cumulativeNet)} kg</Text>
+                <Text fontWeight="bold">{formatWeight(sadTotalsMemo.cumulativeNet)} kg</Text>
               </Box>
 
               <Button size="sm" leftIcon={<FaFilePdf />} onClick={handlePrintSad}>Print PDF</Button>
@@ -701,7 +740,7 @@ export default function OutgateReports() {
                 </Tr>
               </Thead>
               <Tbody>
-                {sadResults.map((t) => (
+                {sadFilteredResults.map((t) => (
                   <Tr key={t.ticketId}>
                     <Td>{t.ticketNo ?? '—'}</Td>
                     <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
