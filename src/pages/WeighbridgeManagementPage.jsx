@@ -349,19 +349,34 @@ function handleExtract(rawText) {
     }
   }
 
-  // 2) GNSW Truck No — prefer explicit label, else plate-like pattern
-  const gnswLine =
-    extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
-  if (gnswLine) {
+  // 2) GNSW Truck No / Vehicle Number — much more label and pattern tolerant
+  // Try labeled variants first
+  const vehicleLabelLine =
+    extractLabelLine(/\b(GNSW\s*Truck\s*No|Truck\s*No|Vehicle\s*No|Vehicle|Plate|Reg(?:istration)?\s*No|Reg No)\b/i);
+
+  if (vehicleLabelLine) {
+    // try several capturing patterns
     const m =
-      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i) ||
-      gnswLine.match(/Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i);
-    if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
-  } else {
-    // fallback: plate-like pattern (letters+digits). Avoid picking pure numeric tokens.
-    const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
-    if (plateMatch && plateMatch[1]) {
-      found.gnsw_truck_no = plateMatch[1].toUpperCase();
+      vehicleLabelLine.match(/(?:GNSW\s*Truck\s*No|Truck\s*No|Vehicle\s*No|Reg(?:istration)?\s*No|Reg\s*No)[:\-]?\s*([A-Z0-9\-\s\/]{3,20})/i) ||
+      vehicleLabelLine.match(/\b([A-Z]{1,4}\s?-?\s?\d{1,4}[A-Z]{0,2}(?:[-\/]\d{1,4})?)\b/i);
+    if (m && m[1]) {
+      const plate = String(m[1]).replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/gi, '').toUpperCase();
+      // ensure it's not purely numeric
+      if (!/^\d+$/.test(plate) && plate.length >= 3) {
+        found.gnsw_truck_no = plate;
+      }
+    }
+  }
+
+  // If not found labelled, fallback to strong plate-like regex across the full text
+  if (!found.gnsw_truck_no) {
+    // prefer patterns with letters and digits (avoid purely numeric tokens)
+    const plateFallback = full.match(/\b([A-Z]{1,3}[ -]?\d{1,4}[A-Z]{0,2}(?:[-\/]\d{1,4})?)\b/i);
+    if (plateFallback && plateFallback[1]) {
+      const candidate = String(plateFallback[1]).replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/gi, '').toUpperCase();
+      if (!/^\d+$/.test(candidate) && candidate.length >= 3) {
+        found.gnsw_truck_no = candidate;
+      }
     }
   }
 
@@ -382,9 +397,8 @@ function handleExtract(rawText) {
     const m = scaleLine.match(/Scale\s*Name\s*[:\-]?\s*([A-Z0-9\-_]+)/i) || scaleLine.match(/Scale\s*[:\-]?\s*([A-Z0-9\-_]+)/i);
     if (m && m[1]) {
       const cand = String(m[1]).toUpperCase();
-      // ignore generic "WEIGHT" if possible — prefer WBRIDGE if present later
       if (!/WEIGHT/i.test(cand)) found.scale_name = cand;
-      else found.scale_name = cand; // keep for now, may be overridden by WBRIDGE below
+      else found.scale_name = cand;
     }
   }
   if (!found.scale_name || /WEIGHT/i.test(found.scale_name)) {
@@ -399,7 +413,6 @@ function handleExtract(rawText) {
   const tareLine = extractLabelLine(/\bTare\b/i);
   if (tareLine) found.tare = parseWeightFromLine(tareLine);
   else {
-    // sometimes "Tare: (PT) 20740 kg" sits on same line as consignee — check full
     const mt = full.match(/Tare\s*[:\-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
     if (mt && mt[1]) {
       const num = Number(mt[1]);
@@ -417,14 +430,26 @@ function handleExtract(rawText) {
     }
   }
 
-  // 6) SAD No
-  const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
-  if (sadLine) {
-    const m = sadLine.match(/SAD\s*No\.?\s*[:\-]?\s*(\d{3,6})/i) || sadLine.match(/SAD\s*[:\-]?\s*(\d{3,6})/i);
-    if (m && m[1]) found.sad_no = m[1];
-  } else {
-    const sadFb = full.match(/\bSAD\s*No\.?\s*[:\-]?\s*(\d{3,6})/i) || full.match(/\bSAD\s*[:\-]?\s*(\d{3,6})/i);
-    if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
+  // 6) SAD No — relaxed to capture 1-6 digits and many variants
+  // Look labeled lines first then fallback to inline matches
+  let sadMatch = null;
+  for (const l of lines) {
+    // try common label variants: "SAD No", "SAD", "SAD#","SAD-No", "SADNo"
+    const m = l.match(/\bSAD(?:\s*No)?\s*[:#\-]?\s*(\d{1,6})\b/i) ||
+              l.match(/\bSADNo\s*[:\-]?\s*(\d{1,6})\b/i) ||
+              l.match(/\bSAD[#\s\-:]{0,2}(\d{1,6})\b/i);
+    if (m && m[1]) {
+      sadMatch = m[1];
+      break;
+    }
+  }
+  if (!sadMatch) {
+    // fallback: search full text for "SAD" followed by digits anywhere
+    const m2 = full.match(/\bSAD(?:\s*No)?\s*[:#\-]?\s*(\d{1,6})\b/i);
+    if (m2 && m2[1]) sadMatch = m2[1];
+  }
+  if (sadMatch) {
+    found.sad_no = String(Number(sadMatch)); // normalize (strip leading zeros)
   }
 
   // 7) Container / Consignee / Material
@@ -433,7 +458,6 @@ function handleExtract(rawText) {
     const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]+)/i);
     if (m && m[1]) found.container_no = String(m[1]).trim();
   } else {
-    // fallback: look for known tokens like BULK on its own line
     const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
     if (bulkLine) found.container_no = "BULK";
   }
@@ -465,11 +489,10 @@ function handleExtract(rawText) {
   );
   if (dateMatch && dateMatch[1]) found.date = dateMatch[1].trim();
 
-  // 10) Operator — prefer label; if label present but no clean name afterwards, fall back to literal "Operator"
+  // 10) Operator — prefer label; sanitize
   const opLine = extractLabelLine(/\bOperator\b/i);
   if (opLine) {
     let op = opLine.replace(/Operator\s*[:\-]?\s*/i, "").trim();
-    // strip timestamps / WB / weight tokens and boolean flags
     op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
     op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
     op = op.replace(/\bWBRIDGE\d+\b/gi, "");
@@ -480,18 +503,16 @@ function handleExtract(rawText) {
       const opMatch = op.match(/[A-Za-z][A-Za-z\.\s'\-]{0,40}/);
       found.operator = opMatch ? opMatch[0].trim() : op;
     } else {
-      // label existed but no clear name — keep the label as placeholder
       found.operator = "Operator";
     }
   }
 
   // --- Post-processing heuristics ---
 
-  // If we have tare AND net, compute gross = tare + net (this is the most reliable)
+  // If we have tare AND net, compute gross = tare + net
   if (Number.isFinite(found.tare) && Number.isFinite(found.net)) {
     found.gross = Number(found.tare) + Number(found.net);
   } else {
-    // If gross is parsed but extremely large or clearly concatenated (> 200,000), discard it
     if (found.gross && Number(found.gross) > 200000) {
       found.gross = null;
     }
@@ -507,21 +528,10 @@ function handleExtract(rawText) {
       (found.wb_id || "").replace(/^WB/i, ""),
     ].filter(Boolean));
 
-    // Refined fallback:
-    // - Exclude candidates that are equal to known fields (SAD/weights/WB)
-    // - Exclude candidates that appear inside a "Print Date" / "Date Time" line
-    // - Exclude candidates that occur inside the parsed date substring (if present)
-    // - Exclude time-like fragments (hhmm or hhmmss)
-    // - Prefer exactly 5-digit candidates (typical ticket numbers)
     const candidate = found._ticket_candidates.find((n) => {
-      // Exclude SAD/weights/WB
       if (exclude.has(n)) return false;
-
-      // Exclude if number appears inside a Print Date / Date Time line
       const badLine = lines.find((l) => /Print\s*Date|Date\s*Time/i.test(l) && l.includes(n));
       if (badLine) return false;
-
-      // Exclude numbers that are clearly part of the parsed date substring
       if (found.date) {
         const dateIdx = full.indexOf(found.date);
         if (dateIdx >= 0) {
@@ -532,13 +542,9 @@ function handleExtract(rawText) {
           }
         }
       }
-
-      // Exclude numbers that look like time-only values (hhmm or hhmmss)
       if (/^(?:[01]?\d|2[0-3])[0-5]\d(?:[0-5]\d)?$/.test(n)) return false;
-
-      // Prefer exactly 5-digit ticket numbers — reject others
-      if (!/^\d{5}$/.test(n)) return false;
-
+      // prefer 4-6 digits but accept 5-digit strongly
+      if (!/^\d{4,6}$/.test(n)) return false;
       return true;
     });
 
@@ -549,7 +555,7 @@ function handleExtract(rawText) {
   // Normalize: ticket numeric-only
   if (found.ticket_no) found.ticket_no = onlyDigits(found.ticket_no);
 
-  // Normalize scale_name uppercase & avoid noisy "WEIGHT" if we found a valid WBRIDGE
+  // Normalize scale_name uppercase
   if (found.scale_name) {
     const s = String(found.scale_name).toUpperCase();
     if (/WEIGHT/i.test(s) && full.match(/\b(WBRIDGE\d+)\b/i)) {
@@ -561,7 +567,7 @@ function handleExtract(rawText) {
     }
   }
 
-  // Trim and remove stray leading characters from driver
+  // Trim driver
   if (found.driver) {
     found.driver = String(found.driver).replace(/^[-:\s]+/, "").trim();
     if (found.driver === "") found.driver = null;
@@ -577,7 +583,7 @@ function handleExtract(rawText) {
     }
   });
 
-  // Build ordered pairs for UI
+  // Build ordered pairs for UI (include vehicle / gnsw_truck_no)
   const orderedKeys = [
     "ticket_no",
     "gnsw_truck_no",
@@ -603,13 +609,33 @@ function handleExtract(rawText) {
   // Set state
   setExtractedPairs(pairs);
 
-  // Merge into formData only if empty
+  // Merge into formData only if empty. Map vehicle to gnsw_truck_no.
   const nextForm = { ...formData };
   pairs.forEach(({ key, value }) => {
     const existing = nextForm[key];
     const isEmpty = existing === null || existing === undefined || existing === "" || existing === false;
     if (isEmpty) nextForm[key] = value;
   });
+
+  // Some normalization for vehicle: if vehicle-like found under other keys, copy to gnsw_truck_no
+  if (!nextForm.gnsw_truck_no) {
+    // prefer found.gnsw_truck_no; else attempt to use vehicle-like pair
+    if (found.gnsw_truck_no) nextForm.gnsw_truck_no = found.gnsw_truck_no;
+    else {
+      // look for pair with key 'vehicle' or 'vehicle_no' in extractedPairs
+      const vehPair = pairs.find(p => /vehicle|truck|plate|reg/i.test(p.key));
+      if (vehPair && vehPair.value) {
+        let v = String(vehPair.value).replace(/\s+/g, '').replace(/[^A-Z0-9\-\/]/gi, '').toUpperCase();
+        if (v && !/^\d+$/.test(v)) nextForm.gnsw_truck_no = v;
+      }
+    }
+  }
+
+  // Ensure SAD is string numeric
+  if (nextForm.sad_no && typeof nextForm.sad_no !== 'string') {
+    nextForm.sad_no = String(nextForm.sad_no);
+  }
+
   setFormData(nextForm);
 
   toast({
@@ -1080,7 +1106,7 @@ const handleCancelSubmit = () => {
 };
 
 
-  // ---------------------- UI (unchanged) ----------------------
+// ---------------------- UI (unchanged) ----------------------
   // ----------------- UI -----------------
   return (
     <Box p={6} maxWidth="1200px" mx="auto">
