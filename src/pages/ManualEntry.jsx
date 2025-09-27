@@ -935,7 +935,7 @@ export default function ManualEntry() {
     setEditRowData((p) => ({ ...p, [field]: value }));
   };
 
-  // updates DB and audit_logs (if ticket is not temporary); ensures persistence before updating UI
+  // updates both DB and audit_logs (if ticket is not temporary)
   const saveRowEdit = async (ticket) => {
     if (!isAdmin) {
       toast({ title: 'Permission denied', description: 'Only admins can save edits', status: 'warning', duration: 2500 });
@@ -971,42 +971,44 @@ export default function ManualEntry() {
       net: formatNumber(String(n)),
     };
 
-    // If ticket is temporary (optimistic), just update local and return (no DB)
+    // update local UI immediately
+    setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
+
+    // if ticket is temporary (optimistic), just keep local
     if (String(ticket.ticketId || '').startsWith('tmp-')) {
-      setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
       setEditingRowId(null);
       setEditRowData({});
       toast({ title: 'Saved (local only)', status: 'success', duration: 2500 });
       return;
     }
 
-    // persist to DB first
+    // attempt DB update
     try {
       const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
       if (!ticketIdValue) throw new Error('Missing ticket identifier');
 
+      // include sad_no and truck_on_wb to ensure SAD edits persist
       const payload = {
-        gnsw_truck_no: afterData.truckOnWb || null,
+        gross: g !== null ? g : null,
+        tare: t !== null ? t : null,
+        net: n !== null ? n : null,
         consignee: afterData.consignee || null,
         container_no: afterData.containerNo || null,
         driver: afterData.driver || null,
         operator: afterData.operator || null,
-        gross: g !== null ? g : null,
-        tare: t !== null ? t : null,
-        net: n !== null ? n : null,
+        // important mappings to persist SAD and truck
+        sad_no: afterData.sadNo || null,
+        truck_on_wb: afterData.truckOnWb || null,
+        // also write gnsw_truck_no if that is your canonical truck column:
+        gnsw_truck_no: afterData.truckOnWb || null,
       };
 
-      // Try update by ticket_id first (in case ticketId is actual ticket_id)
-      let res = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue).select();
-      if (res.error) {
-        // fallback: try update by ticket_no
-        const fb = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue).select();
-        if (fb.error) throw fb.error;
-        // success fallback
-      } else if (Array.isArray(res.data) && res.data.length === 0) {
-        // no rows updated by ticket_id -> fallback to ticket_no
-        const fb = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue).select();
-        if (fb.error) throw fb.error;
+      // try update by ticket_id, fallback to ticket_no
+      let { error } = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue);
+      if (error) {
+        // fallback
+        const fallback = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue);
+        if (fallback.error) throw fallback.error;
       }
 
       // insert audit log
@@ -1025,14 +1027,12 @@ export default function ManualEntry() {
         console.debug('Audit log insertion failed', auditErr);
       }
 
-      // update local UI after successful DB update
-      setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
+      toast({ title: 'Saved', description: `Ticket ${ticketIdValue} updated`, status: 'success', duration: 2500 });
       setEditingRowId(null);
       setEditRowData({});
-      toast({ title: 'Saved', description: `Ticket ${ticketIdValue} updated`, status: 'success', duration: 2500 });
     } catch (err) {
       console.error('Update failed', err);
-      // roll back local if DB fails (reset to before)
+      // roll back local if DB fails
       setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...before } } : r)));
       toast({ title: 'Update failed', description: err?.message || 'Could not update ticket', status: 'error', duration: 5000 });
     }
@@ -1091,70 +1091,67 @@ export default function ManualEntry() {
       net: formatNumber(String(n)),
     };
 
-    // If temporary ticket, only update local
-    if (String(ticket.ticketId || '').startsWith('tmp-')) {
-      setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
-      setViewTicket((v) => ({ ...v, data: afterData }));
-      setViewIsEditing(false);
-      setViewEditData({});
-      toast({ title: 'Saved (local only)', status: 'success', duration: 2500 });
-      return;
-    }
+    // update local UI
+    setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
+    setViewTicket((v) => ({ ...v, data: afterData }));
 
-    try {
-      const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
-      if (!ticketIdValue) throw new Error('Missing ticket identifier');
-
-      const payload = {
-        gnsw_truck_no: afterData.truckOnWb || null,
-        consignee: afterData.consignee || null,
-        container_no: afterData.containerNo || null,
-        driver: afterData.driver || null,
-        operator: afterData.operator || null,
-        gross: g !== null ? g : null,
-        tare: t !== null ? t : null,
-        net: n !== null ? n : null,
-      };
-
-      // Try update by ticket_id first
-      let res = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue).select();
-      if (res.error) {
-        const fb = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue).select();
-        if (fb.error) throw fb.error;
-      } else if (Array.isArray(res.data) && res.data.length === 0) {
-        const fb = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue).select();
-        if (fb.error) throw fb.error;
-      }
-
-      // audit log
+    // persist to DB if not temp
+    if (!String(ticket.ticketId || '').startsWith('tmp-')) {
       try {
-        const auditEntry = {
-          action: 'update',
-          ticket_id: ticketIdValue,
-          ticket_no: ticket.data?.ticketNo ?? null,
-          user_id: operatorId || null,
-          username: operatorName || null,
-          details: JSON.stringify({ before: before || null, after: afterData || null }),
-          created_at: new Date().toISOString(),
-        };
-        await supabase.from('audit_logs').insert([auditEntry]);
-      } catch (auditErr) {
-        console.debug('Audit log insertion failed', auditErr);
-      }
+        const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
+        if (!ticketIdValue) throw new Error('Missing ticket identifier');
 
-      // update local UI
-      setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
-      setViewTicket((v) => ({ ...v, data: afterData }));
-      setViewIsEditing(false);
-      setViewEditData({});
-      toast({ title: 'Saved', status: 'success', duration: 2500 });
-    } catch (err) {
-      console.error('Save view edit failed', err);
-      toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error', duration: 5000 });
-      // rollback local change
-      setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...before } } : r)));
-      setViewTicket((v) => ({ ...v, data: before }));
+        const payload = {
+          gross: g !== null ? g : null,
+          tare: t !== null ? t : null,
+          net: n !== null ? n : null,
+          consignee: afterData.consignee || null,
+          container_no: afterData.containerNo || null,
+          driver: afterData.driver || null,
+          operator: afterData.operator || null,
+          // ensure SAD & truck are persisted
+          sad_no: afterData.sadNo || null,
+          truck_on_wb: afterData.truckOnWb || null,
+          gnsw_truck_no: afterData.truckOnWb || null,
+        };
+
+        let { error } = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue);
+        if (error) {
+          // fallback
+          const fallback = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue);
+          if (fallback.error) throw fallback.error;
+        }
+
+        // audit log
+        try {
+          const auditEntry = {
+            action: 'update',
+            ticket_id: ticketIdValue,
+            ticket_no: ticket.data?.ticketNo ?? null,
+            user_id: operatorId || null,
+            username: operatorName || null,
+            details: JSON.stringify({ before: before || null, after: afterData || null }),
+            created_at: new Date().toISOString(),
+          };
+          await supabase.from('audit_logs').insert([auditEntry]);
+        } catch (auditErr) {
+          console.debug('Audit log insertion failed', auditErr);
+        }
+      } catch (err) {
+        console.error('Save view edit failed', err);
+        toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error', duration: 5000 });
+        // roll back local change (optional): revert to `before`
+        setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...before } } : r)));
+        setViewTicket((v) => ({ ...v, data: before }));
+        setViewIsEditing(false);
+        setViewEditData({});
+        return;
+      }
     }
+
+    setViewIsEditing(false);
+    setViewEditData({});
+    toast({ title: 'Saved', status: 'success', duration: 2500 });
   };
 
   // utility to render out-of-range badge
@@ -1576,7 +1573,7 @@ export default function ManualEntry() {
               </Tbody>
             </Table>
           )}
-          {/* Pagination and lower UI remain unchanged */}
+{/* Pagination and lower UI remain unchanged */}
           {/* Pagination (condensed) */}
           <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
             <Flex gap={2} align="center" flexWrap="wrap">
