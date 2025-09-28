@@ -1011,7 +1011,7 @@ export default function ManualEntry() {
         if (fallback.error) throw fallback.error;
       }
 
-      // insert audit log
+      // audit log
       try {
         const auditEntry = {
           action: 'update',
@@ -1026,6 +1026,55 @@ export default function ManualEntry() {
       } catch (auditErr) {
         console.debug('Audit log insertion failed', auditErr);
       }
+
+      // --- NEW: propagate changes to outgate table ---
+      try {
+        const oldTicketNo = ticket.data?.ticketNo ?? null;
+        const newTicketNo = afterData?.ticketNo ?? oldTicketNo;
+        const outPayload = {
+          vehicle_number: afterData.truckOnWb || null,
+          container_id: afterData.containerNo || null,
+          sad_no: afterData.sadNo || null,
+          gross: g !== null ? g : null,
+          tare: t !== null ? t : null,
+          net: n !== null ? n : null,
+          driver: afterData.driver || null,
+          ticket_no: newTicketNo || null,
+        };
+
+        // Try update by old ticket_no
+        let { data: outData, error: outErr } = await supabase.from('outgate').update(outPayload).eq('ticket_no', oldTicketNo);
+        if (outErr) {
+          console.warn('Failed to update outgate by old ticket_no', outErr);
+        } else if (!outData || outData.length === 0) {
+          // Try update by ticket_id
+          const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', ticketIdValue);
+          if (byId.error) {
+            console.warn('Failed to update outgate by ticket_id', byId.error);
+          } else if (!byId.data || byId.data.length === 0) {
+            // If nothing updated, attempt to insert a new outgate row (ticket exists in tickets)
+            try {
+              await supabase.from('outgate').insert([{
+                ticket_no: newTicketNo || oldTicketNo,
+                ticket_id: ticketIdValue,
+                vehicle_number: afterData.truckOnWb || null,
+                container_id: afterData.containerNo || null,
+                sad_no: afterData.sadNo || null,
+                gross: g !== null ? g : null,
+                tare: t !== null ? t : null,
+                net: n !== null ? n : null,
+                driver: afterData.driver || null,
+                created_at: new Date().toISOString(),
+              }]);
+            } catch (insErr) {
+              console.warn('Failed to insert outgate row after update returned no rows', insErr);
+            }
+          }
+        }
+      } catch (outErrGeneral) {
+        console.error('Outgate update/insert error', outErrGeneral);
+      }
+      // --- END outgate propagation ---
 
       toast({ title: 'Saved', description: `Ticket ${ticketIdValue} updated`, status: 'success', duration: 2500 });
       setEditingRowId(null);
@@ -1137,6 +1186,56 @@ export default function ManualEntry() {
         } catch (auditErr) {
           console.debug('Audit log insertion failed', auditErr);
         }
+
+        // --- NEW: propagate changes to outgate table from view edit as well ---
+        try {
+          const oldTicketNo = ticket.data?.ticketNo ?? null;
+          const newTicketNo = afterData?.ticketNo ?? oldTicketNo;
+          const outPayload = {
+            vehicle_number: afterData.truckOnWb || null,
+            container_id: afterData.containerNo || null,
+            sad_no: afterData.sadNo || null,
+            gross: g !== null ? g : null,
+            tare: t !== null ? t : null,
+            net: n !== null ? n : null,
+            driver: afterData.driver || null,
+            ticket_no: newTicketNo || null,
+          };
+
+          // Try update by old ticket_no
+          let { data: outData, error: outErr } = await supabase.from('outgate').update(outPayload).eq('ticket_no', oldTicketNo);
+          if (outErr) {
+            console.warn('Failed to update outgate by old ticket_no', outErr);
+          } else if (!outData || outData.length === 0) {
+            // Try update by ticket_id
+            const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', ticketIdValue);
+            if (byId.error) {
+              console.warn('Failed to update outgate by ticket_id', byId.error);
+            } else if (!byId.data || byId.data.length === 0) {
+              // If nothing updated, attempt to insert a new outgate row
+              try {
+                await supabase.from('outgate').insert([{
+                  ticket_no: newTicketNo || oldTicketNo,
+                  ticket_id: ticketIdValue,
+                  vehicle_number: afterData.truckOnWb || null,
+                  container_id: afterData.containerNo || null,
+                  sad_no: afterData.sadNo || null,
+                  gross: g !== null ? g : null,
+                  tare: t !== null ? t : null,
+                  net: n !== null ? n : null,
+                  driver: afterData.driver || null,
+                  created_at: new Date().toISOString(),
+                }]);
+              } catch (insErr) {
+                console.warn('Failed to insert outgate row after update returned no rows', insErr);
+              }
+            }
+          }
+        } catch (outErrGeneral) {
+          console.error('Outgate update/insert error', outErrGeneral);
+        }
+        // --- END outgate propagation ---
+
       } catch (err) {
         console.error('Save view edit failed', err);
         toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error', duration: 5000 });
