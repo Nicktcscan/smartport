@@ -1,5 +1,5 @@
 // src/pages/OutgateReports.jsx
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Box,
   Button,
@@ -124,7 +124,6 @@ export default function OutgateReports() {
 
   // status/sort controls
   const [sadSortStatus, setSadSortStatus] = useState(''); // '', 'Pending', 'Exited'
-  // NOTE: the "sort by status" control remains; actual ordering will also ensure newest records are shown first
   const [sadSortOrder, setSadSortOrder] = useState('none'); // 'none' | 'pending_first' | 'exited_first'
 
   const parseTimeToMinutes = (timeStr) => {
@@ -134,115 +133,6 @@ export default function OutgateReports() {
     return hh * 60 + mm;
   };
 
-  // === helper: map a raw ticket row into the UI shape ===
-  const mapTicket = (ticket) => {
-    const exitCandidate = ticket.status === 'Exited'
-      ? ticket.date
-      : (ticket.exit_date || ticket.outgate_date || ticket.outgate_at || ticket.exited_at || null);
-
-    const inferredStatus = ticket.status ? String(ticket.status) : (exitCandidate ? 'Exited' : 'Pending');
-
-    return {
-      ticketId: ticket.ticket_id || (ticket.id ? String(ticket.id) : `${Math.random()}`),
-      data: {
-        sadNo: ticket.sad_no ?? ticket.sadNo ?? '',
-        ticketNo: ticket.ticket_no ?? '',
-        date: ticket.date || ticket.submitted_at || exitCandidate || null,
-        gnswTruckNo: ticket.gnsw_truck_no || ticket.vehicle_number || ticket.truck_no || '',
-        gross: ticket.gross ?? null,
-        tare: ticket.tare ?? null,
-        net: ticket.net ?? null,
-        driver: ticket.driver ?? 'N/A',
-        consignee: ticket.consignee ?? '',
-        operator: ticket.operator ?? '',
-        containerNo: ticket.container_no ?? '',
-        fileUrl: ticket.file_url ?? null,
-        status: inferredStatus,
-      },
-    };
-  };
-
-  // === filtering function reusable by initial load & realtime handler ===
-  // returns filtered array (does NOT modify state)
-  const filterSadList = useCallback((sourceArray) => {
-    if (!Array.isArray(sourceArray)) return [];
-
-    const tf = parseTimeToMinutes(sadTimeFrom);
-    const tt = parseTimeToMinutes(sadTimeTo);
-    const hasDateRange = !!(sadDateFrom || sadDateTo);
-    const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
-    const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
-
-    let arr = sourceArray.filter((t) => {
-      if (!t || !t.data) return false;
-
-      // basic fields match SAD search (we already scoped by SAD so this is optional)
-      // apply status filter if set
-      if (sadSortStatus) {
-        if ((t.data.status || 'Pending') !== sadSortStatus) return false;
-      }
-
-      // apply date/time filtering if present
-      const dRaw = t.data.date;
-      const d = dRaw ? new Date(dRaw) : null;
-      if (hasDateRange) {
-        if (!d) return false;
-        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
-        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
-        if (sadTimeFrom) {
-          const mins = parseTimeToMinutes(sadTimeFrom);
-          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-        }
-        if (sadTimeTo) {
-          const mins = parseTimeToMinutes(sadTimeTo);
-          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
-        }
-        if (d < start || d > end) return false;
-      } else if (sadTimeFrom || sadTimeTo) {
-        if (!d) return false;
-        const minutes = d.getHours() * 60 + d.getMinutes();
-        const from = tf != null ? tf : 0;
-        const to = tt != null ? tt : 24 * 60 - 1;
-        if (minutes < from || minutes > to) return false;
-      }
-
-      return true;
-    });
-
-    // Apply status-first ordering if requested, but **within each group we ensure newest first**
-    if (sadSortOrder === 'pending_first') {
-      arr.sort((a, b) => {
-        const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        const bIsPending = (b.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        if (aIsPending !== bIsPending) return aIsPending - bIsPending;
-        // newest first
-        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
-        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
-        return db - da;
-      });
-    } else if (sadSortOrder === 'exited_first') {
-      arr.sort((a, b) => {
-        const aIsExited = (a.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        const bIsExited = (b.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        if (aIsExited !== bIsExited) return aIsExited - bIsExited;
-        // newest first
-        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
-        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
-        return db - da;
-      });
-    } else {
-      // Default: newest first
-      arr.sort((a, b) => {
-        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
-        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
-        return db - da;
-      });
-    }
-
-    return arr;
-  }, [sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortOrder, sadSortStatus]);
-
-  // === Generate / fetch SAD results (user action) ===
   const handleGenerateSad = async () => {
     if (!sadQuery.trim()) {
       toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
@@ -250,29 +140,47 @@ export default function OutgateReports() {
     }
     try {
       setSadLoading(true);
-
-      // NOTE: ordering changed to descending so newest records appear on top
       const { data, error } = await supabase
         .from('tickets')
         .select('*')
         .ilike('sad_no', `%${sadQuery.trim()}%`)
-        .order('date', { ascending: false }); // newest first
+        .order('date', { ascending: true });
 
       if (error) throw error;
 
-      const mapped = (data || []).map(mapTicket);
+      const mapped = (data || []).map((ticket) => {
+        const exitCandidate = ticket.status === 'Exited'
+          ? ticket.date
+          : (ticket.exit_date || ticket.outgate_date || ticket.outgate_at || ticket.exited_at || null);
 
-      // store original mapped and filtered (apply any filters/time-range)
+        const inferredStatus = ticket.status ? String(ticket.status) : (exitCandidate ? 'Exited' : 'Pending');
+
+        return {
+          ticketId: ticket.ticket_id || (ticket.id ? String(ticket.id) : `${Math.random()}`),
+          data: {
+            sadNo: ticket.sad_no ?? ticket.sadNo ?? '',
+            ticketNo: ticket.ticket_no ?? '',
+            date: ticket.date || ticket.submitted_at || exitCandidate || null,
+            gnswTruckNo: ticket.gnsw_truck_no || ticket.vehicle_number || ticket.truck_no || '',
+            gross: ticket.gross ?? null,
+            tare: ticket.tare ?? null,
+            net: ticket.net ?? null,
+            driver: ticket.driver ?? 'N/A',
+            consignee: ticket.consignee ?? '',
+            operator: ticket.operator ?? '',
+            containerNo: ticket.container_no ?? '',
+            fileUrl: ticket.file_url ?? null,
+            status: inferredStatus,
+          },
+        };
+      });
+
       setSadOriginal(mapped);
-      const filtered = filterSadList(mapped);
-      setSadTickets(filtered);
-
-      // reset filters UI state but keep meta
+      setSadTickets(mapped);
       setSadDateFrom('');
       setSadDateTo('');
       setSadTimeFrom('');
       setSadTimeTo('');
-
       setSadMeta({
         sad: sadQuery.trim(),
         dateRangeText: mapped.length > 0 && mapped[0].data.date ? new Date(mapped[0].data.date).toLocaleDateString() : 'All',
@@ -291,10 +199,39 @@ export default function OutgateReports() {
     }
   };
 
-  // === applySadRange now just uses filterSadList and updates state ===
   const applySadRange = () => {
     if (!sadOriginal || sadOriginal.length === 0) return;
-    const filtered = filterSadList(sadOriginal);
+    const tf = parseTimeToMinutes(sadTimeFrom);
+    const tt = parseTimeToMinutes(sadTimeTo);
+    const hasDateRange = !!(sadDateFrom || sadDateTo);
+    const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
+    const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
+
+    const filtered = sadOriginal.filter((t) => {
+      const dRaw = t.data.date;
+      const d = dRaw ? new Date(dRaw) : null;
+      if (!d) return false;
+      if (hasDateRange) {
+        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+        if (sadTimeFrom) {
+          const mins = parseTimeToMinutes(sadTimeFrom);
+          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+        }
+        if (sadTimeTo) {
+          const mins = parseTimeToMinutes(sadTimeTo);
+          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+        }
+        return d >= start && d <= end;
+      } else if (sadTimeFrom || sadTimeTo) {
+        const minutes = d.getHours() * 60 + d.getMinutes();
+        const from = tf != null ? tf : 0;
+        const to = tt != null ? tt : 24 * 60 - 1;
+        return minutes >= from && minutes <= to;
+      }
+      return true;
+    });
+
     setSadTickets(filtered);
 
     const startLabel = sadDateFrom ? `${sadTimeFrom || '00:00'} (${sadDateFrom})` : sadTimeFrom ? `${sadTimeFrom}` : '';
@@ -316,91 +253,25 @@ export default function OutgateReports() {
     setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
 
-  // Realtime subscription: when user has a SAD query opened, listen for new tickets matching that SAD.
-  useEffect(() => {
-    // only subscribe if there's an active SAD search
-    const s = sadQuery && sadQuery.trim();
-    if (!s) return undefined;
-
-    // create subscription for tickets where sad_no equals the exact searched value
-    const eqVal = s.trim();
-    // Use the on-filter style: 'tickets:sad_no=eq.<value>'
-    const channel = supabase
-      .from(`tickets:sad_no=eq.${eqVal}`)
-      .on('INSERT', (payload) => {
-        const ticket = payload.new;
-        // map new ticket
-        const newMapped = mapTicket(ticket);
-
-        // add to sadOriginal (prepend) and re-filter sadTickets using latest filters
-        setSadOriginal((prevOriginal) => {
-          // avoid duplicates (by ticketId)
-          const exists = prevOriginal.some((p) => p.ticketId === newMapped.ticketId);
-          if (exists) return prevOriginal;
-          const nextOriginal = [newMapped, ...prevOriginal];
-          // update filtered list using the same filter function (keeps filters/time/status)
-          setSadTickets(filterSadList(nextOriginal));
-          return nextOriginal;
-        });
-
-        // notify user briefly
-        toast({
-          title: 'New ticket received',
-          description: `New ticket for SAD ${eqVal} has been processed and added to results.`,
-          status: 'info',
-          duration: 4000,
-          isClosable: true,
-        });
-      })
-      .subscribe();
-
-    return () => {
-      try {
-        supabase.removeSubscription(channel);
-      } catch (e) {
-        // some SDK versions may use channel.unsubscribe(); this is safe to ignore if not supported
-        try {
-          channel.unsubscribe?.();
-        } catch (_) {}
-      }
-    };
-  }, [sadQuery, filterSadList, toast]);
-
-  // derived filtered & sorted SAD list based on status and order (used for display & exports)
+  // derived filtered & sorted SAD list based on status and order
   const filteredSadTickets = useMemo(() => {
-    // sadTickets already contains the post-filtered list (applySadRange or realtime update)
-    // but we allow the additional controls (sadSortStatus & sadSortOrder) to be applied here too (defensive)
     let arr = Array.isArray(sadTickets) ? sadTickets.slice() : [];
 
     if (sadSortStatus) {
       arr = arr.filter((t) => (t.data.status || 'Pending') === sadSortStatus);
     }
 
-    // ensure ordering: status-first options still keep newest-first within groups
     if (sadSortOrder === 'pending_first') {
       arr.sort((a, b) => {
         const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
         const bIsPending = (b.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        if (aIsPending !== bIsPending) return aIsPending - bIsPending;
-        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
-        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
-        return db - da;
+        return aIsPending - bIsPending; // pending first
       });
     } else if (sadSortOrder === 'exited_first') {
       arr.sort((a, b) => {
         const aIsExited = (a.data.status || 'Pending') === 'Exited' ? 0 : 1;
         const bIsExited = (b.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        if (aIsExited !== bIsExited) return aIsExited - bIsExited;
-        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
-        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
-        return db - da;
-      });
-    } else {
-      // default newest first
-      arr.sort((a, b) => {
-        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
-        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
-        return db - da;
+        return aIsExited - bIsExited; // exited first
       });
     }
 
