@@ -38,8 +38,6 @@ import {
 } from '@chakra-ui/react';
 import {
   RepeatIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
   DownloadIcon,
   SearchIcon,
 } from '@chakra-ui/icons';
@@ -167,14 +165,12 @@ function dedupeReportsByTicketNo(rows = []) {
    Component
 ----------------------- */
 export default function OutgateReports() {
-  const [reports, setReports] = useState([]);
+  const [reports, setReports] = useState([]); // raw outgate rows mapped
   const [searchTerm, setSearchTerm] = useState('');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState(ITEMS_PER_PAGE);
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
@@ -198,7 +194,7 @@ export default function OutgateReports() {
       try {
         setLoading(true);
 
-        // fetch outgate rows
+        // fetch outgate rows (we need created_at and relevant fields)
         const { data: outData, error: outErr } = await supabase
           .from('outgate')
           .select('*')
@@ -213,6 +209,7 @@ export default function OutgateReports() {
             ticketId: og.ticket_id,
             ticketNo: og.ticket_no || og.ticketNo || null,
             vehicleNumber: og.vehicle_number || og.vehicleNo || '',
+            // use created_at (DB timestamp) as canonical outgate timestamp
             outgateDateTime: og.created_at || og.outgate_at || null,
             driverName: og.driver || og.driverName || null,
             destination: og.consignee || og.destination || null,
@@ -285,8 +282,20 @@ export default function OutgateReports() {
     return hh * 60 + mm;
   };
 
-  /* SAD search: dedupe by ticket_no, newest-first, compute cumulative net
-     (this builds `sadResults` - deduplicated and newest-first by ticket date)
+  // Helper: time-in-range (supports wrap-around midnight)
+  const isTimeInRange = (mins, from, to) => {
+    if (from == null && to == null) return true;
+    if (from == null) return mins <= to;
+    if (to == null) return mins >= from;
+    if (from <= to) {
+      return mins >= from && mins <= to;
+    }
+    // wrap-around: e.g., from 22:00 (1320) to 06:00 (360)
+    return mins >= from || mins <= to;
+  };
+
+  /* SAD search: dedupe by ticket_no, but map each ticket to its latest outgate row (if any).
+     This ensures SAD results use the outgate.created_at times for filtering.
   */
   useEffect(() => {
     if (sadDebounceRef.current) {
@@ -303,11 +312,12 @@ export default function OutgateReports() {
     sadDebounceRef.current = setTimeout(async () => {
       setSadLoading(true);
       try {
+        // fetch tickets whose sad_no matches searchTerm
         const { data: ticketsData, error } = await supabase
           .from('tickets')
           .select('*')
           .ilike('sad_no', `%${q}%`)
-          .order('date', { ascending: false }); // newest first
+          .order('date', { ascending: false }); // tickets' date fetch as fallback
 
         if (error) {
           console.warn('SAD lookup error', error);
@@ -316,7 +326,7 @@ export default function OutgateReports() {
           return;
         }
 
-        // Deduplicate by ticket_no: keep newest (by date/submitted_at)
+        // Deduplicate tickets by ticket_no, keep newest by ticket date
         const dedupeMap = new Map();
         (ticketsData || []).forEach((t) => {
           const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
@@ -332,22 +342,51 @@ export default function OutgateReports() {
 
         const deduped = Array.from(dedupeMap.values());
 
-        // Map to UI-friendly shape (net/gross/tare computed). Keep newest-first order.
+        // For each deduped ticket, prefer corresponding outgate row (by ticketNo).
+        // Use outgate.created_at for date/time and gross/tare/net from outgate when present.
         const mapped = deduped
-          .sort((a, b) => {
-            const aT = new Date(a.date ?? a.submitted_at ?? a.created_at ?? 0).getTime();
-            const bT = new Date(b.date ?? b.submitted_at ?? b.created_at ?? 0).getTime();
-            return bT - aT; // newest first
-          })
           .map((t) => {
+            const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
+            // find outgate rows that match this ticketNo
+            const matchingOutgates = reports
+              .filter((r) => {
+                const rTn = r.ticketNo ? String(r.ticketNo).trim() : '';
+                return rTn && rTn === ticketNo;
+              })
+              .sort((a, b) => {
+                const aT = a.outgateDateTime ? new Date(a.outgateDateTime).getTime() : 0;
+                const bT = b.outgateDateTime ? new Date(b.outgateDateTime).getTime() : 0;
+                return bT - aT;
+              });
+
+            if (matchingOutgates.length > 0) {
+              const best = matchingOutgates[0];
+              // map using outgate row (this ensures created_at is used)
+              return {
+                ticketId: ticketNo || `${Math.random()}`,
+                ticketNo: ticketNo || null,
+                sadNo: t.sad_no ?? t.sadNo ?? null,
+                date: best.outgateDateTime, // use outgate.created_at
+                truck: best.vehicleNumber ?? null,
+                gross: best.gross ?? null,
+                tare: best.tare ?? null,
+                net: best.net ?? null,
+                driver: best.driverName ?? null,
+                rawTicket: t,
+                rawOutgate: best.rawRow,
+              };
+            }
+
+            // fallback: no outgate found — map from ticket record (still include but date will be ticket.date)
             const computed = computeWeights({
               gross: t.gross,
               tare: t.tare,
               net: t.net,
             });
+
             return {
-              ticketId: t.ticket_id ?? t.id ?? t.ticket_no ?? `${Math.random()}`,
-              ticketNo: t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null),
+              ticketId: ticketNo || `${Math.random()}`,
+              ticketNo: ticketNo || null,
               sadNo: t.sad_no ?? t.sadNo ?? null,
               date: t.date ?? t.submitted_at ?? t.created_at ?? null,
               truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
@@ -355,8 +394,15 @@ export default function OutgateReports() {
               tare: computed.tare,
               net: computed.net,
               driver: t.driver ?? null,
-              raw: t,
+              rawTicket: t,
+              rawOutgate: null,
             };
+          })
+          // sort newest-first by whichever date we have (outgate.created_at preferred)
+          .sort((a, b) => {
+            const aT = a.date ? new Date(a.date).getTime() : 0;
+            const bT = b.date ? new Date(b.date).getTime() : 0;
+            return bT - aT;
           });
 
         setSadResults(mapped);
@@ -371,26 +417,15 @@ export default function OutgateReports() {
     return () => {
       if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
     };
-  }, [searchTerm]);
+    // include `reports` in dependencies so mapping uses latest outgate rows
+  }, [searchTerm, reports]);
 
   /* -----------------------
-     Apply filters to deduplicated reports
+     Apply filters to deduplicated reports (used for stats when no SAD search active)
      - dedupe full reports by ticket_no earlier with dedupeReportsByTicketNo
-     - Then filter by search/date/time
+     - Then filter by search/date/time using outgate.created_at (outgateDateTime)
   ----------------------- */
   const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
-
-  // Helper: time-in-range (supports wrap-around midnight)
-  const isTimeInRange = (mins, from, to) => {
-    if (from == null && to == null) return true;
-    if (from == null) return mins <= to;
-    if (to == null) return mins >= from;
-    if (from <= to) {
-      return mins >= from && mins <= to;
-    }
-    // wrap-around: e.g., from 22:00 (1320) to 06:00 (360)
-    return mins >= from || mins <= to;
-  };
 
   const filteredReports = useMemo(() => {
     const term = (searchTerm || '').trim().toLowerCase();
@@ -413,7 +448,7 @@ export default function OutgateReports() {
         if (!hay.includes(term)) return false;
       }
 
-      // date/time range
+      // date/time range applied against outgateDateTime (created_at)
       if (df || dt || tFrom !== null || tTo !== null) {
         if (!r.outgateDateTime) return false;
         const d = new Date(r.outgateDateTime);
@@ -431,8 +466,8 @@ export default function OutgateReports() {
     });
   }, [dedupedReports, searchTerm, dateFrom, dateTo, timeFrom, timeTo]);
 
-  // newest-first sort (for export / pagination if needed)
-  const sortedReports = useMemo(() => {
+  // newest-first sort for any exports and counts
+  const sortedFilteredReports = useMemo(() => {
     const arr = filteredReports.slice();
     arr.sort((a, b) => {
       const aT = a.outgateDateTime ? new Date(a.outgateDateTime).getTime() : 0;
@@ -465,7 +500,7 @@ export default function OutgateReports() {
     return [...map.values(), ...manual];
   }, [filteredReports]);
 
-  // ------ SAD: apply date/time filters to SAD results (so SAD totals respect filters) ------
+  // ------ SAD: apply date/time filters to SAD results (so SAD totals respect filters)
   const sadFilteredResults = useMemo(() => {
     if (!sadResults || sadResults.length === 0) return [];
 
@@ -512,7 +547,6 @@ export default function OutgateReports() {
   const statsTotals = useMemo(() => {
     let cumulativeNet = 0;
     for (const r of statsSource) {
-      // for SAD rows, use r.net/gross etc; for outgate rows the same fields exist
       const w = computeWeights(r);
       cumulativeNet += (w.net || 0);
     }
@@ -531,32 +565,24 @@ export default function OutgateReports() {
     return s.size;
   }, [statsSource]);
 
-  const totalPages = Math.max(1, Math.ceil(sortedReports.length / itemsPerPage));
-  const paginatedReports = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return sortedReports.slice(start, start + itemsPerPage);
-  }, [sortedReports, currentPage, itemsPerPage]);
-
-  // Export current (unique) view as CSV (uses sortedReports / filteredReports)
+  // Export current (unique) view as CSV (uses statsSource)
   const handleExportCsv = () => {
-    const rows = sortedReports.map(r => {
-      return {
-        'Ticket No': r.ticketNo ?? '',
-        'Truck No': r.vehicleNumber ?? '',
-        'SAD No': r.sadNo ?? '',
-        'Container': r.containerId ?? '',
-        'Exit Date': r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '',
-        'Gross (kg)': r.gross ?? '',
-        'Tare (kg)': r.tare ?? '',
-        'Net (kg)': r.net ?? '',
-        'Driver': r.driverName ?? '',
-        'Status': (r.ticketNo && ticketStatusMap[r.ticketNo]) ? ticketStatusMap[r.ticketNo] : (r.rawRow?.status ?? ''),
-      };
-    });
-    if (!rows.length) {
+    if (!statsSource || !statsSource.length) {
       toast({ title: 'No rows to export', status: 'info', duration: 2000 });
       return;
     }
+    const rows = statsSource.map((r) => ({
+      'Ticket No': r.ticketNo ?? '',
+      'Truck No': r.truck ?? r.vehicleNumber ?? '',
+      'SAD No': r.sadNo ?? '',
+      'Container': r.containerId ?? '',
+      'Exit Date': r.date ? new Date(r.date).toLocaleString() : '',
+      'Gross (kg)': r.gross ?? '',
+      'Tare (kg)': r.tare ?? '',
+      'Net (kg)': r.net ?? '',
+      'Driver': r.driver ?? '',
+      'Status': r.ticketNo && ticketStatusMap[r.ticketNo] ? ticketStatusMap[r.ticketNo] : (r.rawOutgate?.status ?? r.rawTicket?.status ?? ''),
+    }));
     exportToCSV(rows, 'outgate-reports.csv');
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
@@ -640,7 +666,6 @@ export default function OutgateReports() {
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
-    setCurrentPage(1);
     toast({ title: 'Filters reset', status: 'info', duration: 1500 });
   };
 
@@ -649,7 +674,7 @@ export default function OutgateReports() {
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Stack spacing={1}>
           <Text fontSize="2xl" fontWeight="bold">Outgate Reports</Text>
-          <Text color="gray.500">Unique-ticket view.</Text>
+          <Text color="gray.500">Unique-ticket view (SAD search uses outgate timestamps).</Text>
         </Stack>
 
         <HStack spacing={2}>
@@ -672,7 +697,7 @@ export default function OutgateReports() {
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>unique ticket numbers</StatHelpText>
+          <StatHelpText>unique ticket numbers (system-wide)</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
@@ -694,28 +719,28 @@ export default function OutgateReports() {
             <FormLabel>Search</FormLabel>
             <Flex>
               <Input
-                placeholder="Search Here..."
+                placeholder="Type SAD number (or other search)..."
                 value={searchTerm}
-                onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+                onChange={(e) => { setSearchTerm(e.target.value); }}
               />
-              <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { setCurrentPage(1); }} />
+              <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { /* noop: input handles it */ }} />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see total transactions below.</Text>
+            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see total transactions below (filtered by date/time).</Text>
           </Box>
 
           <Box>
             <FormLabel>Date range</FormLabel>
             <Flex gap={2}>
-              <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }} />
-              <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }} />
+              <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); }} />
+              <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); }} />
             </Flex>
           </Box>
 
           <Box>
             <FormLabel>Time range</FormLabel>
             <Flex gap={2}>
-              <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); setCurrentPage(1); }} />
-              <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
+              <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); }} />
+              <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); }} />
             </Flex>
             <Text fontSize="xs" color="gray.500" mt={1}>
               If Time From is later than Time To the range wraps past midnight (e.g. 22:00 → 06:00).
@@ -723,11 +748,10 @@ export default function OutgateReports() {
           </Box>
 
           <Box>
-            <FormLabel>Page size</FormLabel>
+            <FormLabel>Actions</FormLabel>
             <HStack>
-              <Select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}>
-                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
-              </Select>
+              <Button size="sm" onClick={handleExportCsv}>Export View</Button>
+              <Button size="sm" onClick={handlePrintSad} isDisabled={!searchTerm || !sadFilteredResults.length}>Print SAD</Button>
             </HStack>
           </Box>
         </SimpleGrid>
@@ -741,7 +765,7 @@ export default function OutgateReports() {
           <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
             <Box>
               <Text fontWeight="semibold">SAD Search: <Text as="span" fontWeight="bold">{searchTerm}</Text></Text>
-              <Text fontSize="sm" color="gray.600">Transactions for this SAD (respecting date/time filters)</Text>
+              <Text fontSize="sm" color="gray.600">Transactions for this SAD (respecting outgate created_at filters)</Text>
             </Box>
 
             <HStack spacing={4}>
@@ -812,13 +836,13 @@ export default function OutgateReports() {
               <Stack spacing={3}>
                 <Flex justify="space-between" align="center" gap={4} flexWrap="wrap">
                   <Stack>
-                    <Text fontSize="lg" fontWeight="bold">{selectedReport.vehicleNumber || '—'}</Text>
+                    <Text fontSize="lg" fontWeight="bold">{selectedReport.vehicleNumber || selectedReport.truck || '—'}</Text>
                     <Text color="gray.600">{selectedReport.ticketNo ? `Ticket: ${selectedReport.ticketNo}` : 'No ticket'}</Text>
                     <Text color="gray.600">{selectedReport.destination}</Text>
                   </Stack>
                   <Stack textAlign="right">
                     <Text fontSize="sm" color="gray.500">Exit</Text>
-                    <Text fontWeight="semibold">{selectedReport.outgateDateTime ? new Date(selectedReport.outgateDateTime).toLocaleString() : '—'}</Text>
+                    <Text fontWeight="semibold">{selectedReport.outgateDateTime ? new Date(selectedReport.outgateDateTime).toLocaleString() : (selectedReport.date ? new Date(selectedReport.date).toLocaleString() : '—')}</Text>
                     <Badge colorScheme="teal">{selectedReport.sadNo ?? 'No SAD'}</Badge>
                   </Stack>
                 </Flex>
@@ -828,7 +852,7 @@ export default function OutgateReports() {
                 <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
                   <Box>
                     <Text fontWeight="semibold">Driver</Text>
-                    <Text>{selectedReport.driverName ?? '—'}</Text>
+                    <Text>{selectedReport.driverName ?? selectedReport.driver ?? '—'}</Text>
                     <Text mt={3} fontWeight="semibold">Consignee</Text>
                     <Text>{selectedReport.destination ?? '—'}</Text>
                   </Box>
