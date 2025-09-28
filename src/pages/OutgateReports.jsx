@@ -163,32 +163,6 @@ function dedupeReportsByTicketNo(rows = []) {
   return [...Array.from(map.values()), ...manualRows];
 }
 
-/* time helpers: convert "HH:MM" to minutes and check range (support wrap-around e.g., 22:00 -> 06:00) */
-function parseTimeToMinutes(timeStr) {
-  if (!timeStr) return null;
-  const parts = String(timeStr).split(':').map((n) => Number(n));
-  if (parts.length < 2) return null;
-  const [hh, mm] = parts;
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return hh * 60 + mm;
-}
-
-function isMinutesInRange(mins, from, to) {
-  // from, to are minutes (or null)
-  if (from == null && to == null) return true;
-  if (mins == null) return false;
-  if (from != null && to != null) {
-    if (from <= to) {
-      return mins >= from && mins <= to;
-    }
-    // wrap-around: e.g., from 22:00(1320) to 06:00(360) -> accept mins >= 1320 OR mins <= 360
-    return mins >= from || mins <= to;
-  }
-  if (from != null) return mins >= from;
-  if (to != null) return mins <= to;
-  return true;
-}
-
 /* -----------------------
    Component
 ----------------------- */
@@ -304,10 +278,16 @@ export default function OutgateReports() {
     };
   }, [toast]);
 
-  /* -----------------------
-     SAD search: dedupe by ticket_no, newest-first
+  const parseTimeToMinutes = (timeStr) => {
+    if (!timeStr) return null;
+    const [hh, mm] = String(timeStr).split(':').map((n) => Number(n));
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+    return hh * 60 + mm;
+  };
+
+  /* SAD search: dedupe by ticket_no, newest-first, compute cumulative net
      (this builds `sadResults` - deduplicated and newest-first by ticket date)
-  ----------------------- */
+  */
   useEffect(() => {
     if (sadDebounceRef.current) {
       clearTimeout(sadDebounceRef.current);
@@ -395,22 +375,32 @@ export default function OutgateReports() {
 
   /* -----------------------
      Apply filters to deduplicated reports
-     - First dedupe full reports by ticket_no
-     - Then filter by search/date/time (supports wrap-around times)
-     - Then sort newest-first and paginate
+     - dedupe full reports by ticket_no earlier with dedupeReportsByTicketNo
+     - Then filter by search/date/time
   ----------------------- */
   const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
 
+  // Helper: time-in-range (supports wrap-around midnight)
+  const isTimeInRange = (mins, from, to) => {
+    if (from == null && to == null) return true;
+    if (from == null) return mins <= to;
+    if (to == null) return mins >= from;
+    if (from <= to) {
+      return mins >= from && mins <= to;
+    }
+    // wrap-around: e.g., from 22:00 (1320) to 06:00 (360)
+    return mins >= from || mins <= to;
+  };
+
   const filteredReports = useMemo(() => {
     const term = (searchTerm || '').trim().toLowerCase();
-
-    // Use non-mutating Date creation so we don't accidently alter inputs
-    const df = dateFrom ? new Date(`${dateFrom}T00:00:00`) : null;
-    const dt = dateTo ? new Date(`${dateTo}T23:59:59.999`) : null;
+    const df = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
+    const dt = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
     return dedupedReports.filter((r) => {
+      // search term matches (vehicle, ticket, driver, sad, container, destination)
       if (term) {
         const hay = [
           r.vehicleNumber,
@@ -423,18 +413,17 @@ export default function OutgateReports() {
         if (!hay.includes(term)) return false;
       }
 
-      // If any date/time filter set, apply them
+      // date/time range
       if (df || dt || tFrom !== null || tTo !== null) {
         if (!r.outgateDateTime) return false;
         const d = new Date(r.outgateDateTime);
         if (Number.isNaN(d.getTime())) return false;
-
         if (df && d < df) return false;
         if (dt && d > dt) return false;
 
         if (tFrom !== null || tTo !== null) {
           const mins = d.getHours() * 60 + d.getMinutes();
-          if (!isMinutesInRange(mins, tFrom, tTo)) return false;
+          if (!isTimeInRange(mins, tFrom, tTo)) return false;
         }
       }
 
@@ -442,7 +431,7 @@ export default function OutgateReports() {
     });
   }, [dedupedReports, searchTerm, dateFrom, dateTo, timeFrom, timeTo]);
 
-  // newest-first sort
+  // newest-first sort (for export / pagination if needed)
   const sortedReports = useMemo(() => {
     const arr = filteredReports.slice();
     arr.sort((a, b) => {
@@ -453,17 +442,35 @@ export default function OutgateReports() {
     return arr;
   }, [filteredReports]);
 
-  /* -----------------------
-     SAD filtered results that RESPECT date/time filters
-     - sadResults is deduped by ticket_no already, but it was computed without date/time filtering.
-     - sadFilteredResults applies the date/time filters (dateFrom/dateTo/timeFrom/timeTo)
-       so the SAD totals and table respond to those inputs.
-  ----------------------- */
+  // Ensure dedupe-by-ticketNo once more for totals (guard - filteredReports should already be deduped,
+  // but this makes intention explicit and ensures no ticket counted twice).
+  const uniqueFilteredReports = useMemo(() => {
+    const map = new Map();
+    const manual = [];
+    for (const r of filteredReports) {
+      const tn = r.ticketNo ? String(r.ticketNo).trim() : '';
+      if (tn) {
+        if (!map.has(tn)) map.set(tn, r);
+        else {
+          // keep newest (by outgateDateTime)
+          const existing = map.get(tn);
+          const a = existing.outgateDateTime ? new Date(existing.outgateDateTime).getTime() : 0;
+          const b = r.outgateDateTime ? new Date(r.outgateDateTime).getTime() : 0;
+          if (b > a) map.set(tn, r);
+        }
+      } else {
+        manual.push(r);
+      }
+    }
+    return [...map.values(), ...manual];
+  }, [filteredReports]);
+
+  // ------ SAD: apply date/time filters to SAD results (so SAD totals respect filters) ------
   const sadFilteredResults = useMemo(() => {
     if (!sadResults || sadResults.length === 0) return [];
 
-    const df = dateFrom ? new Date(`${dateFrom}T00:00:00`) : null;
-    const dt = dateTo ? new Date(`${dateTo}T23:59:59.999`) : null;
+    const df = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
+    const dt = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
@@ -477,35 +484,52 @@ export default function OutgateReports() {
 
       if (tFrom !== null || tTo !== null) {
         const mins = d.getHours() * 60 + d.getMinutes();
-        if (!isMinutesInRange(mins, tFrom, tTo)) return false;
+        if (!isTimeInRange(mins, tFrom, tTo)) return false;
       }
 
       return true;
     });
   }, [sadResults, dateFrom, dateTo, timeFrom, timeTo]);
 
+  // sad totals used by SAD section
   const sadTotalsMemo = useMemo(() => {
     if (!sadFilteredResults || sadFilteredResults.length === 0) return { transactions: 0, cumulativeNet: 0 };
     let cumulativeNet = 0;
     for (const t of sadFilteredResults) {
-      // t.net should already be numeric from mapping, but guard anyway
       const { net } = computeWeights({ gross: t.gross, tare: t.tare, net: t.net });
       cumulativeNet += (net || 0);
     }
     return { transactions: sadFilteredResults.length, cumulativeNet };
   }, [sadFilteredResults]);
 
-  // convenience flag: are we actively searching (SAD search)?
-  const isSearching = Boolean((searchTerm || '').trim());
+  // Choose which source to show top 'Filtered Rows' & 'Cumulative Net (view)' from:
+  // - If a SAD search is active, base those cards on the SAD filtered results (so they match the SAD table).
+  // - Otherwise, base those cards on the deduped outgate filtered results.
+  const statsSource = useMemo(() => {
+    return searchTerm ? sadFilteredResults : uniqueFilteredReports;
+  }, [searchTerm, sadFilteredResults, uniqueFilteredReports]);
 
-  const displayedUniqueTicketCount = useMemo(() => {
-    // Count unique ticketNo values present in sortedReports (excluding null/empty)
-    const set = new Set();
-    for (const r of sortedReports) {
-      if (r.ticketNo) set.add(r.ticketNo);
+  const statsTotals = useMemo(() => {
+    let cumulativeNet = 0;
+    for (const r of statsSource) {
+      // for SAD rows, use r.net/gross etc; for outgate rows the same fields exist
+      const w = computeWeights(r);
+      cumulativeNet += (w.net || 0);
     }
-    return set.size;
-  }, [sortedReports]);
+    return {
+      rowsCount: statsSource.length,
+      cumulativeNet,
+    };
+  }, [statsSource]);
+
+  // small helper to count unique tickets in the current statsSource (should be deduped by ticket)
+  const statsUniqueTickets = useMemo(() => {
+    const s = new Set();
+    for (const r of statsSource) {
+      if (r.ticketNo) s.add(String(r.ticketNo));
+    }
+    return s.size;
+  }, [statsSource]);
 
   const totalPages = Math.max(1, Math.ceil(sortedReports.length / itemsPerPage));
   const paginatedReports = useMemo(() => {
@@ -513,41 +537,7 @@ export default function OutgateReports() {
     return sortedReports.slice(start, start + itemsPerPage);
   }, [sortedReports, currentPage, itemsPerPage]);
 
-  const openDetails = (report) => {
-    setSelectedReport(report);
-    onDetailsOpen();
-  };
-
-  const handleResetAll = () => {
-    setSearchTerm('');
-    setDateFrom('');
-    setDateTo('');
-    setTimeFrom('');
-    setTimeTo('');
-    setCurrentPage(1);
-    toast({ title: 'Filters reset', status: 'info', duration: 1500 });
-  };
-
-  // totals for the stat cards: derived from filteredReports (unique-ticket view respecting filters)
-  const totals = useMemo(() => {
-    let gross = 0, tare = 0, net = 0;
-    let grossCount = 0, tareCount = 0, netCount = 0;
-    for (const r of filteredReports) {
-      const w = computeWeights(r);
-      if (w.gross != null) { gross += w.gross; grossCount++; }
-      if (w.tare != null) { tare += w.tare; tareCount++; }
-      if (w.net != null) { net += w.net; netCount++; }
-    }
-    const uniqueSads = new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean));
-    return {
-      reportsCount: filteredReports.length, // number of unique rows after dedupe (includes manuals)
-      totalGross: grossCount ? gross : null,
-      totalTare: tareCount ? tare : null,
-      totalNet: netCount ? net : null,
-      totalSads: uniqueSads.size,
-    };
-  }, [filteredReports, reports]);
-
+  // Export current (unique) view as CSV (uses sortedReports / filteredReports)
   const handleExportCsv = () => {
     const rows = sortedReports.map(r => {
       return {
@@ -639,6 +629,21 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
+  const openDetails = (report) => {
+    setSelectedReport(report);
+    onDetailsOpen();
+  };
+
+  const handleResetAll = () => {
+    setSearchTerm('');
+    setDateFrom('');
+    setDateTo('');
+    setTimeFrom('');
+    setTimeTo('');
+    setCurrentPage(1);
+    toast({ title: 'Filters reset', status: 'info', duration: 1500 });
+  };
+
   return (
     <Box p={{ base: 4, md: 8 }}>
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
@@ -648,7 +653,7 @@ export default function OutgateReports() {
         </Stack>
 
         <HStack spacing={2}>
-          <Tooltip label="Export current view as CSV">
+          <Tooltip label="Export current (filtered & deduped) view as CSV">
             <Button leftIcon={<DownloadIcon />} colorScheme="teal" variant="ghost" onClick={handleExportCsv}>Export CSV</Button>
           </Tooltip>
           <Button leftIcon={<RepeatIcon />} variant="outline" onClick={handleResetAll} aria-label="Reset filters">
@@ -660,27 +665,26 @@ export default function OutgateReports() {
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={6}>
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total SADs</StatLabel>
-          <StatNumber>{totals.totalSads}</StatNumber>
+          <StatNumber>{(new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean))).size}</StatNumber>
           <StatHelpText>Distinct SAD numbers</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>Unique ticket numbers (system-wide)</StatHelpText>
+          <StatHelpText>unique ticket numbers (system-wide)</StatHelpText>
         </Stat>
 
-        {/* Replaced "Displayed Unique Tickets" with "Filtered Transactions" */}
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Filtered Transactions</StatLabel>
-          <StatNumber>{totals.reportsCount}</StatNumber>
-          <StatHelpText>Unique tickets after filters (search/date/time)</StatHelpText>
+          <StatLabel>Filtered Rows</StatLabel>
+          <StatNumber>{statsTotals.rowsCount}</StatNumber>
+          <StatHelpText>{searchTerm ? 'Rows from SAD search (filtered & deduped)' : 'Rows after filters & dedupe'}</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Cumulative Net (view)</StatLabel>
-          <StatNumber>{totals.totalNet ? formatWeight(totals.totalNet) + ' kg' : '—'}</StatNumber>
-          <StatHelpText>From current filtered results</StatHelpText>
+          <StatNumber>{statsTotals.cumulativeNet ? formatWeight(statsTotals.cumulativeNet) + ' kg' : '—'}</StatNumber>
+          <StatHelpText>From current filtered & deduped results</StatHelpText>
         </Stat>
       </SimpleGrid>
 
@@ -705,7 +709,6 @@ export default function OutgateReports() {
               <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }} />
               <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>Dates are inclusive.</Text>
           </Box>
 
           <Box>
@@ -714,7 +717,9 @@ export default function OutgateReports() {
               <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); setCurrentPage(1); }} />
               <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>Wrap-around allowed (e.g., 22:00 → 06:00).</Text>
+            <Text fontSize="xs" color="gray.500" mt={1}>
+              If Time From is later than Time To the range wraps past midnight (e.g. 22:00 → 06:00).
+            </Text>
           </Box>
 
           <Box>
@@ -728,9 +733,10 @@ export default function OutgateReports() {
         </SimpleGrid>
       </Box>
 
+      {/* SAD results (only shown when SAD search is active) */}
       {sadLoading ? (
         <Flex justify="center" mb={4}><Spinner /></Flex>
-      ) : (isSearching && sadFilteredResults && sadFilteredResults.length > 0) ? (
+      ) : (sadFilteredResults && sadFilteredResults.length > 0) ? (
         <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
           <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
             <Box>
@@ -782,81 +788,20 @@ export default function OutgateReports() {
             </Table>
           </Box>
         </Box>
-      ) : isSearching && !sadLoading ? (
-        // If searching but there are no SAD results after filters, show a small message
-        <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
-          <Text>No transactions found for this SAD within the selected date/time range.</Text>
-        </Box>
       ) : null}
 
-      {/* Show main unique-ticket table only when NOT searching */}
-      {!isSearching && (
-        <>
-          {loading ? (
-            <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
-          ) : (
-            <>
-              <Box overflowX="auto" borderRadius="md" border="1px solid" borderColor="gray.200" bg="white">
-                <Table variant="striped" size="sm">
-                  <Thead bg="gray.50">
-                    <Tr>
-                      <Th>Ticket</Th>
-                      <Th>SAD</Th>
-                      <Th>Truck</Th>
-                      <Th>Exit Date & Time</Th>
-                      <Th>Driver</Th>
-                      <Th isNumeric>Gross (KG)</Th>
-                      <Th isNumeric>Tare (KG)</Th>
-                      <Th isNumeric>Net (KG)</Th>
-                      <Th>Status</Th>
-                      <Th>Actions</Th>
-                    </Tr>
-                  </Thead>
-
-                  <Tbody>
-                    {paginatedReports.map((report) => {
-                      const { gross, tare, net } = computeWeights(report);
-                      const status = (report.ticketNo && ticketStatusMap[report.ticketNo]) ? ticketStatusMap[report.ticketNo] : (report.rawRow?.status ?? '—');
-                      return (
-                        <Tr key={report.ticketNo ?? `manual-${report.id}`}>
-                          <Td>{report.ticketNo ?? <Badge>Manual</Badge>}</Td>
-                          <Td>{report.sadNo ?? '—'}</Td>
-                          <Td>{report.vehicleNumber || '—'}</Td>
-                          <Td>{report.outgateDateTime ? new Date(report.outgateDateTime).toLocaleString() : '—'}</Td>
-                          <Td>{report.driverName ?? '—'}</Td>
-                          <Td isNumeric>{gross != null ? formatWeight(gross) : '—'}</Td>
-                          <Td isNumeric>{tare != null ? formatWeight(tare) : '—'}</Td>
-                          <Td isNumeric>{net != null ? formatWeight(net) : '—'}</Td>
-                          <Td>{status}</Td>
-                          <Td>
-                            <HStack spacing={2}>
-                              <Button size="sm" colorScheme="blue" onClick={() => openDetails(report)}>Details</Button>
-                              {report.fileUrl && (
-                                <IconButton aria-label="Open attachment" icon={<FaFilePdf />} size="sm" variant="ghost" onClick={() => window.open(report.fileUrl, '_blank', 'noopener')} />
-                              )}
-                            </HStack>
-                          </Td>
-                        </Tr>
-                      );
-                    })}
-                  </Tbody>
-                </Table>
-              </Box>
-
-              <Flex justify="space-between" align="center" mt={4} gap={4} flexWrap="wrap">
-                <Flex gap={2} align="center">
-                  <IconButton aria-label="Previous" icon={<ChevronLeftIcon />} onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={currentPage === 1} size="sm" />
-                  <Text>Page {currentPage} of {totalPages}</Text>
-                  <IconButton aria-label="Next" icon={<ChevronRightIcon />} onClick={() => setCurrentPage((p) => Math.min(p + 1, totalPages))} isDisabled={currentPage === totalPages} size="sm" />
-                </Flex>
-
-                <Text color="gray.600" fontSize="sm">Showing {paginatedReports.length} of {sortedReports.length} unique rows</Text>
-              </Flex>
-            </>
-          )}
-        </>
+      {/* Show message when no searchTerm & no SAD results */}
+      {!searchTerm && !sadFilteredResults?.length && !loading && (
+        <Box bg="white" p={6} borderRadius="md" boxShadow="sm" textAlign="center" color="gray.600">
+          <Text>No table to display. Type a SAD number (or other search) to see deduplicated transactions.</Text>
+        </Box>
       )}
 
+      {loading && (
+        <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
+      )}
+
+      {/* Details modal (kept for any future per-row details) */}
       <Modal isOpen={isDetailsOpen} onClose={onDetailsClose} size="4xl" scrollBehavior="inside">
         <ModalOverlay />
         <ModalContent maxW="90vw">
