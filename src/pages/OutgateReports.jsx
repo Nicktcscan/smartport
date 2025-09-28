@@ -649,11 +649,11 @@ export default function OutgateReports() {
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Stack spacing={1}>
           <Text fontSize="2xl" fontWeight="bold">Outgate Reports</Text>
-          <Text color="gray.500">Unique-ticket view. Newest first.</Text>
+          <Text color="gray.500">Unique-ticket view.</Text>
         </Stack>
 
         <HStack spacing={2}>
-          <Tooltip label="Export current (filtered & deduped) view as CSV">
+          <Tooltip label="Export current (filtered) view as CSV">
             <Button leftIcon={<DownloadIcon />} colorScheme="teal" variant="ghost" onClick={handleExportCsv}>Export CSV</Button>
           </Tooltip>
           <Button leftIcon={<RepeatIcon />} variant="outline" onClick={handleResetAll} aria-label="Reset filters">
@@ -672,19 +672,19 @@ export default function OutgateReports() {
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>unique ticket numbers (system-wide)</StatHelpText>
+          <StatHelpText>unique ticket numbers</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Filtered Rows</StatLabel>
           <StatNumber>{statsTotals.rowsCount}</StatNumber>
-          <StatHelpText>{searchTerm ? 'Rows from SAD search (filtered & deduped)' : 'Rows after filters & dedupe'}</StatHelpText>
+          <StatHelpText>{searchTerm ? 'Rows from SAD search (filtered)' : 'Rows after filters'}</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Cumulative Net (view)</StatLabel>
           <StatNumber>{statsTotals.cumulativeNet ? formatWeight(statsTotals.cumulativeNet) + ' kg' : '—'}</StatNumber>
-          <StatHelpText>From current filtered & deduped results</StatHelpText>
+          <StatHelpText>From current filtered results</StatHelpText>
         </Stat>
       </SimpleGrid>
 
@@ -694,7 +694,7 @@ export default function OutgateReports() {
             <FormLabel>Search</FormLabel>
             <Flex>
               <Input
-                placeholder="vehicle, ticket_no, driver, SAD, container..."
+                placeholder="Search Here..."
                 value={searchTerm}
                 onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
               />
@@ -793,7 +793,7 @@ export default function OutgateReports() {
       {/* Show message when no searchTerm & no SAD results */}
       {!searchTerm && !sadFilteredResults?.length && !loading && (
         <Box bg="white" p={6} borderRadius="md" boxShadow="sm" textAlign="center" color="gray.600">
-          <Text>No table to display. Type a SAD number (or other search) to see deduplicated transactions.</Text>
+          <Text>No table to display. Type a SAD number (or other search) to see filtered transactions.</Text>
         </Box>
       )}
 
