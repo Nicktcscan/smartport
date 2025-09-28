@@ -109,24 +109,44 @@ function openPrintableWindow(html, title = 'Report') {
 }
 
 /**
- * Deduplicate an array of mapped rows by ticket number.
+ * Deduplicate an array of mapped rows by ticket number or ticketId.
  * Keeps the first occurrence (assumes array sorted newest-first where appropriate).
+ *
+ * Rules:
+ *  - Prefer dedupe key = normalized ticketNo (trimmed string) if present and non-empty.
+ *  - If ticketNo not present, fall back to ticketId.
+ *  - Rows lacking both are preserved in order after deduplication (to avoid dropping data).
  */
 function dedupeByTicket(arr = []) {
   const seen = new Set();
   const out = [];
+  const noKeyRows = [];
+
+  const normalizeKey = (item) => {
+    const ticketNo = item?.data?.ticketNo;
+    if (ticketNo !== undefined && ticketNo !== null) {
+      const t = String(ticketNo).trim();
+      if (t !== '') return t;
+    }
+    const id = item?.ticketId;
+    if (id !== undefined && id !== null) return String(id).trim();
+    return null;
+  };
+
   for (const item of arr) {
-    const ticket = item?.data?.ticketNo ?? '';
-    if (!ticket) {
-      // keep rows lacking ticket numbers (rare) to avoid losing data
-      out.push(item);
+    const key = normalizeKey(item);
+    if (!key) {
+      // keep rows lacking both ticketNo and ticketId for later (so they don't block dedupe)
+      noKeyRows.push(item);
       continue;
     }
-    if (seen.has(ticket)) continue;
-    seen.add(ticket);
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push(item);
   }
-  return out;
+
+  // append no-key rows at the end (preserve their original order)
+  return [...out, ...noKeyRows];
 }
 
 export default function OutgateReports() {
@@ -413,7 +433,13 @@ export default function OutgateReports() {
       // Prepend to original and update filtered tickets respecting current filters
       setSadOriginal((prev) => {
         // Remove any existing rows with same ticketNo, then prepend mapped
-        const filteredPrev = prev.filter((p) => p.data.ticketNo !== mapped.data.ticketNo);
+        const filteredPrev = prev.filter((p) => {
+          const a = (p?.data?.ticketNo ?? '').toString().trim();
+          const b = (mapped?.data?.ticketNo ?? '').toString().trim();
+          // if both empty, compare ticketId fallback
+          if (!a && !b) return p.ticketId !== mapped.ticketId;
+          return a !== b;
+        });
         const next = [mapped, ...filteredPrev];
         // keep newest-first sort by created_at/date
         next.sort((a, b) => {
@@ -466,7 +492,12 @@ export default function OutgateReports() {
         }
 
         // remove any existing with same ticketNo and prepend
-        const next = [mapped, ...prev.filter((p) => p.data.ticketNo !== mapped.data.ticketNo)];
+        const next = [mapped, ...prev.filter((p) => {
+          const a = (p?.data?.ticketNo ?? '').toString().trim();
+          const b = (mapped?.data?.ticketNo ?? '').toString().trim();
+          if (!a && !b) return p.ticketId !== mapped.ticketId;
+          return a !== b;
+        })];
         // ensure newest-first sort by created_at/date
         next.sort((a, b) => {
           const da = new Date(a.data.created_at ?? a.data.date ?? 0).getTime();
