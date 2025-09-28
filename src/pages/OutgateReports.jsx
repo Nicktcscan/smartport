@@ -163,6 +163,32 @@ function dedupeReportsByTicketNo(rows = []) {
   return [...Array.from(map.values()), ...manualRows];
 }
 
+/* time helpers: convert "HH:MM" to minutes and check range (support wrap-around e.g., 22:00 -> 06:00) */
+function parseTimeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const parts = String(timeStr).split(':').map((n) => Number(n));
+  if (parts.length < 2) return null;
+  const [hh, mm] = parts;
+  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+  return hh * 60 + mm;
+}
+
+function isMinutesInRange(mins, from, to) {
+  // from, to are minutes (or null)
+  if (from == null && to == null) return true;
+  if (mins == null) return false;
+  if (from != null && to != null) {
+    if (from <= to) {
+      return mins >= from && mins <= to;
+    }
+    // wrap-around: e.g., from 22:00(1320) to 06:00(360) -> accept mins >= 1320 OR mins <= 360
+    return mins >= from || mins <= to;
+  }
+  if (from != null) return mins >= from;
+  if (to != null) return mins <= to;
+  return true;
+}
+
 /* -----------------------
    Component
 ----------------------- */
@@ -278,16 +304,10 @@ export default function OutgateReports() {
     };
   }, [toast]);
 
-  const parseTimeToMinutes = (timeStr) => {
-    if (!timeStr) return null;
-    const [hh, mm] = String(timeStr).split(':').map((n) => Number(n));
-    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-    return hh * 60 + mm;
-  };
-
-  /* SAD search: dedupe by ticket_no, newest-first, compute cumulative net
+  /* -----------------------
+     SAD search: dedupe by ticket_no, newest-first
      (this builds `sadResults` - deduplicated and newest-first by ticket date)
-  */
+  ----------------------- */
   useEffect(() => {
     if (sadDebounceRef.current) {
       clearTimeout(sadDebounceRef.current);
@@ -376,16 +396,17 @@ export default function OutgateReports() {
   /* -----------------------
      Apply filters to deduplicated reports
      - First dedupe full reports by ticket_no
-     - Then filter by search/date/time
+     - Then filter by search/date/time (supports wrap-around times)
      - Then sort newest-first and paginate
   ----------------------- */
   const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
 
   const filteredReports = useMemo(() => {
     const term = (searchTerm || '').trim().toLowerCase();
-    const df = dateFrom ? new Date(dateFrom) : null;
-    const dtRaw = dateTo ? new Date(dateTo) : null;
-    const dt = dtRaw ? new Date(dtRaw.setHours(23, 59, 59, 999)) : null;
+
+    // Use non-mutating Date creation so we don't accidently alter inputs
+    const df = dateFrom ? new Date(`${dateFrom}T00:00:00`) : null;
+    const dt = dateTo ? new Date(`${dateTo}T23:59:59.999`) : null;
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
@@ -402,16 +423,18 @@ export default function OutgateReports() {
         if (!hay.includes(term)) return false;
       }
 
+      // If any date/time filter set, apply them
       if (df || dt || tFrom !== null || tTo !== null) {
         if (!r.outgateDateTime) return false;
         const d = new Date(r.outgateDateTime);
         if (Number.isNaN(d.getTime())) return false;
+
         if (df && d < df) return false;
         if (dt && d > dt) return false;
+
         if (tFrom !== null || tTo !== null) {
           const mins = d.getHours() * 60 + d.getMinutes();
-          if (tFrom !== null && mins < tFrom) return false;
-          if (tTo !== null && mins > tTo) return false;
+          if (!isMinutesInRange(mins, tFrom, tTo)) return false;
         }
       }
 
@@ -439,9 +462,8 @@ export default function OutgateReports() {
   const sadFilteredResults = useMemo(() => {
     if (!sadResults || sadResults.length === 0) return [];
 
-    const df = dateFrom ? new Date(dateFrom) : null;
-    const dtRaw = dateTo ? new Date(dateTo) : null;
-    const dt = dtRaw ? new Date(dtRaw.setHours(23, 59, 59, 999)) : null;
+    const df = dateFrom ? new Date(`${dateFrom}T00:00:00`) : null;
+    const dt = dateTo ? new Date(`${dateTo}T23:59:59.999`) : null;
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
@@ -455,9 +477,7 @@ export default function OutgateReports() {
 
       if (tFrom !== null || tTo !== null) {
         const mins = d.getHours() * 60 + d.getMinutes();
-        const from = tFrom != null ? tFrom : 0;
-        const to = tTo != null ? tTo : 24 * 60 - 1;
-        if (mins < from || mins > to) return false;
+        if (!isMinutesInRange(mins, tFrom, tTo)) return false;
       }
 
       return true;
@@ -474,6 +494,9 @@ export default function OutgateReports() {
     }
     return { transactions: sadFilteredResults.length, cumulativeNet };
   }, [sadFilteredResults]);
+
+  // convenience flag: are we actively searching (SAD search)?
+  const isSearching = Boolean((searchTerm || '').trim());
 
   const displayedUniqueTicketCount = useMemo(() => {
     // Count unique ticketNo values present in sortedReports (excluding null/empty)
@@ -505,6 +528,7 @@ export default function OutgateReports() {
     toast({ title: 'Filters reset', status: 'info', duration: 1500 });
   };
 
+  // totals for the stat cards: derived from filteredReports (unique-ticket view respecting filters)
   const totals = useMemo(() => {
     let gross = 0, tare = 0, net = 0;
     let grossCount = 0, tareCount = 0, netCount = 0;
@@ -615,9 +639,6 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
-  // convenience flag: are we actively searching (SAD search)?
-  const isSearching = Boolean((searchTerm || '').trim());
-
   return (
     <Box p={{ base: 4, md: 8 }}>
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
@@ -646,13 +667,14 @@ export default function OutgateReports() {
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>unique ticket numbers</StatHelpText>
+          <StatHelpText>Unique ticket numbers (system-wide)</StatHelpText>
         </Stat>
 
+        {/* Replaced "Displayed Unique Tickets" with "Filtered Transactions" */}
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Displayed Unique Tickets</StatLabel>
-          <StatNumber>{displayedUniqueTicketCount}</StatNumber>
-          <StatHelpText>unique ticket numbers in current view</StatHelpText>
+          <StatLabel>Filtered Transactions</StatLabel>
+          <StatNumber>{totals.reportsCount}</StatNumber>
+          <StatHelpText>Unique tickets after filters (search/date/time)</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
@@ -683,6 +705,7 @@ export default function OutgateReports() {
               <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }} />
               <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
+            <Text fontSize="xs" color="gray.500" mt={1}>Dates are inclusive.</Text>
           </Box>
 
           <Box>
@@ -691,6 +714,7 @@ export default function OutgateReports() {
               <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); setCurrentPage(1); }} />
               <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
+            <Text fontSize="xs" color="gray.500" mt={1}>Wrap-around allowed (e.g., 22:00 → 06:00).</Text>
           </Box>
 
           <Box>
@@ -704,7 +728,6 @@ export default function OutgateReports() {
         </SimpleGrid>
       </Box>
 
-      {/* SAD results table: shown when searching and results exist */}
       {sadLoading ? (
         <Flex justify="center" mb={4}><Spinner /></Flex>
       ) : (isSearching && sadFilteredResults && sadFilteredResults.length > 0) ? (
@@ -759,11 +782,14 @@ export default function OutgateReports() {
             </Table>
           </Box>
         </Box>
+      ) : isSearching && !sadLoading ? (
+        // If searching but there are no SAD results after filters, show a small message
+        <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+          <Text>No transactions found for this SAD within the selected date/time range.</Text>
+        </Box>
       ) : null}
 
-      {/* Main unique-ticket table: only shown when NOT searching.
-          This prevents the table from appearing before a search as requested.
-      */}
+      {/* Show main unique-ticket table only when NOT searching */}
       {!isSearching && (
         <>
           {loading ? (
