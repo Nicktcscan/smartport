@@ -1,5 +1,5 @@
 // src/pages/OutgateReports.jsx
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Box,
   Button,
@@ -133,6 +133,87 @@ export default function OutgateReports() {
     return hh * 60 + mm;
   };
 
+  // Helper: compute filtered SAD tickets from a given original array, honoring date/time/status/sort
+  const computeSadFiltered = useCallback(
+    (originalArr = []) => {
+      let arr = Array.isArray(originalArr) ? originalArr.slice() : [];
+
+      // Date/time filtering
+      const tf = parseTimeToMinutes(sadTimeFrom);
+      const tt = parseTimeToMinutes(sadTimeTo);
+      const hasDateRange = !!(sadDateFrom || sadDateTo);
+      const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
+      const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
+
+      arr = arr.filter((t) => {
+        const dRaw = t.data.date;
+        const d = dRaw ? new Date(dRaw) : null;
+        if (!d) {
+          // If there's a date filter, exclude rows with no date
+          if (hasDateRange || sadTimeFrom || sadTimeTo) return false;
+          return true;
+        }
+        if (hasDateRange) {
+          let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+          let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+          if (sadTimeFrom) {
+            const mins = parseTimeToMinutes(sadTimeFrom);
+            if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+          }
+          if (sadTimeTo) {
+            const mins = parseTimeToMinutes(sadTimeTo);
+            if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+          }
+          if (d < start || d > end) return false;
+        } else if (sadTimeFrom || sadTimeTo) {
+          const minutes = d.getHours() * 60 + d.getMinutes();
+          const from = tf != null ? tf : 0;
+          const to = tt != null ? tt : 24 * 60 - 1;
+          if (minutes < from || minutes > to) return false;
+        }
+        return true;
+      });
+
+      // Filter by status if requested
+      if (sadSortStatus) {
+        arr = arr.filter((t) => (t.data.status || 'Pending') === sadSortStatus);
+      }
+
+      // Sort by requested status ordering (but keep newest-first within groups)
+      if (sadSortOrder === 'pending_first') {
+        arr.sort((a, b) => {
+          const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
+          const bIsPending = (b.data.status || 'Pending') === 'Pending' ? 0 : 1;
+          if (aIsPending !== bIsPending) return aIsPending - bIsPending;
+          // same group: newest first
+          const da = a.data.date ? new Date(a.data.date).getTime() : 0;
+          const db = b.data.date ? new Date(b.data.date).getTime() : 0;
+          return db - da;
+        });
+      } else if (sadSortOrder === 'exited_first') {
+        arr.sort((a, b) => {
+          const aIsExited = (a.data.status || 'Pending') === 'Exited' ? 0 : 1;
+          const bIsExited = (b.data.status || 'Pending') === 'Exited' ? 0 : 1;
+          if (aIsExited !== bIsExited) return aIsExited - bIsExited;
+          // same group: newest first
+          const da = a.data.date ? new Date(a.data.date).getTime() : 0;
+          const db = b.data.date ? new Date(b.data.date).getTime() : 0;
+          return db - da;
+        });
+      } else {
+        // Default: newest first (date descending)
+        arr.sort((a, b) => {
+          const da = a.data.date ? new Date(a.data.date).getTime() : 0;
+          const db = b.data.date ? new Date(b.data.date).getTime() : 0;
+          return db - da;
+        });
+      }
+
+      return arr;
+    },
+    [sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortStatus, sadSortOrder]
+  );
+
   const handleGenerateSad = async () => {
     if (!sadQuery.trim()) {
       toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
@@ -140,11 +221,12 @@ export default function OutgateReports() {
     }
     try {
       setSadLoading(true);
+      // Fetch newest first (date descending)
       const { data, error } = await supabase
         .from('tickets')
         .select('*')
         .ilike('sad_no', `%${sadQuery.trim()}%`)
-        .order('date', { ascending: true });
+        .order('date', { ascending: false }); // NEW: newest first
 
       if (error) throw error;
 
@@ -175,21 +257,31 @@ export default function OutgateReports() {
         };
       });
 
-      setSadOriginal(mapped);
-      setSadTickets(mapped);
+      // Ensure initial mapped list is sorted newest-first (safety)
+      const sortedMapped = mapped.slice().sort((a, b) => {
+        const da = a.data.date ? new Date(a.data.date).getTime() : 0;
+        const db = b.data.date ? new Date(b.data.date).getTime() : 0;
+        return db - da;
+      });
+
+      setSadOriginal(sortedMapped);
+      // compute filtered version (honor any existing filters)
+      setSadTickets(computeSadFiltered(sortedMapped));
       setSadDateFrom('');
       setSadDateTo('');
       setSadTimeFrom('');
       setSadTimeTo('');
       setSadMeta({
         sad: sadQuery.trim(),
-        dateRangeText: mapped.length > 0 && mapped[0].data.date ? new Date(mapped[0].data.date).toLocaleDateString() : 'All',
+        dateRangeText: sortedMapped.length > 0 && sortedMapped[0].data.date ? new Date(sortedMapped[0].data.date).toLocaleDateString() : 'All',
         startTimeLabel: '',
         endTimeLabel: '',
       });
 
-      if ((mapped || []).length === 0) {
+      if ((sortedMapped || []).length === 0) {
         toast({ title: 'No tickets found', status: 'info', duration: 2500 });
+      } else {
+        toast({ title: `Found ${sortedMapped.length} ticket(s)`, status: 'success', duration: 1500 });
       }
     } catch (err) {
       console.error(err);
@@ -199,48 +291,19 @@ export default function OutgateReports() {
     }
   };
 
+  // Recompute filtered tickets whenever original data or filter controls change
+  useEffect(() => {
+    setSadTickets(computeSadFiltered(sadOriginal));
+  }, [sadOriginal, computeSadFiltered]);
+
   const applySadRange = () => {
-    if (!sadOriginal || sadOriginal.length === 0) return;
-    const tf = parseTimeToMinutes(sadTimeFrom);
-    const tt = parseTimeToMinutes(sadTimeTo);
-    const hasDateRange = !!(sadDateFrom || sadDateTo);
-    const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
-    const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
-
-    const filtered = sadOriginal.filter((t) => {
-      const dRaw = t.data.date;
-      const d = dRaw ? new Date(dRaw) : null;
-      if (!d) return false;
-      if (hasDateRange) {
-        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
-        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
-        if (sadTimeFrom) {
-          const mins = parseTimeToMinutes(sadTimeFrom);
-          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-        }
-        if (sadTimeTo) {
-          const mins = parseTimeToMinutes(sadTimeTo);
-          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
-        }
-        return d >= start && d <= end;
-      } else if (sadTimeFrom || sadTimeTo) {
-        const minutes = d.getHours() * 60 + d.getMinutes();
-        const from = tf != null ? tf : 0;
-        const to = tt != null ? tt : 24 * 60 - 1;
-        return minutes >= from && minutes <= to;
-      }
-      return true;
-    });
-
-    setSadTickets(filtered);
-
+    setSadTickets(computeSadFiltered(sadOriginal));
     const startLabel = sadDateFrom ? `${sadTimeFrom || '00:00'} (${sadDateFrom})` : sadTimeFrom ? `${sadTimeFrom}` : '';
     const endLabel = sadDateTo ? `${sadTimeTo || '23:59'} (${sadDateTo})` : sadTimeTo ? `${sadTimeTo}` : '';
     let dateRangeText = '';
     if (sadDateFrom && sadDateTo) dateRangeText = `${sadDateFrom} → ${sadDateTo}`;
     else if (sadDateFrom) dateRangeText = sadDateFrom;
     else if (sadDateTo) dateRangeText = sadDateTo;
-
     setSadMeta((s) => ({ ...s, dateRangeText: dateRangeText || (sadOriginal[0]?.data?.date ? new Date(sadOriginal[0].data.date).toLocaleDateString() : ''), startTimeLabel: startLabel, endTimeLabel: endLabel }));
   };
 
@@ -249,49 +312,132 @@ export default function OutgateReports() {
     setSadDateTo('');
     setSadTimeFrom('');
     setSadTimeTo('');
-    setSadTickets(sadOriginal);
+    setSadTickets(computeSadFiltered(sadOriginal));
     setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
 
-  // derived filtered & sorted SAD list based on status and order
-  const filteredSadTickets = useMemo(() => {
-    let arr = Array.isArray(sadTickets) ? sadTickets.slice() : [];
+  const resetSearch = () => {
+    setSadQuery('');
+    setSadOriginal([]);
+    setSadTickets([]);
+    setSadMeta({});
+    setSadDateFrom('');
+    setSadDateTo('');
+    setSadTimeFrom('');
+    setSadTimeTo('');
+    setSadSortOrder('none');
+    setSadSortStatus('');
+  };
 
-    if (sadSortStatus) {
-      arr = arr.filter((t) => (t.data.status || 'Pending') === sadSortStatus);
+  // subscription for realtime new tickets for the current SAD
+  useEffect(() => {
+    // no subscription unless there is a query
+    const q = (sadQuery || '').trim();
+    if (!q) return undefined;
+
+    // Build supabase subscription filtered by sad_no equals the query string
+    // Using `.from('tickets:sad_no=eq.<value>')` pattern supported by supabase-js v1
+    let sub;
+    try {
+      sub = supabase
+        .from(`tickets:sad_no=eq.${q}`)
+        .on('INSERT', (payload) => {
+          const ticket = payload.new;
+          // map incoming ticket to the same shape
+          const exitCandidate = ticket.status === 'Exited'
+            ? ticket.date
+            : (ticket.exit_date || ticket.outgate_date || ticket.outgate_at || ticket.exited_at || null);
+
+          const inferredStatus = ticket.status ? String(ticket.status) : (exitCandidate ? 'Exited' : 'Pending');
+
+          const newMapped = {
+            ticketId: ticket.ticket_id || (ticket.id ? String(ticket.id) : `${Math.random()}`),
+            data: {
+              sadNo: ticket.sad_no ?? ticket.sadNo ?? '',
+              ticketNo: ticket.ticket_no ?? '',
+              date: ticket.date || ticket.submitted_at || exitCandidate || null,
+              gnswTruckNo: ticket.gnsw_truck_no || ticket.vehicle_number || ticket.truck_no || '',
+              gross: ticket.gross ?? null,
+              tare: ticket.tare ?? null,
+              net: ticket.net ?? null,
+              driver: ticket.driver ?? 'N/A',
+              consignee: ticket.consignee ?? '',
+              operator: ticket.operator ?? '',
+              containerNo: ticket.container_no ?? '',
+              fileUrl: ticket.file_url ?? null,
+              status: inferredStatus,
+            },
+          };
+
+          // merge into original (avoid duplicates)
+          setSadOriginal((prev) => {
+            const exists = prev.some((p) => p.ticketId === newMapped.ticketId || (p.data.ticketNo && newMapped.data.ticketNo && p.data.ticketNo === newMapped.data.ticketNo));
+            if (exists) {
+              // update existing if desired (here we replace)
+              const updated = prev.map((p) => (p.ticketId === newMapped.ticketId || (p.data.ticketNo && newMapped.data.ticketNo && p.data.ticketNo === newMapped.data.ticketNo) ? newMapped : p));
+              // ensure newest-first order
+              updated.sort((a, b) => {
+                const da = a.data.date ? new Date(a.data.date).getTime() : 0;
+                const db = b.data.date ? new Date(b.data.date).getTime() : 0;
+                return db - da;
+              });
+              // propagate
+              // also update visible filtered list using computeSadFiltered
+              setSadTickets(computeSadFiltered(updated));
+              return updated;
+            } else {
+              // prepend so new records appear on top
+              const next = [newMapped, ...prev];
+              // ensure newest-first order (in case incoming date is older)
+              next.sort((a, b) => {
+                const da = a.data.date ? new Date(a.data.date).getTime() : 0;
+                const db = b.data.date ? new Date(b.data.date).getTime() : 0;
+                return db - da;
+              });
+              // compute filtered tickets from new original
+              setSadTickets(computeSadFiltered(next));
+              toast({ title: 'New ticket received', description: `Ticket ${newMapped.data.ticketNo || newMapped.ticketId} for SAD ${q}`, status: 'info', duration: 4000, isClosable: true });
+              return next;
+            }
+          });
+        })
+        .subscribe();
+    } catch (e) {
+      console.warn('Realtime subscription failed to init', e);
     }
 
-    if (sadSortOrder === 'pending_first') {
-      arr.sort((a, b) => {
-        const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        const bIsPending = (b.data.status || 'Pending') === 'Pending' ? 0 : 1;
-        return aIsPending - bIsPending; // pending first
-      });
-    } else if (sadSortOrder === 'exited_first') {
-      arr.sort((a, b) => {
-        const aIsExited = (a.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        const bIsExited = (b.data.status || 'Pending') === 'Exited' ? 0 : 1;
-        return aIsExited - bIsExited; // exited first
-      });
-    }
+    // cleanup on change / unmount
+    return () => {
+      try {
+        if (sub) supabase.removeSubscription(sub);
+      } catch (e) {
+        // newer supabase client versions use removeChannel; attempt both might be needed.
+        try {
+          if (sub) supabase.removeChannel(sub);
+        } catch (_) {
+          // ignore
+        }
+      }
+    };
+    // Only subscribe/unsubscribe when sadQuery changes
+  }, [sadQuery, computeSadFiltered, toast]);
 
-    return arr;
-  }, [sadTickets, sadSortStatus, sadSortOrder]);
+  // derived filtered & sorted SAD list based on status and order is handled in computeSadFiltered -> sadTickets already honors it.
 
   const cumulativeNet = useMemo(() => {
-    return filteredSadTickets.reduce((sum, t) => {
+    return sadTickets.reduce((sum, t) => {
       const { net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
       return sum + (net || 0);
     }, 0);
-  }, [filteredSadTickets]);
+  }, [sadTickets]);
 
   const handleDownloadSadPdf = async () => {
-    if (!filteredSadTickets || filteredSadTickets.length === 0) {
+    if (!sadTickets || sadTickets.length === 0) {
       toast({ title: 'No tickets', description: 'Nothing to export', status: 'info', duration: 2500 });
       return;
     }
 
-    const rowsHtml = filteredSadTickets
+    const rowsHtml = sadTickets
       .map((t) => {
         const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
         return `<tr>
@@ -337,16 +483,16 @@ export default function OutgateReports() {
   const handleEmailSad = async () => {
     await handleDownloadSadPdf();
     const subject = encodeURIComponent(`Weighbridge SAD ${sadMeta.sad} Report`);
-    const body = encodeURIComponent(`Please find Weighbridge report for SAD ${sadMeta.sad}.\n\nTransactions: ${filteredSadTickets.length}\nCumulative Net: ${Number(cumulativeNet || 0).toLocaleString()} kg\n\n(Please attach the downloaded PDF if it wasn't attached automatically)`);
+    const body = encodeURIComponent(`Please find Weighbridge report for SAD ${sadMeta.sad}.\n\nTransactions: ${sadTickets.length}\nCumulative Net: ${Number(cumulativeNet || 0).toLocaleString()} kg\n\n(Please attach the downloaded PDF if it wasn't attached automatically)`);
     window.location.href = `mailto:?subject=${subject}&body=${body}`;
   };
 
   const handleExportSadCsv = () => {
-    if (!filteredSadTickets.length) {
+    if (!sadTickets.length) {
       toast({ title: 'No rows to export', status: 'info', duration: 2000 });
       return;
     }
-    const rows = filteredSadTickets.map(t => {
+    const rows = sadTickets.map(t => {
       const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
       return {
         'SAD No': t.data.sadNo ?? '',
@@ -375,7 +521,7 @@ export default function OutgateReports() {
         <HStack spacing={4}>
           <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
             <StatLabel>Total Transactions</StatLabel>
-            <StatNumber>{filteredSadTickets.length}</StatNumber>
+            <StatNumber>{sadTickets.length}</StatNumber>
             <StatHelpText>{sadOriginal.length > 0 ? `of ${sadOriginal.length} returned` : ''}</StatHelpText>
           </Stat>
 
@@ -401,7 +547,7 @@ export default function OutgateReports() {
           </Button>
 
           <Box ml="auto" display="flex" gap={2}>
-            <Button size="sm" variant="ghost" onClick={() => { setSadQuery(''); setSadTickets([]); setSadOriginal([]); setSadMeta({}); }}>
+            <Button size="sm" variant="ghost" onClick={() => { resetSearch(); }}>
               Clear
             </Button>
           </Box>
@@ -465,9 +611,9 @@ export default function OutgateReports() {
         )}
       </Box>
 
-      {filteredSadTickets.length > 0 && (
+      {sadTickets.length > 0 && (
         <Box mb={6} bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <Text fontWeight="semibold" mb={3}>SAD Results — {sadMeta.sad} ({filteredSadTickets.length} records)</Text>
+          <Text fontWeight="semibold" mb={3}>SAD Results — {sadMeta.sad} ({sadTickets.length} records)</Text>
           <Table variant="striped" size="sm">
             <Thead>
               <Tr>
@@ -483,7 +629,7 @@ export default function OutgateReports() {
               </Tr>
             </Thead>
             <Tbody>
-              {filteredSadTickets.map((t) => {
+              {sadTickets.map((t) => {
                 const { gross, tare, net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
                 return (
                   <Tr key={t.ticketId}>
