@@ -175,7 +175,7 @@ export default function ConfirmExit() {
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
 
-  const [allTickets, setAllTickets] = useState([]); // pending tickets (status = 'Pending')
+  const [allTickets, setAllTickets] = useState([]); // pending tickets (status = 'Pending') - used for pending list
   const [filteredResults, setFilteredResults] = useState([]);
   const [confirmedTickets, setConfirmedTickets] = useState([]); // deduped confirmed exits (unique by ticket_id)
   const [selectedTicket, setSelectedTicket] = useState(null);
@@ -189,6 +189,7 @@ export default function ConfirmExit() {
   const toast = useToast();
 
   const [totalTickets, setTotalTickets] = useState(null);
+  const [exitedCount, setExitedCount] = useState(0); // count of tickets.status === 'Exited'
   const printRef = useRef(null);
 
   // Confirmed search (live)
@@ -221,7 +222,7 @@ export default function ConfirmExit() {
     return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
   };
 
-  // Fetch pending tickets (Pending)
+  // Fetch pending tickets (status = 'Pending')
   const fetchTickets = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -253,7 +254,6 @@ export default function ConfirmExit() {
       // Deduplicate by ticket_id: keep the first (newest) row per ticket_id
       const dedupeMap = new Map();
       for (const r of rows) {
-        // Only dedupe rows that have a ticket_id; rows with no ticket_id will be kept separately (but not counted towards unique confirmed count)
         if (r.ticket_id) {
           if (!dedupeMap.has(r.ticket_id)) {
             dedupeMap.set(r.ticket_id, r);
@@ -261,18 +261,12 @@ export default function ConfirmExit() {
         }
       }
 
-      // Keep unique deduped rows (as an array)
       const deduped = Array.from(dedupeMap.values());
-
-      // For rows without ticket_id (rare), we can optionally keep them appended (but they won't affect unique ticket counts)
       const noTicketIdRows = rows.filter((r) => !r.ticket_id);
-
-      // Combine deduped (unique) + noTicketIdRows (kept at the end)
       const finalConfirmed = [...deduped, ...noTicketIdRows];
 
-      // For any finalConfirmed rows missing driver and having a PDF, try to extract driver (best-effort)
+      // Try best-effort to extract driver names for missing driver fields from PDFs (non-blocking)
       const needsDriver = finalConfirmed.filter((r) => (!r.driver || r.driver === '') && r.file_url && isPdfUrl(r.file_url));
-
       if (needsDriver.length) {
         for (const r of needsDriver) {
           try {
@@ -280,7 +274,6 @@ export default function ConfirmExit() {
             const parsed = parseDriverNameFromText(text);
             if (parsed) {
               r.driver = parsed;
-              // Best-effort persist back to outgate
               try {
                 await supabase.from('outgate').update({ driver: parsed }).eq('id', r.id);
               } catch (e) {
@@ -299,110 +292,118 @@ export default function ConfirmExit() {
     }
   }, [toast]);
 
+  // Fetch totals: total tickets and exited tickets count
   const fetchTotalTickets = useCallback(async () => {
     try {
-      // get count directly
-      const resp = await supabase.from('tickets').select('ticket_id', { count: 'exact', head: true });
-      const cnt = resp?.count ?? null;
-      if (cnt != null) {
-        setTotalTickets(cnt);
-        return;
-      }
-      const { data } = await supabase.from('tickets').select('ticket_id');
-      setTotalTickets((data || []).length);
-    } catch {
+      // total count
+      const respAll = await supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' });
+      const total = respAll?.count ?? null;
+
+      // exited count
+      const respExited = await supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' }).eq('status', 'Exited');
+      const exited = respExited?.count ?? 0;
+
+      setTotalTickets(total);
+      setExitedCount(exited);
+    } catch (err) {
+      console.warn('fetchTotalTickets failed', err);
       setTotalTickets(null);
+      setExitedCount(0);
     }
   }, []);
 
+  // initial load
   useEffect(() => {
     fetchTickets();
     fetchConfirmedExits();
     fetchTotalTickets();
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // -----------------------------
-  // Realtime subscriptions (Supabase)
-  // -----------------------------
+  // Realtime subscriptions: when tickets/outgate change refresh lists (works with older/newer supabase clients)
   useEffect(() => {
     let ticketSub = null;
     let outgateSub = null;
-    let channel = null;
 
-    const subscribe = async () => {
+    const setup = async () => {
       try {
-        // Modern API: channel + postgres_changes
-        if (supabase.channel) {
-          channel = supabase.channel('realtime:tickets_outgate');
+        // Newer client (v2) — channel-based realtime (if available)
+        if (typeof supabase.channel === 'function') {
+          try {
+            ticketSub = supabase
+              .channel('public:tickets')
+              .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'tickets' },
+                () => {
+                  fetchTickets();
+                  fetchTotalTickets();
+                }
+              )
+              .subscribe();
 
-          channel
-            .on(
-              'postgres_changes',
-              { event: '*', schema: 'public', table: 'tickets' },
-              (payload) => {
-                // console.log('realtime tickets payload', payload);
-                // refresh pending + total count
-                fetchTickets().catch((e) => console.warn('fetchTickets error from realtime:', e));
-                fetchTotalTickets().catch((e) => console.warn('fetchTotalTickets error from realtime:', e));
-              }
-            )
-            .on(
-              'postgres_changes',
-              { event: '*', schema: 'public', table: 'outgate' },
-              (payload) => {
-                // console.log('realtime outgate payload', payload);
-                fetchConfirmedExits().catch((e) => console.warn('fetchConfirmedExits error from realtime:', e));
-              }
-            );
-
-          await channel.subscribe();
-        } else if (supabase.from) {
-          // Legacy API fallback
-          ticketSub = supabase
-            .from('tickets')
-            .on('*', (payload) => {
-              // console.log('legacy realtime tickets payload', payload);
-              fetchTickets().catch((e) => console.warn('fetchTickets error from legacy realtime:', e));
-              fetchTotalTickets().catch((e) => console.warn('fetchTotalTickets error from legacy realtime:', e));
-            })
-            .subscribe();
-
-          outgateSub = supabase
-            .from('outgate')
-            .on('*', (payload) => {
-              // console.log('legacy realtime outgate payload', payload);
-              fetchConfirmedExits().catch((e) => console.warn('fetchConfirmedExits error from legacy realtime:', e));
-            })
-            .subscribe();
-        } else {
-          console.warn('Supabase realtime not available on this client');
+            outgateSub = supabase
+              .channel('public:outgate')
+              .on(
+                'postgres_changes',
+                { event: '*', schema: 'public', table: 'outgate' },
+                () => {
+                  fetchConfirmedExits();
+                }
+              )
+              .subscribe();
+          } catch (e) {
+            // fall back if channel subscription fails
+            ticketSub = null;
+            outgateSub = null;
+          }
         }
-      } catch (e) {
-        console.warn('Realtime subscribe failed', e);
+
+        // Older client fallback: supabase.from(...).on(...).subscribe()
+        if (!ticketSub && typeof supabase.from === 'function' && typeof supabase.from('').on === 'function') {
+          try {
+            ticketSub = supabase
+              .from('tickets')
+              .on('*', (payload) => {
+                // refresh counters and pending tickets
+                fetchTickets();
+                fetchTotalTickets();
+              })
+              .subscribe();
+
+            outgateSub = supabase
+              .from('outgate')
+              .on('*', (payload) => {
+                fetchConfirmedExits();
+              })
+              .subscribe();
+          } catch (e) {
+            ticketSub = null;
+            outgateSub = null;
+          }
+        }
+      } catch (err) {
+        // ignore realtime binding errors — app continues to poll on actions
+        console.warn('realtime setup failed', err);
       }
     };
 
-    subscribe();
+    setup();
 
     return () => {
-      // cleanup
       try {
-        if (ticketSub && supabase.removeSubscription) supabase.removeSubscription(ticketSub);
-        else if (ticketSub && ticketSub.unsubscribe) ticketSub.unsubscribe();
+        // cleanup both styles
+        if (ticketSub) {
+          if (ticketSub.unsubscribe) ticketSub.unsubscribe();
+          else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(ticketSub);
+          else if (typeof supabase.removeSubscription === 'function') supabase.removeSubscription(ticketSub);
+        }
+        if (outgateSub) {
+          if (outgateSub.unsubscribe) outgateSub.unsubscribe();
+          else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(outgateSub);
+          else if (typeof supabase.removeSubscription === 'function') supabase.removeSubscription(outgateSub);
+        }
       } catch (e) {
-        // ignore
-      }
-      try {
-        if (outgateSub && supabase.removeSubscription) supabase.removeSubscription(outgateSub);
-        else if (outgateSub && outgateSub.unsubscribe) outgateSub.unsubscribe();
-      } catch (e) {
-        // ignore
-      }
-      try {
-        if (channel && channel.unsubscribe) channel.unsubscribe();
-        else if (channel && supabase.removeChannel) supabase.removeChannel(channel);
-      } catch (e) {
-        // ignore
+        // ignore cleanup failures
       }
     };
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
@@ -617,11 +618,10 @@ export default function ConfirmExit() {
         tare,
         net,
         // date represents entry date; outgate table uses created_at for exit time
-        // include date if you want to store original entry date
         date: selectedTicket.date || null,
         file_url: selectedTicket.file_url || null,
         file_name: selectedTicket.file_name || null,
-        driver: resolvedDriver || null, // <-- include driver column in outgate
+        driver: resolvedDriver || null,
       };
 
       // Prevent duplicate outgate insert for same ticket_id
@@ -764,9 +764,9 @@ export default function ConfirmExit() {
     w.close();
   };
 
-  // Derived counts for stats (use deduped confirmed count)
+  // Derived counts for stats
   const pendingCount = allTickets.length; // Pending rows (not yet Exited)
-  const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length; // number of unique ticket_id
+  const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length; // number of unique ticket_id in outgate
   const noTicketIdConfirmedCount = confirmedTickets.filter((t) => !t.ticket_id).length;
 
   return (
@@ -797,16 +797,19 @@ export default function ConfirmExit() {
           <StatNumber>{pendingCount}</StatNumber>
           <StatHelpText>Tickets awaiting exit</StatHelpText>
         </Stat>
+
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="gray.200">
           <StatLabel>Confirmed Exits</StatLabel>
-          <StatNumber>{confirmedUniqueCount}</StatNumber>
-          <StatHelpText>Unique confirmed tickets ({noTicketIdConfirmedCount} rows without ticket_id)</StatHelpText>
+          <StatNumber>{exitedCount}</StatNumber>
+          <StatHelpText>All tickets with status Exited</StatHelpText>
         </Stat>
+
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="gray.200">
           <StatLabel>Total Tickets</StatLabel>
           <StatNumber>{totalTickets != null ? totalTickets : '—'}</StatNumber>
           <StatHelpText>All tickets</StatHelpText>
         </Stat>
+
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="gray.200">
           <StatLabel>Page Size</StatLabel>
           <StatNumber>{pendingPageSize}</StatNumber>
