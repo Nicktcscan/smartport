@@ -144,7 +144,8 @@ export default function OutgateReports() {
         .from('tickets')
         .select('*')
         .ilike('sad_no', `%${sadQuery.trim()}%`)
-        .order('date', { ascending: true });
+        // fetch newest first so newest records appear at top by default
+        .order('date', { ascending: false });
 
       if (error) throw error;
 
@@ -257,10 +258,12 @@ export default function OutgateReports() {
   const filteredSadTickets = useMemo(() => {
     let arr = Array.isArray(sadTickets) ? sadTickets.slice() : [];
 
+    // filter by status if requested
     if (sadSortStatus) {
       arr = arr.filter((t) => (t.data.status || 'Pending') === sadSortStatus);
     }
 
+    // status sorting (keeps groups together)
     if (sadSortOrder === 'pending_first') {
       arr.sort((a, b) => {
         const aIsPending = (a.data.status || 'Pending') === 'Pending' ? 0 : 1;
@@ -274,6 +277,14 @@ export default function OutgateReports() {
         return aIsExited - bIsExited; // exited first
       });
     }
+
+    // ALWAYS ensure newest records appear on top: sort by date descending (newest first).
+    // Treat missing dates as very old (push them to the bottom).
+    arr.sort((a, b) => {
+      const dateA = a?.data?.date ? new Date(a.data.date).getTime() : -8640000000000000; // very old
+      const dateB = b?.data?.date ? new Date(b.data.date).getTime() : -8640000000000000;
+      return dateB - dateA; // newest first
+    });
 
     return arr;
   }, [sadTickets, sadSortStatus, sadSortOrder]);
