@@ -321,6 +321,92 @@ export default function ConfirmExit() {
     fetchTotalTickets();
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
+  // -----------------------------
+  // Realtime subscriptions (Supabase)
+  // -----------------------------
+  useEffect(() => {
+    let ticketSub = null;
+    let outgateSub = null;
+    let channel = null;
+
+    const subscribe = async () => {
+      try {
+        // Modern API: channel + postgres_changes
+        if (supabase.channel) {
+          channel = supabase.channel('realtime:tickets_outgate');
+
+          channel
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'tickets' },
+              (payload) => {
+                // console.log('realtime tickets payload', payload);
+                // refresh pending + total count
+                fetchTickets().catch((e) => console.warn('fetchTickets error from realtime:', e));
+                fetchTotalTickets().catch((e) => console.warn('fetchTotalTickets error from realtime:', e));
+              }
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'outgate' },
+              (payload) => {
+                // console.log('realtime outgate payload', payload);
+                fetchConfirmedExits().catch((e) => console.warn('fetchConfirmedExits error from realtime:', e));
+              }
+            );
+
+          await channel.subscribe();
+        } else if (supabase.from) {
+          // Legacy API fallback
+          ticketSub = supabase
+            .from('tickets')
+            .on('*', (payload) => {
+              // console.log('legacy realtime tickets payload', payload);
+              fetchTickets().catch((e) => console.warn('fetchTickets error from legacy realtime:', e));
+              fetchTotalTickets().catch((e) => console.warn('fetchTotalTickets error from legacy realtime:', e));
+            })
+            .subscribe();
+
+          outgateSub = supabase
+            .from('outgate')
+            .on('*', (payload) => {
+              // console.log('legacy realtime outgate payload', payload);
+              fetchConfirmedExits().catch((e) => console.warn('fetchConfirmedExits error from legacy realtime:', e));
+            })
+            .subscribe();
+        } else {
+          console.warn('Supabase realtime not available on this client');
+        }
+      } catch (e) {
+        console.warn('Realtime subscribe failed', e);
+      }
+    };
+
+    subscribe();
+
+    return () => {
+      // cleanup
+      try {
+        if (ticketSub && supabase.removeSubscription) supabase.removeSubscription(ticketSub);
+        else if (ticketSub && ticketSub.unsubscribe) ticketSub.unsubscribe();
+      } catch (e) {
+        // ignore
+      }
+      try {
+        if (outgateSub && supabase.removeSubscription) supabase.removeSubscription(outgateSub);
+        else if (outgateSub && outgateSub.unsubscribe) outgateSub.unsubscribe();
+      } catch (e) {
+        // ignore
+      }
+      try {
+        if (channel && channel.unsubscribe) channel.unsubscribe();
+        else if (channel && supabase.removeChannel) supabase.removeChannel(channel);
+      } catch (e) {
+        // ignore
+      }
+    };
+  }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
+
   // Exclude confirmed tickets from pending list (use the deduped confirmed ticket_ids)
   useEffect(() => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
