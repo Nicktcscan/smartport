@@ -111,11 +111,6 @@ function openPrintableWindow(html, title = 'Report') {
 /**
  * Deduplicate an array of mapped rows by ticket number or ticketId.
  * Keeps the first occurrence (assumes array sorted newest-first where appropriate).
- *
- * Rules:
- *  - Prefer dedupe key = normalized ticketNo (trimmed string) if present and non-empty.
- *  - If ticketNo not present, fall back to ticketId.
- *  - Rows lacking both are preserved in order after deduplication (to avoid dropping data).
  */
 function dedupeByTicket(arr = []) {
   const seen = new Set();
@@ -136,7 +131,6 @@ function dedupeByTicket(arr = []) {
   for (const item of arr) {
     const key = normalizeKey(item);
     if (!key) {
-      // keep rows lacking both ticketNo and ticketId for later (so they don't block dedupe)
       noKeyRows.push(item);
       continue;
     }
@@ -145,7 +139,6 @@ function dedupeByTicket(arr = []) {
     out.push(item);
   }
 
-  // append no-key rows at the end (preserve their original order)
   return [...out, ...noKeyRows];
 }
 
@@ -164,9 +157,8 @@ export default function OutgateReports() {
   const [sadMeta, setSadMeta] = useState({});
 
   // status/sort controls (kept for UI compatibility)
-  const [sadSortStatus, setSadSortStatus] = useState(''); // '', 'Pending', 'Exited'  (outgate rows are Exited)
-  // we no longer use sadSortOrder for the "exited first" logic because outgate rows are all exited; keep for UI but default to newest first
-  const [sadSortOrder, setSadSortOrder] = useState('none'); // unused for outgate but left for compatibility
+  const [sadSortStatus, setSadSortStatus] = useState(''); // '', 'Pending', 'Exited'
+  const [sadSortOrder, setSadSortOrder] = useState('none');
 
   const parseTimeToMinutes = (timeStr) => {
     if (!timeStr) return null;
@@ -177,14 +169,16 @@ export default function OutgateReports() {
 
   // Helper: map an outgate row to the UI shape used in this component
   const mapOutgateRow = (row) => {
-    // Use created_at as the exit timestamp if present, otherwise date
-    const dateVal = row.date || row.created_at || null;
+    // Important: keep weighed_at separate from exitTime
+    // weighed_at => row.date (timestamp from tickets when weighed)
+    // exitTime => row.created_at (when outgate record was created / exit confirmed)
     return {
       ticketId: row.ticket_id || (row.id ? String(row.id) : `${Math.random()}`),
       data: {
         sadNo: row.sad_no ?? '',
         ticketNo: row.ticket_no ?? '',
-        date: dateVal,
+        weighed_at: row.date ?? null, // weighbridge timestamp
+        exitTime: row.created_at ?? null, // outgate created_at (exit time)
         gnswTruckNo: row.vehicle_number ?? '',
         gross: row.gross ?? null,
         tare: row.tare ?? null,
@@ -193,12 +187,15 @@ export default function OutgateReports() {
         containerNo: row.container_id ?? '',
         fileUrl: row.file_url ?? null,
         status: 'Exited',
-        created_at: row.created_at ?? row.date ?? null,
+        // keep created_at for sorting/filtering if needed
+        created_at: row.created_at ?? null,
+        date: row.date ?? null,
       },
     };
   };
 
   // Utility that returns the filtered tickets from an original array given current date/time filters
+  // Filters are applied against the WEIGHED_AT (row.date) as before (so date/time range filters control weighed_at)
   const computeFilteredFromOriginal = (originalArr) => {
     if (!originalArr) return [];
     const tfMinutes = parseTimeToMinutes(sadTimeFrom);
@@ -208,7 +205,7 @@ export default function OutgateReports() {
     const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
 
     const filtered = originalArr.filter((t) => {
-      const dRaw = t.data.date;
+      const dRaw = t.data.weighed_at; // filter by weighed_at
       const d = dRaw ? new Date(dRaw) : null;
       if (!d) return false;
       if (hasDateRange) {
@@ -230,7 +227,6 @@ export default function OutgateReports() {
         if (minutes < from || minutes > to) return false;
       }
 
-      // status filter: outgate rows are "Exited" by definition, but keep the check for UI compatibility
       if (sadSortStatus) {
         if ((t.data.status || 'Exited') !== sadSortStatus) return false;
       }
@@ -238,10 +234,10 @@ export default function OutgateReports() {
       return true;
     });
 
-    // Sort newest first by created_at or date
+    // Sort newest first by exitTime (created_at) if present, else weighed_at
     filtered.sort((a, b) => {
-      const da = new Date(a.data.created_at ?? a.data.date ?? 0).getTime();
-      const db = new Date(b.data.created_at ?? b.data.date ?? 0).getTime();
+      const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+      const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
       return db - da; // newest first
     });
 
@@ -268,10 +264,10 @@ export default function OutgateReports() {
 
       const mapped = (data || []).map(mapOutgateRow);
 
-      // ensure newest first
+      // ensure newest first (by exitTime / created_at)
       mapped.sort((a, b) => {
-        const da = new Date(a.data.created_at ?? a.data.date ?? 0).getTime();
-        const db = new Date(b.data.created_at ?? b.data.date ?? 0).getTime();
+        const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+        const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
         return db - da;
       });
 
@@ -279,7 +275,7 @@ export default function OutgateReports() {
       const uniqueMapped = dedupeByTicket(mapped);
 
       setSadOriginal(uniqueMapped);
-      // compute filtered view
+      // compute filtered view (filters apply to weighed_at)
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
@@ -289,7 +285,10 @@ export default function OutgateReports() {
       setSadTimeTo('');
       setSadMeta({
         sad: sadQuery.trim(),
-        dateRangeText: uniqueMapped.length > 0 && uniqueMapped[0].data.date ? new Date(uniqueMapped[0].data.date).toLocaleDateString() : 'All',
+        dateRangeText:
+          uniqueMapped.length > 0 && uniqueMapped[0].data.weighed_at
+            ? new Date(uniqueMapped[0].data.weighed_at).toLocaleDateString()
+            : 'All',
         startTimeLabel: '',
         endTimeLabel: '',
       });
@@ -319,9 +318,7 @@ export default function OutgateReports() {
     setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
 
-  // Derived filtered & sorted SAD list (already sorted newest-first in computeFilteredFromOriginal)
   const filteredSadTickets = useMemo(() => {
-    // We rely on sadTickets being already filtered & sorted. Return a copy.
     return Array.isArray(sadTickets) ? sadTickets.slice() : [];
   }, [sadTickets]);
 
@@ -344,7 +341,8 @@ export default function OutgateReports() {
         return `<tr>
         <td>${t.data.sadNo ?? ''}</td>
         <td>${t.data.ticketNo ?? ''}</td>
-        <td>${t.data.date ? new Date(t.data.date).toLocaleString() : ''}</td>
+        <td>${t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : ''}</td>
+        <td>${t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : ''}</td>
         <td>${t.data.gnswTruckNo ?? ''}</td>
         <td style="text-align:right">${gross != null ? Number(gross).toLocaleString() : ''}</td>
         <td style="text-align:right">${tare != null ? Number(tare).toLocaleString() : ''}</td>
@@ -360,13 +358,13 @@ export default function OutgateReports() {
       <table>
         <thead>
           <tr>
-            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Status</th>
+            <th>SAD</th><th>Ticket</th><th>Weighed At</th><th>Exit Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Status</th>
           </tr>
         </thead>
         <tbody>
           ${rowsHtml}
           <tr style="font-weight:bold;background:#f0f8ff">
-            <td colspan="7">Cumulative Net</td>
+            <td colspan="8">Cumulative Net</td>
             <td style="text-align:right">${Number(cumulativeNet || 0).toLocaleString()}</td>
           </tr>
         </tbody>
@@ -398,7 +396,8 @@ export default function OutgateReports() {
       return {
         'SAD No': t.data.sadNo ?? '',
         'Ticket No': t.data.ticketNo ?? '',
-        'Date': t.data.date ? new Date(t.data.date).toLocaleString() : '',
+        'Weighed At': t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : '',
+        'Exit Time': t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : '',
         'Truck': t.data.gnswTruckNo ?? '',
         'Gross (kg)': gross ?? '',
         'Tare (kg)': tare ?? '',
@@ -413,7 +412,6 @@ export default function OutgateReports() {
 
   // Real-time subscription: when a SAD search is active, subscribe to outgate inserts & updates
   useEffect(() => {
-    // subscribe only when there's an active SAD query
     if (!sadQuery || !sadQuery.trim()) return;
 
     const queryLower = sadQuery.trim().toLowerCase();
@@ -423,46 +421,38 @@ export default function OutgateReports() {
 
     const handleIncomingRow = (payload) => {
       if (!payload) return;
-      const row = payload.new ?? payload; // payload.new for notify shape, else the row directly
+      const row = payload.new ?? payload;
       if (!row) return;
       const rowSad = (row.sad_no || '').toString().toLowerCase();
-      if (!rowSad.includes(queryLower)) return; // only add if SAD matches current query
+      if (!rowSad.includes(queryLower)) return;
 
       const mapped = mapOutgateRow(row);
 
-      // Prepend to original and update filtered tickets respecting current filters
       setSadOriginal((prev) => {
-        // Remove any existing rows with same ticketNo, then prepend mapped
         const filteredPrev = prev.filter((p) => {
           const a = (p?.data?.ticketNo ?? '').toString().trim();
           const b = (mapped?.data?.ticketNo ?? '').toString().trim();
-          // if both empty, compare ticketId fallback
           if (!a && !b) return p.ticketId !== mapped.ticketId;
           return a !== b;
         });
         const next = [mapped, ...filteredPrev];
-        // keep newest-first sort by created_at/date
         next.sort((a, b) => {
-          const da = new Date(a.data.created_at ?? a.data.date ?? 0).getTime();
-          const db = new Date(b.data.created_at ?? b.data.date ?? 0).getTime();
+          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
           return db - da;
         });
-        // ensure dedupe by ticket (defensive)
         return dedupeByTicket(next);
       });
 
-      // Update the filtered view based on current filters
       setSadTickets((prev) => {
-        // Quick check: if new mapped row passes current filters, prepend it to prev (ensuring sort newest-first)
         const passes = (() => {
-          const dRaw = mapped.data.date;
+          const dRaw = mapped.data.weighed_at;
           const d = dRaw ? new Date(dRaw) : null;
           if (!d) return false;
 
-          // date filters
           if (sadDateFrom || sadDateTo) {
             const start = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : new Date(-8640000000000000);
-            const end = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : new Date(8640000000000000);
+            const end = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : new Date(8640000000000000000);
 
             if (sadTimeFrom) {
               const mins = parseTimeToMinutes(sadTimeFrom);
@@ -480,44 +470,36 @@ export default function OutgateReports() {
             if (mins < from || mins > to) return false;
           }
 
-          // status filter (outgate rows are Exited)
           if (sadSortStatus && (mapped.data.status || 'Exited') !== sadSortStatus) return false;
 
           return true;
         })();
 
-        if (!passes) {
-          // row doesn't pass current view filters -> don't add to current filtered list
-          return prev;
-        }
+        if (!passes) return prev;
 
-        // remove any existing with same ticketNo and prepend
         const next = [mapped, ...prev.filter((p) => {
           const a = (p?.data?.ticketNo ?? '').toString().trim();
           const b = (mapped?.data?.ticketNo ?? '').toString().trim();
           if (!a && !b) return p.ticketId !== mapped.ticketId;
           return a !== b;
         })];
-        // ensure newest-first sort by created_at/date
+
         next.sort((a, b) => {
-          const da = new Date(a.data.created_at ?? a.data.date ?? 0).getTime();
-          const db = new Date(b.data.created_at ?? b.data.date ?? 0).getTime();
+          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
           return db - da;
         });
-        // dedupe defensively
+
         return dedupeByTicket(next);
       });
 
-      // update meta date range text (optional — keep simple)
       setSadMeta((m) => ({
         ...m,
-        dateRangeText: m.dateRangeText || (mapped.data.date ? new Date(mapped.data.date).toLocaleDateString() : m.dateRangeText),
+        dateRangeText: m.dateRangeText || (mapped.data.weighed_at ? new Date(mapped.data.weighed_at).toLocaleDateString() : m.dateRangeText),
       }));
     };
 
-    // subscribe (try modern channel API first, fall back to classic)
     if (supabase.channel) {
-      // modern realtime
       try {
         subscription = supabase
           .channel('public:outgate')
@@ -528,7 +510,6 @@ export default function OutgateReports() {
               if (!isUnsubscribed) handleIncomingRow(payload);
             }
           )
-          // also listen to updates so updated rows show up
           .on(
             'postgres_changes',
             { event: 'UPDATE', schema: 'public', table: 'outgate' },
@@ -543,7 +524,6 @@ export default function OutgateReports() {
       }
     }
 
-    // fallback for older clients
     if (!subscription) {
       try {
         subscription = supabase
@@ -565,16 +545,13 @@ export default function OutgateReports() {
       isUnsubscribed = true;
       try {
         if (!subscription) return;
-        // unsubscribe/remove
         if (supabase.removeChannel && typeof subscription === 'object') {
-          // modern API
           try {
             supabase.removeChannel(subscription);
           } catch (e) {
             // ignore
           }
         } else if (subscription.unsubscribe) {
-          // legacy
           try {
             subscription.unsubscribe();
           } catch (e) {
@@ -594,7 +571,6 @@ export default function OutgateReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sadQuery, sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortStatus]);
 
-  // Reset function used by the UI
   const resetSearch = () => {
     setSadQuery('');
     setSadOriginal([]);
@@ -715,7 +691,8 @@ export default function OutgateReports() {
               <Tr>
                 <Th>SAD No</Th>
                 <Th>Ticket No</Th>
-                <Th>Date & Time</Th>
+                <Th>Weighed At</Th>
+                <Th>Exit Time</Th>
                 <Th>Truck No</Th>
                 <Th isNumeric>Gross (KG)</Th>
                 <Th isNumeric>Tare (KG)</Th>
@@ -731,7 +708,8 @@ export default function OutgateReports() {
                   <Tr key={t.ticketId}>
                     <Td>{t.data.sadNo}</Td>
                     <Td>{t.data.ticketNo}</Td>
-                    <Td>{t.data.date ? new Date(t.data.date).toLocaleString() : 'N/A'}</Td>
+                    <Td>{t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : 'N/A'}</Td>
+                    <Td>{t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : 'N/A'}</Td>
                     <Td>{t.data.gnswTruckNo}</Td>
                     <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'} KG</Td>
                     <Td isNumeric>{tare != null ? Number(tare).toLocaleString() : '—'} KG</Td>
@@ -748,7 +726,7 @@ export default function OutgateReports() {
                 );
               })}
               <Tr fontWeight="bold" bg="gray.50">
-                <Td colSpan={6}>Cumulative Net</Td>
+                <Td colSpan={7}>Cumulative Net</Td>
                 <Td isNumeric>{Number(cumulativeNet || 0).toLocaleString()}</Td>
                 <Td colSpan={2} />
               </Tr>
