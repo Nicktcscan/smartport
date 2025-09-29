@@ -37,7 +37,7 @@ import {
   InputGroup,
   InputRightElement,
 } from '@chakra-ui/react';
-import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
+import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon, CopyIcon } from '@chakra-ui/icons';
 import { supabase } from '../supabaseClient';
 
 /* -----------------------
