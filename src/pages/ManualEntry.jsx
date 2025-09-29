@@ -37,7 +37,7 @@ import {
   InputGroup,
   InputRightElement,
 } from '@chakra-ui/react';
-import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon, CopyIcon } from '@chakra-ui/icons';
+import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 import { supabase } from '../supabaseClient';
 
 /* -----------------------
@@ -180,7 +180,7 @@ async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7
         insertData.ticket_no = suggested.nextTicketNo;
         insertData.ticket_id = suggested.nextTicketNo;
       }
-      const { data, error } = await supabase.from('tickets').insert([insertData]);
+      const { data, error } = await supabase.from('tickets').insert([insertData]).select();
       if (!error) return { data, error: null, ticketNo: insertData.ticket_no };
       const msg = String(error?.message || '').toLowerCase();
       if (msg.includes('duplicate') || msg.includes('unique') || error?.status === 409) {
@@ -563,7 +563,10 @@ export default function ManualEntry() {
           toast({ title: 'Error loading tickets', description: error.message || String(error), status: 'error', duration: 5000, isClosable: true });
         } else if (Array.isArray(data)) {
           const mapped = data.map((item, idx) => {
-            const ticketId = item.ticket_id ?? item.id ?? item.ticket_no ?? `unknown-${idx}-${Date.now()}`;
+            // capture canonical DB identifiers explicitly
+            const dbTicketId = item.ticket_id ?? item.id ?? null;
+            const dbTicketNo = item.ticket_no ?? null;
+            const ticketIdFallback = dbTicketId || dbTicketNo || `unknown-${idx}-${Date.now()}`;
 
             // canonical truck: gnsw_truck_no preferred, else truck_on_wb, else truckOnWb
             const truck =
@@ -578,9 +581,11 @@ export default function ManualEntry() {
             const netVal = (item.net !== null && item.net !== undefined) ? String(item.net) : '';
 
             return {
-              ticketId,
+              ticketId: ticketIdFallback,
+              dbTicketId,
+              dbTicketNo,
               data: {
-                ticketNo: item.ticket_no ?? ticketId,
+                ticketNo: item.ticket_no ?? ticketIdFallback,
                 truckOnWb: truck,
                 consignee: item.consignee ?? '',
                 operation: item.operation ?? '',
@@ -663,6 +668,8 @@ export default function ManualEntry() {
     const tempId = `tmp-${Date.now()}`;
     const tempTicket = {
       ticketId: tempId,
+      dbTicketId: null,
+      dbTicketNo: null,
       data: {
         ticketNo: tempId,
         truckOnWb: formDataRef.current.truckOnWb || '',
@@ -720,7 +727,11 @@ export default function ManualEntry() {
         return;
       }
 
-      const newTicketNo = ticketNo || (data && data[0] && data[0].ticket_no) || 'M-0001';
+      // data may contain the inserted row(s)
+      const insertedRow = (data && data[0]) || null;
+      const newTicketNo = ticketNo || (insertedRow && insertedRow.ticket_no) || 'M-0001';
+      const newDbTicketId = insertedRow && (insertedRow.ticket_id || insertedRow.id) ? (insertedRow.ticket_id || insertedRow.id) : null;
+      const newDbTicketNo = insertedRow && insertedRow.ticket_no ? insertedRow.ticket_no : null;
 
       // record tare history if requested
       if (truck && computed.tareValue !== null && saveTare) {
@@ -780,7 +791,9 @@ export default function ManualEntry() {
       }
 
       const saved = {
-        ticketId: newTicketNo,
+        ticketId: newDbTicketId || newTicketNo,
+        dbTicketId: newDbTicketId || null,
+        dbTicketNo: newDbTicketNo || newTicketNo,
         data: {
           ticketNo: newTicketNo,
           truckOnWb: formDataRef.current.truckOnWb || '',
@@ -935,6 +948,59 @@ export default function ManualEntry() {
     setEditRowData((p) => ({ ...p, [field]: value }));
   };
 
+  // --- NEW helper: safeUpdateTickets
+  // Tries to update by oldDbId (ticket_id), then oldDbNo (ticket_no), then fallbacks.
+  // Returns { success: boolean, updated?: Array, error?: any }
+  const safeUpdateTickets = async (oldDbId, oldDbNo, fallbackIdentifiers = [], payload) => {
+    try {
+      // 1) Try by explicit ticket_id if provided
+      if (oldDbId) {
+        const { data: dataById, error: errById } = await supabase
+          .from('tickets')
+          .update(payload)
+          .eq('ticket_id', oldDbId)
+          .select();
+        if (!errById && Array.isArray(dataById) && dataById.length > 0) {
+          return { success: true, updated: dataById };
+        }
+        if (errById) console.warn('safeUpdateTickets: update by ticket_id error', errById, oldDbId);
+      }
+
+      // 2) Try by explicit ticket_no if provided
+      if (oldDbNo) {
+        const { data: dataByNo, error: errByNo } = await supabase
+          .from('tickets')
+          .update(payload)
+          .eq('ticket_no', oldDbNo)
+          .select();
+        if (!errByNo && Array.isArray(dataByNo) && dataByNo.length > 0) {
+          return { success: true, updated: dataByNo };
+        }
+        if (errByNo) console.warn('safeUpdateTickets: update by ticket_no error', errByNo, oldDbNo);
+      }
+
+      // 3) Try fallback identifiers in order (these might be ticket.ticketId or previously displayed ticketNo)
+      for (const id of fallbackIdentifiers) {
+        if (!id) continue;
+        // If id looks like a UUID (contains hyphen) try ticket_id first
+        const tryById = String(id).includes('-');
+        if (tryById) {
+          const { data: d1, error: e1 } = await supabase.from('tickets').update(payload).eq('ticket_id', id).select();
+          if (!e1 && Array.isArray(d1) && d1.length > 0) return { success: true, updated: d1 };
+        }
+        // always try ticket_no too
+        const { data: d2, error: e2 } = await supabase.from('tickets').update(payload).eq('ticket_no', id).select();
+        if (!e2 && Array.isArray(d2) && d2.length > 0) return { success: true, updated: d2 };
+      }
+
+      // nothing matched
+      return { success: false };
+    } catch (err) {
+      console.error('safeUpdateTickets unexpected error', err);
+      return { success: false, error: err };
+    }
+  };
+
   // updates both DB and audit_logs (if ticket is not temporary)
   const saveRowEdit = async (ticket) => {
     if (!isAdmin) {
@@ -984,10 +1050,14 @@ export default function ManualEntry() {
 
     // attempt DB update
     try {
-      const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
-      if (!ticketIdValue) throw new Error('Missing ticket identifier');
+      // Determine authoritative old DB identifiers (captured at load time)
+      const oldDbId = ticket.dbTicketId || null;
+      const oldDbNo = ticket.dbTicketNo || null;
 
-      // include sad_no and truck_on_wb to ensure SAD edits persist
+      // fallback identifiers (history-level ticketId and displayed ticketNo)
+      const fallbackIds = [ticket.ticketId, ticket.data?.ticketNo].filter(Boolean);
+
+      // Build payload — **include ticket_no** if changed
       const payload = {
         gross: g !== null ? g : null,
         tare: t !== null ? t : null,
@@ -999,24 +1069,25 @@ export default function ManualEntry() {
         // important mappings to persist SAD and truck
         sad_no: afterData.sadNo || null,
         truck_on_wb: afterData.truckOnWb || null,
-        // also write gnsw_truck_no if that is your canonical truck column:
         gnsw_truck_no: afterData.truckOnWb || null,
+        ticket_no: afterData.ticketNo || null, // <- ensure ticket_no change is persisted
       };
 
-      // try update by ticket_id, fallback to ticket_no
-      let { error } = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue);
-      if (error) {
-        // fallback
-        const fallback = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue);
-        if (fallback.error) throw fallback.error;
+      // Use safeUpdateTickets helper (tries by oldDbId, oldDbNo, then fallbacks)
+      const { success, updated, error: updErr } = await safeUpdateTickets(oldDbId, oldDbNo, fallbackIds, payload);
+      if (!success) {
+        throw new Error(`No matching ticket found to update. Tried ticket_id=${oldDbId || ''} and ticket_no=${oldDbNo || ''} plus fallbacks.`);
       }
+
+      // updated is returned rows (use first row)
+      const updatedRow = Array.isArray(updated) && updated.length ? updated[0] : null;
 
       // audit log
       try {
         const auditEntry = {
           action: 'update',
-          ticket_id: ticketIdValue,
-          ticket_no: ticket.data?.ticketNo ?? null,
+          ticket_id: updatedRow?.ticket_id ?? oldDbId ?? ticket.ticketId,
+          ticket_no: updatedRow?.ticket_no ?? afterData.ticketNo ?? null,
           user_id: operatorId || null,
           username: operatorName || null,
           details: JSON.stringify({ before: before || null, after: afterData || null }),
@@ -1027,10 +1098,30 @@ export default function ManualEntry() {
         console.debug('Audit log insertion failed', auditErr);
       }
 
-      // --- NEW: propagate changes to outgate table ---
+      // Update local history entry's db identifiers using the returned updated row
+      if (updatedRow) {
+        setHistory((prev) =>
+          prev.map((r) => {
+            if (r.ticketId !== ticket.ticketId) return r;
+            const newTicketId = updatedRow.ticket_id || updatedRow.ticket_no || r.ticketId;
+            return {
+              ...r,
+              ticketId: newTicketId,
+              dbTicketId: updatedRow.ticket_id ?? r.dbTicketId,
+              dbTicketNo: updatedRow.ticket_no ?? r.dbTicketNo,
+              data: {
+                ...afterData,
+                ticketNo: updatedRow.ticket_no ?? afterData.ticketNo,
+              },
+            };
+          })
+        );
+      }
+
+      // --- propagate to outgate table using updatedRow's identifiers if available ---
       try {
         const oldTicketNo = ticket.data?.ticketNo ?? null;
-        const newTicketNo = afterData?.ticketNo ?? oldTicketNo;
+        const newTicketNo = (updatedRow && (updatedRow.ticket_no || updatedRow.ticket_id)) || afterData?.ticketNo || oldTicketNo;
         const outPayload = {
           vehicle_number: afterData.truckOnWb || null,
           container_id: afterData.containerNo || null,
@@ -1042,21 +1133,42 @@ export default function ManualEntry() {
           ticket_no: newTicketNo || null,
         };
 
-        // Try update by old ticket_no
+        // Try update by old ticket_no (from original row)
         let { data: outData, error: outErr } = await supabase.from('outgate').update(outPayload).eq('ticket_no', oldTicketNo);
         if (outErr) {
           console.warn('Failed to update outgate by old ticket_no', outErr);
         } else if (!outData || outData.length === 0) {
-          // Try update by ticket_id
-          const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', ticketIdValue);
-          if (byId.error) {
-            console.warn('Failed to update outgate by ticket_id', byId.error);
-          } else if (!byId.data || byId.data.length === 0) {
-            // If nothing updated, attempt to insert a new outgate row (ticket exists in tickets)
+          // Try update by ticket_id if available
+          const byIdKey = updatedRow?.ticket_id ?? oldDbId ?? null;
+          if (byIdKey) {
+            const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', byIdKey).select();
+            if (byId.error) {
+              console.warn('Failed to update outgate by ticket_id', byId.error);
+            } else if (!byId.data || byId.data.length === 0) {
+              // insert fallback
+              try {
+                await supabase.from('outgate').insert([{
+                  ticket_no: newTicketNo || oldTicketNo,
+                  ticket_id: byIdKey,
+                  vehicle_number: afterData.truckOnWb || null,
+                  container_id: afterData.containerNo || null,
+                  sad_no: afterData.sadNo || null,
+                  gross: g !== null ? g : null,
+                  tare: t !== null ? t : null,
+                  net: n !== null ? n : null,
+                  driver: afterData.driver || null,
+                  created_at: new Date().toISOString(),
+                }]);
+              } catch (insErr) {
+                console.warn('Failed to insert outgate row after update returned no rows', insErr);
+              }
+            }
+          } else {
+            // no ticket_id available: attempt insert with newTicketNo
             try {
               await supabase.from('outgate').insert([{
                 ticket_no: newTicketNo || oldTicketNo,
-                ticket_id: ticketIdValue,
+                ticket_id: null,
                 vehicle_number: afterData.truckOnWb || null,
                 container_id: afterData.containerNo || null,
                 sad_no: afterData.sadNo || null,
@@ -1067,7 +1179,7 @@ export default function ManualEntry() {
                 created_at: new Date().toISOString(),
               }]);
             } catch (insErr) {
-              console.warn('Failed to insert outgate row after update returned no rows', insErr);
+              console.warn('Failed to insert outgate row (no ticket_id available)', insErr);
             }
           }
         }
@@ -1076,7 +1188,7 @@ export default function ManualEntry() {
       }
       // --- END outgate propagation ---
 
-      toast({ title: 'Saved', description: `Ticket ${ticketIdValue} updated`, status: 'success', duration: 2500 });
+      toast({ title: 'Saved', description: `Ticket updated`, status: 'success', duration: 2500 });
       setEditingRowId(null);
       setEditRowData({});
     } catch (err) {
@@ -1147,8 +1259,9 @@ export default function ManualEntry() {
     // persist to DB if not temp
     if (!String(ticket.ticketId || '').startsWith('tmp-')) {
       try {
-        const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
-        if (!ticketIdValue) throw new Error('Missing ticket identifier');
+        const oldDbId = ticket.dbTicketId || null;
+        const oldDbNo = ticket.dbTicketNo || null;
+        const fallbackIds = [ticket.ticketId, ticket.data?.ticketNo].filter(Boolean);
 
         const payload = {
           gross: g !== null ? g : null,
@@ -1162,21 +1275,22 @@ export default function ManualEntry() {
           sad_no: afterData.sadNo || null,
           truck_on_wb: afterData.truckOnWb || null,
           gnsw_truck_no: afterData.truckOnWb || null,
+          ticket_no: afterData.ticketNo || null,
         };
 
-        let { error } = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdValue);
-        if (error) {
-          // fallback
-          const fallback = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdValue);
-          if (fallback.error) throw fallback.error;
+        const { success, updated } = await safeUpdateTickets(oldDbId, oldDbNo, fallbackIds, payload);
+        if (!success) {
+          throw new Error(`No matching ticket found to update. Tried ticket_id=${oldDbId || ''} and ticket_no=${oldDbNo || ''}`);
         }
+
+        const updatedRow = Array.isArray(updated) && updated.length ? updated[0] : null;
 
         // audit log
         try {
           const auditEntry = {
             action: 'update',
-            ticket_id: ticketIdValue,
-            ticket_no: ticket.data?.ticketNo ?? null,
+            ticket_id: updatedRow?.ticket_id ?? oldDbId ?? ticket.ticketId,
+            ticket_no: updatedRow?.ticket_no ?? afterData.ticketNo ?? null,
             user_id: operatorId || null,
             username: operatorName || null,
             details: JSON.stringify({ before: before || null, after: afterData || null }),
@@ -1187,10 +1301,40 @@ export default function ManualEntry() {
           console.debug('Audit log insertion failed', auditErr);
         }
 
-        // --- NEW: propagate changes to outgate table from view edit as well ---
+        // Update local history's db identifiers if updatedRow present
+        if (updatedRow) {
+          setHistory((prev) =>
+            prev.map((r) => {
+              if (r.ticketId !== ticket.ticketId) return r;
+              const newTicketId = updatedRow.ticket_id || updatedRow.ticket_no || r.ticketId;
+              return {
+                ...r,
+                ticketId: newTicketId,
+                dbTicketId: updatedRow.ticket_id ?? r.dbTicketId,
+                dbTicketNo: updatedRow.ticket_no ?? r.dbTicketNo,
+                data: {
+                  ...afterData,
+                  ticketNo: updatedRow.ticket_no ?? afterData.ticketNo,
+                },
+              };
+            })
+          );
+          setViewTicket((v) => ({
+            ...v,
+            ticketId: updatedRow.ticket_id || updatedRow.ticket_no || v.ticketId,
+            dbTicketId: updatedRow.ticket_id ?? v.dbTicketId,
+            dbTicketNo: updatedRow.ticket_no ?? v.dbTicketNo,
+            data: {
+              ...afterData,
+              ticketNo: updatedRow.ticket_no ?? afterData.ticketNo,
+            },
+          }));
+        }
+
+        // --- propagate changes to outgate table from view edit as well ---
         try {
           const oldTicketNo = ticket.data?.ticketNo ?? null;
-          const newTicketNo = afterData?.ticketNo ?? oldTicketNo;
+          const newTicketNo = (updatedRow && (updatedRow.ticket_no || updatedRow.ticket_id)) || afterData?.ticketNo || oldTicketNo;
           const outPayload = {
             vehicle_number: afterData.truckOnWb || null,
             container_id: afterData.containerNo || null,
@@ -1208,15 +1352,36 @@ export default function ManualEntry() {
             console.warn('Failed to update outgate by old ticket_no', outErr);
           } else if (!outData || outData.length === 0) {
             // Try update by ticket_id
-            const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', ticketIdValue);
-            if (byId.error) {
-              console.warn('Failed to update outgate by ticket_id', byId.error);
-            } else if (!byId.data || byId.data.length === 0) {
-              // If nothing updated, attempt to insert a new outgate row
+            const byIdKey = updatedRow?.ticket_id ?? oldDbId ?? null;
+            if (byIdKey) {
+              const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', byIdKey).select();
+              if (byId.error) {
+                console.warn('Failed to update outgate by ticket_id', byId.error);
+              } else if (!byId.data || byId.data.length === 0) {
+                // insert fallback
+                try {
+                  await supabase.from('outgate').insert([{
+                    ticket_no: newTicketNo || oldTicketNo,
+                    ticket_id: byIdKey,
+                    vehicle_number: afterData.truckOnWb || null,
+                    container_id: afterData.containerNo || null,
+                    sad_no: afterData.sadNo || null,
+                    gross: g !== null ? g : null,
+                    tare: t !== null ? t : null,
+                    net: n !== null ? n : null,
+                    driver: afterData.driver || null,
+                    created_at: new Date().toISOString(),
+                  }]);
+                } catch (insErr) {
+                  console.warn('Failed to insert outgate row after update returned no rows', insErr);
+                }
+              }
+            } else {
+              // insert fallback without ticket_id
               try {
                 await supabase.from('outgate').insert([{
                   ticket_no: newTicketNo || oldTicketNo,
-                  ticket_id: ticketIdValue,
+                  ticket_id: null,
                   vehicle_number: afterData.truckOnWb || null,
                   container_id: afterData.containerNo || null,
                   sad_no: afterData.sadNo || null,
@@ -1227,7 +1392,7 @@ export default function ManualEntry() {
                   created_at: new Date().toISOString(),
                 }]);
               } catch (insErr) {
-                console.warn('Failed to insert outgate row after update returned no rows', insErr);
+                console.warn('Failed to insert outgate row (no ticket_id available)', insErr);
               }
             }
           }
@@ -1620,9 +1785,6 @@ export default function ManualEntry() {
                           ) : (
                             <Box display="flex" alignItems="center" gap={2}>
                               <Text>{computed.tareDisplay}</Text>
-                              {isTareAnomaly && data.truckOnWb && String(data.truckOnWb).trim() === String(formData.truckOnWb).trim() && (
-                                <Badge colorScheme="red">Tare anomaly</Badge>
-                              )}
                             </Box>
                           )}
                         </Box>
@@ -1655,7 +1817,11 @@ export default function ManualEntry() {
 
                           {isEditingThis ? (
                             <>
-                              <IconButton icon={<CheckIcon />} aria-label="Save" size="sm" colorScheme="green" onClick={() => saveRowEdit({ ticketId, data })} />
+                              <IconButton icon={<CheckIcon />} aria-label="Save" size="sm" colorScheme="green" onClick={() => {
+                                // pass along the full history entry so saveRowEdit has access to dbTicketId/dbTicketNo
+                                const historyRow = history.find(h => h.ticketId === ticketId);
+                                saveRowEdit(historyRow || { ticketId, data });
+                              }} />
                               <IconButton icon={<CloseIcon />} aria-label="Cancel" size="sm" onClick={cancelRowEdit} />
                             </>
                           ) : (
@@ -1787,7 +1953,11 @@ export default function ManualEntry() {
             )}
             {viewIsEditing && (
               <>
-                <Button leftIcon={<CheckIcon />} colorScheme="green" mr={2} onClick={saveViewEdit}>Save</Button>
+                <Button leftIcon={<CheckIcon />} colorScheme="green" mr={2} onClick={() => {
+                  // ensure we pass the authoritative history row for saveViewEdit
+                  const histRow = history.find(h => h.ticketId === (viewTicket.ticketId || viewTicket.data?.ticketNo));
+                  saveViewEdit(histRow || viewTicket);
+                }}>Save</Button>
                 <Button leftIcon={<CloseIcon />} variant="ghost" mr={2} onClick={cancelViewEdit}>Cancel</Button>
               </>
             )}
