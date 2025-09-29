@@ -242,9 +242,10 @@ export default function ConfirmExit() {
   // Fetch confirmed exits and dedupe (keep latest per ticket_id)
   const fetchConfirmedExits = useCallback(async () => {
     try {
+      // include weighed_at in select
       const { data, error } = await supabase
         .from('outgate')
-        .select('id, ticket_id, ticket_no, vehicle_number, container_id, sad_no, gross, tare, net, created_at, file_url, file_name, driver')
+        .select('id, ticket_id, ticket_no, vehicle_number, container_id, sad_no, gross, tare, net, created_at, weighed_at, file_url, file_name, driver')
         .order('created_at', { ascending: false }); // newest first
 
       if (error) throw error;
@@ -716,6 +717,7 @@ export default function ConfirmExit() {
         'SAD No': r.sad_no ?? '',
         'Container': r.container_id ?? '',
         'Exit Date': r.created_at ? formatDate(r.created_at) : '',
+        'Weighed At': r.weighed_at ? formatDate(r.weighed_at) : '',
         'Gross (KG)': w.gross ?? '',
         'Tare (KG)': w.tare ?? '',
         'Net (KG)': w.net ?? '',
@@ -996,6 +998,7 @@ export default function ConfirmExit() {
               <Th isNumeric>NET(KG)</Th>
               <Th>DRIVER</Th>
               <Th>EXIT DATE</Th>
+              <Th>WEIGHED AT</Th>
               <Th>Action</Th>
             </Tr>
           </Thead>
@@ -1012,6 +1015,7 @@ export default function ConfirmExit() {
                   <Td isNumeric>{formatWeight(net)}</Td>
                   <Td>{ticket.driver ?? '—'}</Td>
                   <Td>{ticket.created_at ? formatDate(ticket.created_at) : '—'}</Td>
+                  <Td>{ticket.weighed_at ? formatDate(ticket.weighed_at) : '—'}</Td>
                   <Td>
                     <IconButton aria-label="View File" icon={<FaFilePdf color="red" />} size="sm" variant="outline" onClick={() => openActionModal(ticket, 'view')} />
                   </Td>
