@@ -30,7 +30,6 @@ import {
   StatNumber,
   StatHelpText,
   HStack,
-  Badge,
   Select,
   Tooltip,
 } from '@chakra-ui/react';
@@ -142,20 +141,18 @@ function parseDriverNameFromText(text) {
     /Driver\s*Name\s*[:\-]\s*(.+?)(?:\n|$)/i,
     /Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
     /Name\s*of\s*Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
-    /Driver\s+[:]\s*([A-Z][A-Za-z'’\-\s]+[A-Za-z])/m, // loose
+    /Driver\s+[:]\s*([A-Z][A-Za-z'’\-\s]+[A-Za-z])/m,
   ];
   for (const pat of patterns) {
     const m = text.match(pat);
     if (m && m[1]) {
       const candidate = m[1].trim();
-      // sanitize: if candidate too long or contains too many digits, skip
       if (candidate.length > 2 && candidate.length < 80 && !/\d{5,}/.test(candidate)) {
         return candidate.replace(/\s{2,}/g, ' ').replace(/[\r\n]+/g, ' ').trim();
       }
     }
   }
 
-  // Fallback: look for "Driver" then 1-3 words after it
   const fallback = text.match(/Driver\s+([A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2})/);
   if (fallback && fallback[1]) return fallback[1].trim();
 
@@ -175,8 +172,8 @@ export default function ConfirmExit() {
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
 
-  const [allTickets, setAllTickets] = useState([]); // pending tickets (status = 'Pending') - used for pending list
-  const [filteredResults, setFilteredResults] = useState([]);
+  const [allTickets, setAllTickets] = useState([]); // pending tickets (status = 'Pending')
+  const [filteredResults, setFilteredResults] = useState([]); // pending tickets after excluding confirmed
   const [confirmedTickets, setConfirmedTickets] = useState([]); // deduped confirmed exits (unique by ticket_id)
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [actionType, setActionType] = useState(null);
@@ -232,8 +229,8 @@ export default function ConfirmExit() {
         .order('date', { ascending: false });
 
       if (error) throw error;
+      // IMPORTANT: don't set filteredResults here to avoid UI flash — let the dedupe effect compute the "unconfirmed" list
       setAllTickets(data || []);
-      setFilteredResults(data || []);
     } catch (err) {
       toast({ title: 'Error fetching tickets', description: err?.message || 'Could not fetch tickets', status: 'error', duration: 5000, isClosable: true });
     }
@@ -266,7 +263,7 @@ export default function ConfirmExit() {
       const noTicketIdRows = rows.filter((r) => !r.ticket_id);
       const finalConfirmed = [...deduped, ...noTicketIdRows];
 
-      // Try best-effort to extract driver names for missing driver fields from PDFs (non-blocking)
+      // best-effort: extract driver names for missing driver fields from PDFs (non-blocking)
       const needsDriver = finalConfirmed.filter((r) => (!r.driver || r.driver === '') && r.file_url && isPdfUrl(r.file_url));
       if (needsDriver.length) {
         for (const r of needsDriver) {
@@ -320,7 +317,7 @@ export default function ConfirmExit() {
     fetchTotalTickets();
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // Realtime subscriptions: when tickets/outgate change refresh lists (works with older/newer supabase clients)
+  // Realtime subscriptions: when tickets/outgate change refresh lists
   useEffect(() => {
     let ticketSub = null;
     let outgateSub = null;
@@ -332,40 +329,30 @@ export default function ConfirmExit() {
           try {
             ticketSub = supabase
               .channel('public:tickets')
-              .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'tickets' },
-                () => {
-                  fetchTickets();
-                  fetchTotalTickets();
-                }
-              )
+              .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+                fetchTickets();
+                fetchTotalTickets();
+              })
               .subscribe();
 
             outgateSub = supabase
               .channel('public:outgate')
-              .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'outgate' },
-                () => {
-                  fetchConfirmedExits();
-                }
-              )
+              .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, () => {
+                fetchConfirmedExits();
+              })
               .subscribe();
           } catch (e) {
-            // fall back if channel subscription fails
             ticketSub = null;
             outgateSub = null;
           }
         }
 
-        // Older client fallback: supabase.from(...).on(...).subscribe()
+        // Older client fallback
         if (!ticketSub && typeof supabase.from === 'function' && typeof supabase.from('').on === 'function') {
           try {
             ticketSub = supabase
               .from('tickets')
-              .on('*', (payload) => {
-                // refresh counters and pending tickets
+              .on('*', () => {
                 fetchTickets();
                 fetchTotalTickets();
               })
@@ -373,7 +360,7 @@ export default function ConfirmExit() {
 
             outgateSub = supabase
               .from('outgate')
-              .on('*', (payload) => {
+              .on('*', () => {
                 fetchConfirmedExits();
               })
               .subscribe();
@@ -383,7 +370,6 @@ export default function ConfirmExit() {
           }
         }
       } catch (err) {
-        // ignore realtime binding errors — app continues to poll on actions
         console.warn('realtime setup failed', err);
       }
     };
@@ -392,7 +378,6 @@ export default function ConfirmExit() {
 
     return () => {
       try {
-        // cleanup both styles
         if (ticketSub) {
           if (ticketSub.unsubscribe) ticketSub.unsubscribe();
           else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(ticketSub);
@@ -409,7 +394,7 @@ export default function ConfirmExit() {
     };
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // Exclude confirmed tickets from pending list (use the deduped confirmed ticket_ids)
+  // Exclude confirmed tickets from pending list (use deduped confirmed ticket_ids)
   useEffect(() => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
     const unconfirmed = allTickets.filter((t) => !confirmedIds.has(t.ticket_id));
@@ -561,7 +546,6 @@ export default function ConfirmExit() {
   // Open modal for view or confirm
   const openActionModal = async (ticket, type) => {
     setActionType(type);
-    // If viewing an outgate row that lacks driver, try to enrich from PDF now (best-effort)
     if (type === 'view') {
       let resolved = { ...ticket };
       try {
@@ -570,7 +554,6 @@ export default function ConfirmExit() {
           const parsed = parseDriverNameFromText(text);
           if (parsed) {
             resolved.driver = parsed;
-            // persist back to outgate table if we have an id
             if (resolved.id) {
               try {
                 await supabase.from('outgate').update({ driver: parsed }).eq('id', resolved.id);
@@ -587,26 +570,23 @@ export default function ConfirmExit() {
       setSelectedTicket(resolved);
       onOpen();
     } else {
-      // 'exit' action: just open confirm modal with ticket
       setSelectedTicket(ticket);
       onOpen();
     }
   };
 
-  // Confirm exit: check for existing outgate (prevent duplicates), then insert
+  // Confirm exit: insert outgate row (prevents duplicates)
   const handleConfirmExit = async () => {
     if (!selectedTicket) return;
     try {
       let resolvedDriver = selectedTicket.driver || selectedTicket.driver_name || null;
 
-      // If missing, try to extract from file_url on the ticket (ticket.file_url)
       if (!resolvedDriver && selectedTicket.file_url && isPdfUrl(selectedTicket.file_url)) {
         const text = await extractTextFromPdfUrl(selectedTicket.file_url);
         const parsed = parseDriverNameFromText(text);
         if (parsed) resolvedDriver = parsed;
       }
 
-      // compute weights
       const { gross, tare, net } = computeWeights(selectedTicket);
 
       const payload = {
@@ -618,7 +598,7 @@ export default function ConfirmExit() {
         gross,
         tare,
         net,
-        // date represents entry date; outgate table uses created_at for exit time
+        // date represents entry date; outgate uses created_at for exit time
         date: selectedTicket.date || null,
         file_url: selectedTicket.file_url || null,
         file_name: selectedTicket.file_name || null,
@@ -644,10 +624,9 @@ export default function ConfirmExit() {
             isClosable: true,
           });
 
-          // still ensure ticket status is set to Exited in tickets table (best-effort)
+          // ensure ticket status is Exited
           try {
             await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', payload.ticket_id);
-            // refresh lists
             await fetchTickets();
             await fetchConfirmedExits();
             await fetchTotalTickets();
@@ -666,7 +645,6 @@ export default function ConfirmExit() {
         return;
       }
 
-      // update tickets table status
       if (selectedTicket.ticket_id) {
         await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
       }
@@ -767,9 +745,9 @@ export default function ConfirmExit() {
   };
 
   // Derived counts for stats
-  // FIX APPLIED: show only tickets truly awaiting exit (not already confirmed in outgate)
-  const pendingCount = filteredResults.length; // <-- was allTickets.length previously
-  const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length; // number of unique ticket_id in outgate
+  // FIX: show the number of tickets currently visible in pending list (after excluding confirmed)
+  const pendingCount = filteredResults.length;
+  const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length;
   const noTicketIdConfirmedCount = confirmedTickets.filter((t) => !t.ticket_id).length;
 
   return (
