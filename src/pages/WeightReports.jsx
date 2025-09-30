@@ -223,7 +223,7 @@ function removeDuplicatesByTicketNo(tickets = []) {
       map.set(key, t);
       continue;
     }
-    // prefer more recent record based on date
+    // prefer more recent record based on tickets.date
     const da = parseTicketDate(existing.data?.date);
     const db = parseTicketDate(t.data?.date);
     if (db && (!da || db.getTime() > da.getTime())) {
@@ -268,27 +268,17 @@ function PdfTicketRow({ ticket, operatorName }) {
   );
 }
 
-/**
- * CombinedDocument
- * - Break tickets into pages based on rowsPerPage so pages are filled consistently.
- * - Display header and summary on the first page; subsequent pages show page header + table header.
- */
 function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' }) {
-  // cumulative
   const totalNet = tickets.reduce((sum, t) => {
     const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
     return sum + (c.netValue || 0);
   }, 0);
 
   const numberOfTransactions = tickets.length;
-  // serve logo from public root — ensure src/assets/logo.png is copied to public/logo.png in your build or adjust path
   const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
   const rawSad = reportMeta?.sad ?? '';
   const sadLabel = rawSad ? String(rawSad).replace(/^SAD:\s*/i, '') : 'N/A';
-
-  // determine rows per page conservatively
-  const rowsPerPage = 30; // choose a value that fits; adjust if your rows are taller
-  // chunk tickets
+  const rowsPerPage = 30;
   const pages = [];
   for (let i = 0; i < tickets.length; i += rowsPerPage) {
     pages.push(tickets.slice(i, i + rowsPerPage));
@@ -312,7 +302,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
     <Document>
       {pages.map((pageTickets, idx) => (
         <Page key={`page-${idx}`} size="A4" style={pdfStyles.page}>
-          {/* header (logo + company block) */}
           <PdfView style={pdfStyles.header}>
             <PdfImage src={logoUrl} style={pdfStyles.logo} />
             <PdfView style={pdfStyles.companyBlock}>
@@ -321,7 +310,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
             </PdfView>
           </PdfView>
 
-          {/* on page 0 show summary block */}
           {idx === 0 && (
             <>
               <PdfText style={pdfStyles.reportTitle}>WEIGHBRIDGE SITUATION REPORT</PdfText>
@@ -350,7 +338,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
             </>
           )}
 
-          {/* Table header then rows */}
           <TableHeader />
           {pageTickets.map((t) => <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} operatorName={operatorName} />)}
 
@@ -360,7 +347,6 @@ function CombinedDocument({ tickets = [], reportMeta = {}, operatorName = 'N/A' 
     </Document>
   );
 }
-
 
 // ---------------- main React component ----------------
 export default function WeightReports() {
@@ -479,6 +465,7 @@ export default function WeightReports() {
     }
   };
 
+  // computeFilteredTickets: filters and sorts using ticket.data.date (always)
   const computeFilteredTickets = (baseArr = null) => {
     if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
       setFilteredTickets([]);
@@ -504,12 +491,26 @@ export default function WeightReports() {
       });
     }
 
+    // Date/time filtering — use ticket.data.date exclusively
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
+
+    // Build start/end Date objects when date range present
+    let start = null;
+    let end = null;
+    if (dateFrom) {
+      const fullTime = timeFrom ? `${timeFrom}:00` : '00:00:00';
+      start = new Date(`${dateFrom}T${fullTime}`);
+    }
+    if (dateTo) {
+      const fullTime = timeTo ? `${timeTo}:00` : '23:59:59.999';
+      // If timeTo is a short 'HH:MM', convert to seconds; the browser accepts 'HH:MM:SS'
+      const normalized = fullTime.length <= 8 && !fullTime.includes('.') ? fullTime : fullTime;
+      end = new Date(`${dateTo}T${normalized}`);
+    }
+
     const tfMinutes = parseTimeToMinutes(timeFrom);
     const ttMinutes = parseTimeToMinutes(timeTo);
-    const startDate = dateFrom ? new Date(dateFrom + 'T00:00:00') : null;
-    const endDate = dateTo ? new Date(dateTo + 'T23:59:59.999') : null;
 
     arr = arr.filter((ticket) => {
       const raw = ticket.data.date;
@@ -517,26 +518,25 @@ export default function WeightReports() {
       if (!ticketDate) return false;
 
       if (hasDateRange) {
-        let start = startDate ? startOfDay(startDate) : new Date(-8640000000000000);
-        let end = endDate ? endOfDay(endDate) : new Date(8640000000000000);
+        // If dateFrom provided, start uses timeFrom if supplied; else start of day.
+        // If dateTo provided, end uses timeTo if supplied; else end of day.
+        let s = start ? new Date(start) : new Date(-8640000000000000);
+        let e = end ? new Date(end) : new Date(8640000000000000);
 
-        if (timeFrom) {
-          const tf = parseTimeToMinutes(timeFrom);
-          if (tf !== null) start.setHours(Math.floor(tf / 60), tf % 60, 0, 0);
-        }
-        if (timeTo) {
-          const tt = parseTimeToMinutes(timeTo);
-          if (tt !== null) end.setHours(Math.floor(tt / 60), tt % 60, 59, 999);
-        }
-
-        return ticketDate >= start && ticketDate <= end;
+        return ticketDate >= s && ticketDate <= e;
       }
 
       if (hasTimeRangeOnly) {
+        // If only times given, match time-of-day across all dates. Support wrap-around.
         const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
         const fromM = tfMinutes !== null ? tfMinutes : 0;
         const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
-        return ticketMinutes >= fromM && ticketMinutes <= toM;
+
+        if (fromM <= toM) {
+          return ticketMinutes >= fromM && ticketMinutes <= toM;
+        }
+        // wrap-around (e.g., 20:00 -> 02:00 next day)
+        return ticketMinutes >= fromM || ticketMinutes <= toM;
       }
 
       return true;
@@ -596,6 +596,7 @@ export default function WeightReports() {
     }
     setLoading(true);
     try {
+      // fetch tickets by SAD (use tickets.date for all date features)
       const { data, error } = await supabase
         .from('tickets')
         .select('*')
@@ -612,7 +613,7 @@ export default function WeightReports() {
         data: {
           sadNo: ticket.sad_no,
           ticketNo: ticket.ticket_no,
-          date: ticket.date,
+          date: ticket.date, // <- use ticket.date exclusively
           gnswTruckNo: ticket.gnsw_truck_no,
           truckOnWb: ticket.truck_on_wb,
           net: ticket.net ?? ticket.net_weight ?? null,
@@ -632,14 +633,14 @@ export default function WeightReports() {
         },
       }));
 
-      // Deduplicate
+      // Deduplicate by ticket number using ticket.date to keep newest
       const dedupedTickets = removeDuplicatesByTicketNo(mappedTickets);
       if (dedupedTickets.length < mappedTickets.length) {
         const removed = mappedTickets.length - dedupedTickets.length;
         toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
       }
 
-      // Sort newest-first
+      // Sort newest-first (by ticket.data.date)
       const sortedOriginal = sortTicketsByDateDesc(dedupedTickets);
       setOriginalTickets(sortedOriginal);
 
@@ -650,6 +651,7 @@ export default function WeightReports() {
         sad: `${searchSAD.trim()}`,
       });
 
+      // compute initial filtered based on current filters (none by default)
       computeFilteredTickets(sortedOriginal);
     } catch (err) {
       console.error('fetch error', err);
@@ -849,7 +851,7 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- Edit / Delete (unchanged logic) ----------
+  // ---------- Edit / Delete logic ----------
   const isTicketEditable = (ticket) => {
     const status = String(ticket?.data?.status || '').toLowerCase();
     return status !== 'exited';
