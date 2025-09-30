@@ -321,9 +321,9 @@ function handleExtract(rawText) {
     return null;
   };
 
-  // Helper: find all distinct 3-6 digit numbers in doc (used for ticket fallback)
+  // Helper: find all distinct 2-6 digit numbers in doc (used for ticket fallback)
   const allSmallNumbers = () =>
-    Array.from(full.matchAll(/\b(\d{3,6})\b/g)).map((m) => m[1]);
+    Array.from(full.matchAll(/\b(\d{2,6})\b/g)).map((m) => m[1]);
 
   // 1) Ticket No — look for many label variants (Ticket No, Ticket#, Tkt, Pass Number)
   const ticketLine =
@@ -334,13 +334,13 @@ function handleExtract(rawText) {
 
   if (ticketLine) {
     const m =
-      ticketLine.match(/\b(?:Ticket|Tkt|Pass\s*Number)\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{3,6})/i) ||
-      ticketLine.match(/\b(\d{3,6})\b/);
+      ticketLine.match(/\b(?:Ticket|Tkt|Pass\s*Number)\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{2,6})/i) ||
+      ticketLine.match(/\b(\d{2,6})\b/);
     if (m && m[1]) {
       found.ticket_no = m[1];
     }
   }
-  // fallback: prefer the first 4-6 digit number that is not SAD (we'll capture SAD later)
+  // fallback: prefer the first 2-6 digit number that is not SAD (we'll capture SAD later)
   if (!found.ticket_no) {
     const numbers = allSmallNumbers();
     if (numbers.length) {
@@ -417,13 +417,13 @@ function handleExtract(rawText) {
     }
   }
 
-  // 6) SAD No
+  // 6) SAD No (now accepts 2-digit SADs)
   const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
   if (sadLine) {
-    const m = sadLine.match(/SAD\s*No\.?\s*[:\-]?\s*(\d{3,6})/i) || sadLine.match(/SAD\s*[:\-]?\s*(\d{3,6})/i);
+    const m = sadLine.match(/SAD\s*No\.?\s*[:\-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:\-]?\s*(\d{2,6})/i);
     if (m && m[1]) found.sad_no = m[1];
   } else {
-    const sadFb = full.match(/\bSAD\s*No\.?\s*[:\-]?\s*(\d{3,6})/i) || full.match(/\bSAD\s*[:\-]?\s*(\d{3,6})/i);
+    const sadFb = full.match(/\bSAD\s*No\.?\s*[:\-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:\-]?\s*(\d{2,6})/i);
     if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
   }
 
@@ -442,7 +442,7 @@ function handleExtract(rawText) {
   if (consigneeLine) {
     let c = consigneeLine.replace(/Consignee\s*[:\-]?\s*/i, "").trim();
     c = c.split(/\bTare\b/i)[0].trim();
-    c = c.replace(/\b\d{3,6}\s*kg\b/i, "").trim();
+    c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
     found.consignee = c || null;
   }
 
@@ -473,7 +473,7 @@ function handleExtract(rawText) {
     op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
     op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
     op = op.replace(/\bWBRIDGE\d+\b/gi, "");
-    op = op.replace(/\b\d{3,6}\s*kg\b/gi, "");
+    op = op.replace(/\b\d{2,6}\s*kg\b/gi, "");
     op = op.replace(/\b(true|false)\b/ig, "");
     op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
     if (op) {
@@ -517,7 +517,7 @@ function handleExtract(rawText) {
       // Exclude SAD/weights/WB
       if (exclude.has(n)) return false;
 
-      // Exclude if number appears inside a Print Date / Date Time line
+      // Exclude if number appears inside Print Date / Date Time line
       const badLine = lines.find((l) => /Print\s*Date|Date\s*Time/i.test(l) && l.includes(n));
       if (badLine) return false;
 
@@ -1079,365 +1079,332 @@ const handleCancelSubmit = () => {
   onConfirmClose();
 };
 
+// ---------------------- UI (unchanged) ----------------------
+// ----------------- UI -----------------
+return (
+  <Box p={6} maxWidth="1200px" mx="auto">
+    <Heading mb={4} textAlign="center">
+      OCR Ticket Reader
+    </Heading>
 
-  // ---------------------- UI (unchanged) ----------------------
-  // ----------------- UI -----------------
-  return (
-    <Box p={6} maxWidth="1200px" mx="auto">
-      <Heading mb={4} textAlign="center">
-        OCR Ticket Reader
-      </Heading>
+    {/* OCR Extraction Section */}
+    <OCRComponent
+      onComplete={(file, text) => {
+        setOcrFile(file);
+        setOcrText(text || '');
+        handleExtract(text || '');
+      }}
+    />
 
-      {/* OCR Extraction Section */}
-      <OCRComponent
-        onComplete={(file, text) => {
-          setOcrFile(file);
-          setOcrText(text || '');
-          handleExtract(text || '');
-        }}
-      />
+    {/* Controls: pagination mode and page size */}
+    <Flex align="center" gap={4} mb={4} flexWrap="wrap">
 
-      {/* Controls: pagination mode and page size */}
-      <Flex align="center" gap={4} mb={4} flexWrap="wrap">
+      <FormControl maxW="160px">
+        <FormLabel fontSize="sm" mb={1}>Page size</FormLabel>
+        <Select value={pageSize} onChange={handlePageSizeChange} size="sm">
+          <option value={5}>5</option>
+          <option value={10}>10</option>
+          <option value={20}>20</option>
+        </Select>
+      </FormControl>
 
-        <FormControl maxW="160px">
-          <FormLabel fontSize="sm" mb={1}>Page size</FormLabel>
-          <Select value={pageSize} onChange={handlePageSizeChange} size="sm">
-            <option value={5}>5</option>
-            <option value={10}>10</option>
-            <option value={20}>20</option>
-          </Select>
-        </FormControl>
+      {/* Search input for live Ticket Number search */}
+      <FormControl maxW="240px">
+        <FormLabel fontSize="sm" mb={1}>Search Here!</FormLabel>
+        <HStack>
+          <Input
+            placeholder="Search by Ticket Number"
+            size="sm"
+            value={searchTicketNo}
+            onChange={(e) => setSearchTicketNo(e.target.value)}
+          />
+          <IconButton
+            aria-label="Clear search"
+            size="sm"
+            icon={<CloseIcon />}
+            onClick={async () => {
+              if (!searchTicketNo) return;
+              setSearchTicketNo('');
+              setCurrentPage(1);
+              await fetchTickets();
+            }}
+          />
+        </HStack>
+      </FormControl>
 
-        {/* Search input for live Ticket Number search */}
-        <FormControl maxW="240px">
-          <FormLabel fontSize="sm" mb={1}>Search Here!</FormLabel>
-          <HStack>
-            <Input
-              placeholder="Search by Ticket Number"
-              size="sm"
-              value={searchTicketNo}
-              onChange={(e) => setSearchTicketNo(e.target.value)}
-            />
-            <IconButton
-              aria-label="Clear search"
-              size="sm"
-              icon={<CloseIcon />}
-              onClick={async () => {
-                if (!searchTicketNo) return;
-                setSearchTicketNo('');
-                setCurrentPage(1);
-                await fetchTickets();
-              }}
-            />
-          </HStack>
-        </FormControl>
+      <Box flex="1" />
 
-        <Box flex="1" />
+      <Button colorScheme="blue" onClick={() => fetchTickets()} isLoading={loadingTickets} size="sm">
+        Refresh
+      </Button>
+    </Flex>
 
-        <Button colorScheme="blue" onClick={() => fetchTickets()} isLoading={loadingTickets} size="sm">
-          Refresh
-        </Button>
-      </Flex>
-
-      {/* Extracted Data Table */}
-      {extractedPairs.length > 0 && (
-        <Box mb={4}>
-          <Heading size="md" mb={2}>
-            Extracted Data
-          </Heading>
-          <Box
-            maxHeight="200px"
-            overflowY="auto"
-            border="1px solid"
-            borderColor="gray.200"
-            borderRadius="md"
-            p={2}
+    {/* Extracted Data Table */}
+    {extractedPairs.length > 0 && (
+      <Box mb={4}>
+        <Heading size="md" mb={2}>
+          Extracted Data
+        </Heading>
+        <Box
+          maxHeight="200px"
+          overflowY="auto"
+          border="1px solid"
+          borderColor="gray.200"
+          borderRadius="md"
+          p={2}
+        >
+          <Table size="sm" variant="striped">
+            <Thead>
+              <Tr>
+                <Th>Key</Th>
+                <Th>Value</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {extractedPairs.map(({ key, value }) => (
+                <Tr key={key}>
+                  <Td>{key}</Td>
+                  <Td>{value?.toString?.() ?? String(value)}</Td>
+                </Tr>
+              ))}
+            </Tbody>
+          </Table>
+        </Box>
+        <Flex mt={2} gap={2}>
+          <Button
+            size="sm"
+            colorScheme="blue"
+            onClick={() =>
+              handleSubmitClick({
+                ...formData,
+                ...Object.fromEntries(extractedPairs.map(({ key, value }) => [key, value])),
+              })
+            }
           >
-            <Table size="sm" variant="striped">
-              <Thead>
-                <Tr>
-                  <Th>Key</Th>
-                  <Th>Value</Th>
-                </Tr>
-              </Thead>
-              <Tbody>
-                {extractedPairs.map(({ key, value }) => (
-                  <Tr key={key}>
-                    <Td>{key}</Td>
-                    <Td>{value?.toString?.() ?? String(value)}</Td>
-                  </Tr>
-                ))}
-              </Tbody>
-            </Table>
-          </Box>
-          <Flex mt={2} gap={2}>
-            <Button
-              size="sm"
-              colorScheme="blue"
-              onClick={() =>
-                handleSubmitClick({
-                  ...formData,
-                  ...Object.fromEntries(extractedPairs.map(({ key, value }) => [key, value])),
-                })
-              }
-            >
-              Submit Extracted Ticket
-            </Button>
-            <Button size="sm" variant="outline" onClick={clearExtractedData}>Clear</Button>
-          </Flex>
-        </Box>
-      )}
+            Submit Extracted Ticket
+          </Button>
+          <Button size="sm" variant="outline" onClick={clearExtractedData}>Clear</Button>
+        </Flex>
+      </Box>
+    )}
 
-      {/* PDF / Image Preview */}
-      {ocrFile && (
-        <Box mt={4}>
-          <Heading size="md" mb={2}>
-            Ticket Preview
-          </Heading>
-          {ocrFile.type === "application/pdf" ? (
-            <embed
-              src={URL.createObjectURL(ocrFile)}
-              type="application/pdf"
-              width="100%"
-              height="400px"
-            />
-          ) : (
-            <img
-              src={URL.createObjectURL(ocrFile)}
-              alt="Uploaded File"
-              style={{ maxWidth: "100%", borderRadius: "6px", border: "1px solid #ccc" }}
-            />
-          )}
-        </Box>
-      )}
-
-      {/* Confirmation Modal */}
-      <Modal isOpen={isConfirmOpen} onClose={handleCancelSubmit} isCentered>
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Confirm Submission</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            Kindly confirm if you would like to send this Ticket to Outgate.
-          </ModalBody>
-          <ModalFooter>
-            <Button ref={cancelRef} onClick={handleCancelSubmit}>
-              Cancel
-            </Button>
-            <Button colorScheme="red" ml={3} onClick={handleConfirmSubmit}>
-              Confirm
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* Tickets History Table */}
-      <Box mt={8}>
-        <Heading size="md" mb={3}>Processed Tickets</Heading>
-
-        {loadingTickets ? (
-          <Text>Loading tickets...</Text>
-        ) : displayedTickets.length === 0 ? (
-          <Text>No tickets found.</Text>
+    {/* PDF / Image Preview */}
+    {ocrFile && (
+      <Box mt={4}>
+        <Heading size="md" mb={2}>
+          Ticket Preview
+        </Heading>
+        {ocrFile.type === "application/pdf" ? (
+          <embed
+            src={URL.createObjectURL(ocrFile)}
+            type="application/pdf"
+            width="100%"
+            height="400px"
+          />
         ) : (
-          <>
-            <Table variant="striped" colorScheme="teal" size="sm">
-              <Thead>
-                <Tr>
-                  <Th>Ticket No</Th>
-                  <Th>Truck No</Th>
-                  <Th>SAD No</Th>
-                  <Th>Gross (KG)</Th>
-                  <Th>Tare (KG)</Th>
-                  <Th>Net (KG)</Th>
-                  <Th>View</Th>
-                </Tr>
-              </Thead>
-              <Tbody>
-                {displayedTickets.map((t) => {
-                  // compute values using possible field names from DB
-                  const computed = computeWeightsFromObj({
-                    gross: t.gross,
-                    tare: t.tare ?? t.tare_pt ?? t.tare,
-                    net: t.net ?? t.net_weight ?? t.net,
-                  });
-
-                  const rowId = t.id ?? t.ticket_id;
-
-                  return (
-                    <Tr key={rowId}>
-                      <Td>
-                        {editingTicketId === rowId ? (
-                          <HStack spacing={2}>
-                            <Input
-                              size="sm"
-                              value={editingTicketNo}
-                              onChange={(e) => setEditingTicketNo(e.target.value)}
-                              width="120px"
-                            />
-                            <IconButton
-                              size="sm"
-                              colorScheme="green"
-                              icon={<CheckIcon />}
-                              aria-label="Save ticket no"
-                              onClick={() => saveEditingTicketNo(t)}
-                            />
-                            <IconButton
-                              size="sm"
-                              colorScheme="red"
-                              icon={<CloseIcon />}
-                              aria-label="Cancel edit"
-                              onClick={cancelEditingTicketNo}
-                            />
-                          </HStack>
-                        ) : (
-                          <HStack spacing={2}>
-                            <Text>{t.ticket_no ?? '-'}</Text>
-                            <IconButton
-                              size="sm"
-                              icon={<EditIcon />}
-                              aria-label="Edit Ticket No"
-                              onClick={() => startEditingTicketNo(t)}
-                            />
-                          </HStack>
-                        )}
-                      </Td>
-                      <Td>{t.gnsw_truck_no}</Td>
-                      <Td>{t.sad_no}</Td>
-                      <Td>{computed.grossDisplay}</Td>
-                      <Td>{computed.tareDisplay}</Td>
-                      <Td>{computed.netDisplay}</Td>
-                      <Td>
-                        <IconButton
-                          icon={<ViewIcon />}
-                          aria-label={`View details of ticket ${t.ticket_no}`}
-                          onClick={() => handleView(t)}
-                          size="sm"
-                          colorScheme="teal"
-                        />
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </Tbody>
-            </Table>
-
-            {/* Pagination controls - responsive */}
-            <Flex justifyContent="space-between" alignItems="center" mt={4} gap={3} flexWrap="wrap">
-              <Flex gap={2} align="center" flexWrap="wrap">
-                <Button
-                  size="sm"
-                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  isDisabled={currentPage === 1 || loadingTickets}
-                >
-                  Previous
-                </Button>
-
-                {/* Condensed numbered page buttons */}
-                <HStack spacing={1} ml={2} wrap="wrap">
-                  {pageItems.map((it, idx) => (
-                    <Button
-                      key={`${it}-${idx}`}
-                      size="sm"
-                      onClick={() => handlePageClick(it)}
-                      colorScheme={it === currentPage ? 'teal' : 'gray'}
-                      variant={it === currentPage ? 'solid' : 'outline'}
-                      isDisabled={it === "..."}
-                    >
-                      {it}
-                    </Button>
-                  ))}
-                </HStack>
-
-                <Button
-                  size="sm"
-                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  isDisabled={currentPage === totalPages || loadingTickets}
-                >
-                  Next
-                </Button>
-              </Flex>
-
-              <Text>
-                Page {currentPage} of {totalPages} ({totalTickets} tickets)
-              </Text>
-
-              <Box>
-                <Text fontSize="sm" color="gray.600" textAlign="right">
-                  {useClientSidePagination ? 'Client-side' : 'Server-side'} pagination
-                </Text>
-              </Box>
-            </Flex>
-          </>
+          <img
+            src={URL.createObjectURL(ocrFile)}
+            alt="Uploaded File"
+            style={{ maxWidth: "100%", borderRadius: "6px", border: "1px solid #ccc" }}
+          />
         )}
       </Box>
+    )}
 
-      {/* View Ticket Modal */}
-      <Modal isOpen={isViewOpen} onClose={onViewClose} size="lg" scrollBehavior="inside">
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>View Ticket</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            {viewTicket ? (
-              <Box>
-                <SimpleGrid columns={[1, 2]} spacing={4}>
-                  {Object.entries(viewTicket).map(([key, value]) => {
-                    if (!fieldLabels[key]) return null;
+    {/* Confirmation Modal */}
+    <Modal isOpen={isConfirmOpen} onClose={handleCancelSubmit} isCentered>
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>Confirm Submission</ModalHeader>
+        <ModalCloseButton />
+        <ModalBody>
+          Kindly confirm if you would like to send this Ticket to Outgate.
+        </ModalBody>
+        <ModalFooter>
+          <Button ref={cancelRef} onClick={handleCancelSubmit}>
+            Cancel
+          </Button>
+          <Button colorScheme="red" ml={3} onClick={handleConfirmSubmit}>
+            Confirm
+          </Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
 
-                    // Format weight fields for display and compute missing values
-                    if (key === 'gross' || key === 'tare' || key === 'net' || key === 'total_weight') {
-                      const computed = computeWeightsFromObj({
-                        gross: viewTicket.gross,
-                        tare: viewTicket.tare ?? viewTicket.tare_pt ?? viewTicket.tare,
-                        net: viewTicket.net ?? viewTicket.net_weight ?? viewTicket.net,
-                      });
+    {/* Tickets History Table */}
+    <Box mt={8}>
+      <Heading size="md" mb={3}>Processed Tickets</Heading>
 
-                      let display = value;
-                      if (key === 'gross') display = computed.grossDisplay;
-                      if (key === 'tare') display = computed.tareDisplay;
-                      if (key === 'net') display = computed.netDisplay;
-                      if (key === 'total_weight') {
-                        if (viewTicket.netValue !== undefined && viewTicket.netValue !== null) {
-                          display = formatNumber(viewTicket.total_weight);
-                        } else if (computed.grossValue !== null && computed.tareValue !== null) {
-                          display = formatNumber(computed.grossValue - computed.tareValue);
-                        } else {
-                          display = '';
-                        }
+      {loadingTickets ? (
+        <Text>Loading tickets...</Text>
+      ) : displayedTickets.length === 0 ? (
+        <Text>No tickets found.</Text>
+      ) : (
+        <>
+          <Table variant="striped" colorScheme="teal" size="sm">
+            <Thead>
+              <Tr>
+                <Th>Ticket No</Th>
+                <Th>Truck No</Th>
+                <Th>SAD No</Th>
+                <Th>Gross (KG)</Th>
+                <Th>Tare (KG)</Th>
+                <Th>Net (KG)</Th>
+                <Th>View</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {displayedTickets.map((t) => {
+                // compute values using possible field names from DB
+                const computed = computeWeightsFromObj({
+                  gross: t.gross,
+                  tare: t.tare ?? t.tare_pt ?? t.tare,
+                  net: t.net ?? t.net_weight ?? t.net,
+                });
+
+                const rowId = t.id ?? t.ticket_id;
+
+                return (
+                  <Tr key={rowId}>
+                    <Td>
+                      {editingTicketId === rowId ? (
+                        <HStack spacing={2}>
+                          <Input
+                            size="sm"
+                            value={editingTicketNo}
+                            onChange={(e) => setEditingTicketNo(e.target.value)}
+                            width="120px"
+                          />
+                          <IconButton
+                            size="sm"
+                            colorScheme="green"
+                            icon={<CheckIcon />}
+                            aria-label="Save ticket no"
+                            onClick={() => saveEditingTicketNo(t)}
+                          />
+                          <IconButton
+                            size="sm"
+                            colorScheme="red"
+                            icon={<CloseIcon />}
+                            aria-label="Cancel edit"
+                            onClick={cancelEditingTicketNo}
+                          />
+                        </HStack>
+                      ) : (
+                        <HStack spacing={2}>
+                          <Text>{t.ticket_no ?? '-'}</Text>
+                          <IconButton
+                            size="sm"
+                            icon={<EditIcon />}
+                            aria-label="Edit Ticket No"
+                            onClick={() => startEditingTicketNo(t)}
+                          />
+                        </HStack>
+                      )}
+                    </Td>
+                    <Td>{t.gnsw_truck_no}</Td>
+                    <Td>{t.sad_no}</Td>
+                    <Td>{computed.grossDisplay}</Td>
+                    <Td>{computed.tareDisplay}</Td>
+                    <Td>{computed.netDisplay}</Td>
+                    <Td>
+                      <IconButton
+                        icon={<ViewIcon />}
+                        aria-label={`View details of ticket ${t.ticket_no}`}
+                        onClick={() => handleView(t)}
+                        size="sm"
+                        colorScheme="teal"
+                      />
+                    </Td>
+                  </Tr>
+                );
+              })}
+            </Tbody>
+          </Table>
+
+          {/* Pagination controls - responsive */}
+          <Flex justifyContent="space-between" alignItems="center" mt={4} gap={3} flexWrap="wrap">
+            <Flex gap={2} align="center" flexWrap="wrap">
+              <Button
+                size="sm"
+                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                isDisabled={currentPage === 1 || loadingTickets}
+              >
+                Previous
+              </Button>
+
+              {/* Condensed numbered page buttons */}
+              <HStack spacing={1} ml={2} wrap="wrap">
+                {pageItems.map((it, idx) => (
+                  <Button
+                    key={`${it}-${idx}`}
+                    size="sm"
+                    onClick={() => handlePageClick(it)}
+                    colorScheme={it === currentPage ? 'teal' : 'gray'}
+                    variant={it === currentPage ? 'solid' : 'outline'}
+                    isDisabled={it === "..."}
+                  >
+                    {it}
+                  </Button>
+                ))}
+              </HStack>
+
+              <Button
+                size="sm"
+                onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                isDisabled={currentPage === totalPages || loadingTickets}
+              >
+                Next
+              </Button>
+            </Flex>
+
+            <Text>
+              Page {currentPage} of {totalPages} ({totalTickets} tickets)
+            </Text>
+
+            <Box>
+              <Text fontSize="sm" color="gray.600" textAlign="right">
+                {useClientSidePagination ? 'Client-side' : 'Server-side'} pagination
+              </Text>
+            </Box>
+          </Flex>
+        </>
+      )}
+    </Box>
+
+    {/* View Ticket Modal */}
+    <Modal isOpen={isViewOpen} onClose={onViewClose} size="lg" scrollBehavior="inside">
+      <ModalOverlay />
+      <ModalContent>
+        <ModalHeader>View Ticket</ModalHeader>
+        <ModalCloseButton />
+        <ModalBody>
+          {viewTicket ? (
+            <Box>
+              <SimpleGrid columns={[1, 2]} spacing={4}>
+                {Object.entries(viewTicket).map(([key, value]) => {
+                  if (!fieldLabels[key]) return null;
+
+                  // Format weight fields for display and compute missing values
+                  if (key === 'gross' || key === 'tare' || key === 'net' || key === 'total_weight') {
+                    const computed = computeWeightsFromObj({
+                      gross: viewTicket.gross,
+                      tare: viewTicket.tare ?? viewTicket.tare_pt ?? viewTicket.tare,
+                      net: viewTicket.net ?? viewTicket.net_weight ?? viewTicket.net,
+                    });
+
+                    let display = value;
+                    if (key === 'gross') display = computed.grossDisplay;
+                    if (key === 'tare') display = computed.tareDisplay;
+                    if (key === 'net') display = computed.netDisplay;
+                    if (key === 'total_weight') {
+                      if (viewTicket.netValue !== undefined && viewTicket.netValue !== null) {
+                        display = formatNumber(viewTicket.total_weight);
+                      } else if (computed.grossValue !== null && computed.tareValue !== null) {
+                        display = formatNumber(computed.grossValue - computed.tareValue);
+                      } else {
+                        display = '';
                       }
-
-                      return (
-                        <Box
-                          key={key}
-                          p={3}
-                          borderWidth="1px"
-                          borderRadius="md"
-                          bg="gray.50"
-                          boxShadow="sm"
-                        >
-                          <Text fontWeight="semibold" color="teal.600" mb={1}>
-                            {fieldLabels[key]}
-                          </Text>
-                          {key === "file_url" && value ? (
-                            <Button
-                              as="a"
-                              href={value}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              colorScheme="teal"
-                              size="sm"
-                            >
-                              Open PDF
-                            </Button>
-                          ) : (
-                            <Text fontSize="md" color="gray.700">
-                              {display !== null && display !== undefined && display !== '' ? display.toString() : 'N/A'}
-                            </Text>
-                          )}
-                        </Box>
-                      );
                     }
 
                     return (
@@ -1465,34 +1432,66 @@ const handleCancelSubmit = () => {
                           </Button>
                         ) : (
                           <Text fontSize="md" color="gray.700">
-                            {value !== null && value !== undefined && value !== '' ? value.toString() : 'N/A'}
+                            {display !== null && display !== undefined && display !== '' ? display.toString() : 'N/A'}
                           </Text>
                         )}
                       </Box>
                     );
-                  })}
-                </SimpleGrid>
-                <Box mt={6} p={3} borderTop="1px" borderColor="gray.200">
-                  <Text fontWeight="bold" color="teal.600">
-                    Submitted At:
-                  </Text>
-                  <Text>
-                    {viewTicket.submitted_at ? new Date(viewTicket.submitted_at).toLocaleString() : 'N/A'}
-                  </Text>
-                </Box>
-              </Box>
-            ) : (
-              <Text>No data to display.</Text>
-            )}
-          </ModalBody>
-          <ModalFooter>
-            <Button onClick={onViewClose}>Close</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+                  }
 
-    </Box>
-  );
+                  return (
+                    <Box
+                      key={key}
+                      p={3}
+                      borderWidth="1px"
+                      borderRadius="md"
+                      bg="gray.50"
+                      boxShadow="sm"
+                    >
+                      <Text fontWeight="semibold" color="teal.600" mb={1}>
+                        {fieldLabels[key]}
+                      </Text>
+                      {key === "file_url" && value ? (
+                        <Button
+                          as="a"
+                          href={value}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          colorScheme="teal"
+                          size="sm"
+                        >
+                          Open PDF
+                        </Button>
+                      ) : (
+                        <Text fontSize="md" color="gray.700">
+                          {value !== null && value !== undefined && value !== '' ? value.toString() : 'N/A'}
+                        </Text>
+                      )}
+                    </Box>
+                  );
+                })}
+              </SimpleGrid>
+              <Box mt={6} p={3} borderTop="1px" borderColor="gray.200">
+                <Text fontWeight="bold" color="teal.600">
+                  Submitted At:
+                </Text>
+                <Text>
+                  {viewTicket.submitted_at ? new Date(viewTicket.submitted_at).toLocaleString() : 'N/A'}
+                </Text>
+              </Box>
+            </Box>
+          ) : (
+            <Text>No data to display.</Text>
+          )}
+        </ModalBody>
+        <ModalFooter>
+          <Button onClick={onViewClose}>Close</Button>
+        </ModalFooter>
+      </ModalContent>
+    </Modal>
+
+  </Box>
+);
 }
 
 export default WeighbridgeManagementPage;
