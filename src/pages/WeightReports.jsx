@@ -161,24 +161,44 @@ function computeWeightsFromObj({ gross, tare, net }) {
   };
 }
 
+// Improved parseTicketDate: robustly handle ISO, "YYYY-MM-DD HH:mm:ss", timestamps, legacy formats etc.
 function parseTicketDate(raw) {
-  if (!raw) return null;
+  if (!raw && raw !== 0) return null;
+
+  // If it's already a Date object
   if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+
+  // If it's a number (ms since epoch)
   if (typeof raw === 'number') {
-    const d = new Date(raw);
-    return isNaN(d.getTime()) ? null : d;
+    const dNum = new Date(raw);
+    return isNaN(dNum.getTime()) ? null : dNum;
   }
+
   const s = String(raw).trim();
   if (s === '') return null;
+
+  // Fast attempt: direct Date parse (handles ISO with ms and timezone, and many browser-parseable forms)
+  const dDirect = new Date(s);
+  if (!isNaN(dDirect.getTime())) return dDirect;
+
+  // Handle "YYYY-MM-DD" (date only)
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d = new Date(s + 'T00:00:00');
-    return isNaN(d.getTime()) ? null : d;
+    const d0 = new Date(`${s}T00:00:00`);
+    if (!isNaN(d0.getTime())) return d0;
   }
-  const d0 = new Date(s);
-  if (!isNaN(d0.getTime())) return d0;
-  const m = s.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)?/i);
-  if (m) {
-    let [, datePart, hh, mm, ss, ampm] = m;
+
+  // Handle "YYYY-MM-DD HH:mm:ss" (no T, no ms)
+  const ymdHmsMatch = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?$/);
+  if (ymdHmsMatch) {
+    const iso = `${ymdHmsMatch[1]}T${ymdHmsMatch[2]}${ymdHmsMatch[3] || ''}`;
+    const dIso = new Date(iso);
+    if (!isNaN(dIso.getTime())) return dIso;
+  }
+
+  // Legacy format match from prior code: dd-MMM-yy hh:mm:ss [AM/PM]
+  const legacyMatch = s.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)?/i);
+  if (legacyMatch) {
+    let [, datePart, hh, mm, ss, ampm] = legacyMatch;
     let secNum = parseInt(ss, 10);
     if (secNum > 59) secNum = 59;
     let yearPart = datePart.split('-')[2];
@@ -191,13 +211,18 @@ function parseTicketDate(raw) {
     const d1 = new Date(fixed);
     if (!isNaN(d1.getTime())) return d1;
   }
+
+  // Last attempt: numeric string (ms since epoch)
   const maybeNum = Number(s);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
-    return isNaN(d2.getTime()) ? null : d2;
+    if (!isNaN(d2.getTime())) return d2;
   }
+
+  // Failed to parse
   return null;
 }
+
 function sortTicketsByDateDesc(arr) {
   return (arr || []).slice().sort((a, b) => {
     const da = parseTicketDate(a?.data?.date);
@@ -208,35 +233,65 @@ function sortTicketsByDateDesc(arr) {
     return db.getTime() - da.getTime();
   });
 }
+
+// Improved deduplication: prefer valid dates, then newest; if no dates, prefer one with fileUrl.
 function removeDuplicatesByTicketNo(tickets = []) {
   const map = new Map();
+
   for (const t of tickets) {
-    const rawKey = (t.data && (t.data.ticketNo ?? t.ticketId)) || t.ticketId || '';
-    const key = String(rawKey || '').trim().toUpperCase();
+    // Determine canonical key for ticket number/id
+    const rawTicketNo = (t.data && (t.data.ticketNo ?? t.ticketId)) ?? t.ticketId ?? '';
+    const key = String(rawTicketNo || '').trim().toUpperCase();
+
+    // If no ticket identifier, just store a unique fallback (keeps them)
     if (!key) {
       const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
       map.set(fallbackKey, t);
       continue;
     }
+
     const existing = map.get(key);
     if (!existing) {
       map.set(key, t);
       continue;
     }
-    // prefer more recent record based on tickets.date
-    const da = parseTicketDate(existing.data?.date);
-    const db = parseTicketDate(t.data?.date);
-    if (db && (!da || db.getTime() > da.getTime())) {
+
+    const existingDate = parseTicketDate(existing.data?.date);
+    const thisDate = parseTicketDate(t.data?.date);
+
+    // Prefer entries with valid dates over invalid
+    if (!existingDate && thisDate) {
       map.set(key, t);
       continue;
     }
-    // if neither have date, prefer the one with fileUrl
-    if (!da && !db) {
-      if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
+    if (existingDate && !thisDate) {
+      // keep existing
+      continue;
+    }
+
+    // If both have dates, pick the most recent
+    if (thisDate && existingDate) {
+      if (thisDate.getTime() > existingDate.getTime()) {
         map.set(key, t);
       }
+      continue;
     }
+
+    // If neither has a parseable date, prefer the one with a fileUrl
+    const existingHasFile = !!(existing.data?.fileUrl);
+    const thisHasFile = !!(t.data?.fileUrl);
+    if (thisHasFile && !existingHasFile) {
+      map.set(key, t);
+      continue;
+    }
+    if (!thisHasFile && existingHasFile) {
+      continue;
+    }
+
+    // As a final tie-breaker, keep the one that appeared later in the incoming list (prefer newest in source)
+    map.set(key, t);
   }
+
   return Array.from(map.values());
 }
 
