@@ -767,7 +767,8 @@ export default function ConfirmExit() {
   };
 
   // Derived counts for stats
-  const pendingCount = allTickets.length; // Pending rows (not yet Exited)
+  // FIX APPLIED: show only tickets truly awaiting exit (not already confirmed in outgate)
+  const pendingCount = filteredResults.length; // <-- was allTickets.length previously
   const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length; // number of unique ticket_id in outgate
   const noTicketIdConfirmedCount = confirmedTickets.filter((t) => !t.ticket_id).length;
 
