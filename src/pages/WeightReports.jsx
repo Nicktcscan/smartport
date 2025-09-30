@@ -161,44 +161,48 @@ function computeWeightsFromObj({ gross, tare, net }) {
   };
 }
 
-// Improved parseTicketDate: robustly handle ISO, "YYYY-MM-DD HH:mm:ss", timestamps, legacy formats etc.
+/**
+ * Robust parseTicketDate
+ * Handles:
+ *  - Date objects
+ *  - numeric epoch
+ *  - 'YYYY-MM-DD' (date only)
+ *  - 'YYYY-MM-DD HH:MM:SS' or with milliseconds -> normalised to ISO by replacing space with 'T'
+ *  - ISO strings
+ *  - some 'DD-Mon-YYYY HH:MM:SS AM' style (fallback)
+ */
 function parseTicketDate(raw) {
-  if (!raw && raw !== 0) return null;
-
-  // If it's already a Date object
+  if (!raw) return null;
   if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
-
-  // If it's a number (ms since epoch)
   if (typeof raw === 'number') {
-    const dNum = new Date(raw);
-    return isNaN(dNum.getTime()) ? null : dNum;
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const s0 = String(raw).trim();
+  if (s0 === '') return null;
+
+  // If it's a plain 'YYYY-MM-DD' (date only)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+    const d = new Date(`${s0}T00:00:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
 
-  const s = String(raw).trim();
-  if (s === '') return null;
-
-  // Fast attempt: direct Date parse (handles ISO with ms and timezone, and many browser-parseable forms)
-  const dDirect = new Date(s);
-  if (!isNaN(dDirect.getTime())) return dDirect;
-
-  // Handle "YYYY-MM-DD" (date only)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d0 = new Date(`${s}T00:00:00`);
-    if (!isNaN(d0.getTime())) return d0;
+  // If it's 'YYYY-MM-DD HH:MM:SS' optionally with milliseconds, replace first space with 'T'
+  // to make it ISO-compatible: '2025-09-30 07:38:49' -> '2025-09-30T07:38:49'
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?/.test(s0)) {
+    const iso = s0.replace(' ', 'T');
+    const d = new Date(iso);
+    if (!isNaN(d.getTime())) return d;
   }
 
-  // Handle "YYYY-MM-DD HH:mm:ss" (no T, no ms)
-  const ymdHmsMatch = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?$/);
-  if (ymdHmsMatch) {
-    const iso = `${ymdHmsMatch[1]}T${ymdHmsMatch[2]}${ymdHmsMatch[3] || ''}`;
-    const dIso = new Date(iso);
-    if (!isNaN(dIso.getTime())) return dIso;
-  }
+  // Try native Date constructor for ISO strings and common formats
+  const d0 = new Date(s0);
+  if (!isNaN(d0.getTime())) return d0;
 
-  // Legacy format match from prior code: dd-MMM-yy hh:mm:ss [AM/PM]
-  const legacyMatch = s.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*([AP]M)?/i);
-  if (legacyMatch) {
-    let [, datePart, hh, mm, ss, ampm] = legacyMatch;
+  // Try to parse formats like '29-Sep-2025 20:30:00' or '29-Sep-25 8:30:00 PM'
+  const m = s0.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*([AP]M)?/i);
+  if (m) {
+    let [, datePart, hh, mm, ss, ms, ampm] = m;
     let secNum = parseInt(ss, 10);
     if (secNum > 59) secNum = 59;
     let yearPart = datePart.split('-')[2];
@@ -212,14 +216,13 @@ function parseTicketDate(raw) {
     if (!isNaN(d1.getTime())) return d1;
   }
 
-  // Last attempt: numeric string (ms since epoch)
-  const maybeNum = Number(s);
+  // final attempt: numeric-like string -> epoch
+  const maybeNum = Number(s0);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
     if (!isNaN(d2.getTime())) return d2;
   }
 
-  // Failed to parse
   return null;
 }
 
@@ -234,64 +237,46 @@ function sortTicketsByDateDesc(arr) {
   });
 }
 
-// Improved deduplication: prefer valid dates, then newest; if no dates, prefer one with fileUrl.
+/**
+ * removeDuplicatesByTicketNo
+ * - Normalizes ticket key by trimming and uppercasing
+ * - If multiple entries for same ticket, prefers one with later date
+ * - If no date info, prefers one containing fileUrl (heuristic)
+ */
 function removeDuplicatesByTicketNo(tickets = []) {
   const map = new Map();
-
   for (const t of tickets) {
-    // Determine canonical key for ticket number/id
-    const rawTicketNo = (t.data && (t.data.ticketNo ?? t.ticketId)) ?? t.ticketId ?? '';
-    const key = String(rawTicketNo || '').trim().toUpperCase();
-
-    // If no ticket identifier, just store a unique fallback (keeps them)
+    const rawKey =
+      (t.data && (t.data.ticketNo ?? t.data.ticketId)) ||
+      t.ticketId ||
+      (t.data && t.data.ticket_no) ||
+      '';
+    const key = String(rawKey || '').trim().toUpperCase();
     if (!key) {
+      // fallback unique key for rows without ticket numbers: keep as-is but unique
       const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
       map.set(fallbackKey, t);
       continue;
     }
-
     const existing = map.get(key);
     if (!existing) {
       map.set(key, t);
       continue;
     }
-
-    const existingDate = parseTicketDate(existing.data?.date);
-    const thisDate = parseTicketDate(t.data?.date);
-
-    // Prefer entries with valid dates over invalid
-    if (!existingDate && thisDate) {
+    // prefer more recent record based on ticket.data.date
+    const da = parseTicketDate(existing.data?.date);
+    const db = parseTicketDate(t.data?.date);
+    if (db && (!da || db.getTime() > da.getTime())) {
       map.set(key, t);
       continue;
     }
-    if (existingDate && !thisDate) {
-      // keep existing
-      continue;
-    }
-
-    // If both have dates, pick the most recent
-    if (thisDate && existingDate) {
-      if (thisDate.getTime() > existingDate.getTime()) {
+    // if neither have date, prefer the one with fileUrl
+    if (!da && !db) {
+      if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
         map.set(key, t);
       }
-      continue;
     }
-
-    // If neither has a parseable date, prefer the one with a fileUrl
-    const existingHasFile = !!(existing.data?.fileUrl);
-    const thisHasFile = !!(t.data?.fileUrl);
-    if (thisHasFile && !existingHasFile) {
-      map.set(key, t);
-      continue;
-    }
-    if (!thisHasFile && existingHasFile) {
-      continue;
-    }
-
-    // As a final tie-breaker, keep the one that appeared later in the incoming list (prefer newest in source)
-    map.set(key, t);
   }
-
   return Array.from(map.values());
 }
 
@@ -501,7 +486,7 @@ export default function WeightReports() {
 
   const parseTimeToMinutes = (timeStr) => {
     if (!timeStr) return null;
-    const parts = timeStr.split(':');
+    const parts = String(timeStr).split(':');
     if (parts.length < 2) return null;
     const hh = parseInt(parts[0], 10);
     const mm = parseInt(parts[1], 10);
@@ -520,7 +505,13 @@ export default function WeightReports() {
     }
   };
 
-  // computeFilteredTickets: filters and sorts using ticket.data.date (always)
+  /**
+   * computeFilteredTickets:
+   * - driver/truck filters applied first
+   * - date/time filtering:
+   *    - If dateFrom/dateTo provided: build explicit start/end datetimes and compare full ticket datetime
+   *    - If only times provided: match time-of-day across all dates, supporting wrap-around (overnight) ranges
+   */
   const computeFilteredTickets = (baseArr = null) => {
     if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
       setFilteredTickets([]);
@@ -528,11 +519,13 @@ export default function WeightReports() {
     }
     let arr = (baseArr || originalTickets).slice();
 
+    // driver filter
     if (searchDriver && searchDriver.trim()) {
       const q = searchDriver.trim().toLowerCase();
       arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
 
+    // truck filter
     if (searchTruck && searchTruck.trim()) {
       const q = searchTruck.trim().toLowerCase();
       arr = arr.filter((t) => {
@@ -546,22 +539,20 @@ export default function WeightReports() {
       });
     }
 
-    // Date/time filtering — use ticket.data.date exclusively
+    // Build datetime filters
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
-    // Build start/end Date objects when date range present
+    // Build explicit start/end Date objects when date range present
     let start = null;
     let end = null;
     if (dateFrom) {
-      const fullTime = timeFrom ? `${timeFrom}:00` : '00:00:00';
+      const fullTime = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
       start = new Date(`${dateFrom}T${fullTime}`);
     }
     if (dateTo) {
-      const fullTime = timeTo ? `${timeTo}:00` : '23:59:59.999';
-      // If timeTo is a short 'HH:MM', convert to seconds; the browser accepts 'HH:MM:SS'
-      const normalized = fullTime.length <= 8 && !fullTime.includes('.') ? fullTime : fullTime;
-      end = new Date(`${dateTo}T${normalized}`);
+      const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
+      end = new Date(`${dateTo}T${fullTime}`);
     }
 
     const tfMinutes = parseTimeToMinutes(timeFrom);
@@ -572,17 +563,18 @@ export default function WeightReports() {
       const ticketDate = parseTicketDate(raw);
       if (!ticketDate) return false;
 
-      if (hasDateRange) {
-        // If dateFrom provided, start uses timeFrom if supplied; else start of day.
-        // If dateTo provided, end uses timeTo if supplied; else end of day.
-        let s = start ? new Date(start) : new Date(-8640000000000000);
-        let e = end ? new Date(end) : new Date(8640000000000000);
+      // If both dateFrom/dateTo present, use full range (start <= ticket <= end)
+      if (dateFrom || dateTo) {
+        // If start provided, use it; otherwise very early
+        const s = start ? new Date(start) : new Date(-8640000000000000);
+        // If end provided, use it; otherwise very late
+        const e = end ? new Date(end) : new Date(8640000000000000);
 
         return ticketDate >= s && ticketDate <= e;
       }
 
+      // If only time range provided (no dates) — do time-of-day matching across all dates (supports wrap-around)
       if (hasTimeRangeOnly) {
-        // If only times given, match time-of-day across all dates. Support wrap-around.
         const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
         const fromM = tfMinutes !== null ? tfMinutes : 0;
         const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
@@ -594,9 +586,11 @@ export default function WeightReports() {
         return ticketMinutes >= fromM || ticketMinutes <= toM;
       }
 
+      // No date/time restrictions
       return true;
     });
 
+    // Sorting
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
