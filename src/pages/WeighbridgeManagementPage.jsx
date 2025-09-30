@@ -4,7 +4,7 @@ import {
   Box, Heading, Button, Input, FormControl, FormLabel, Table,
   Thead, Tbody, Tr, Th, Td, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
-  useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, Switch, HStack
+  useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, HStack
 } from '@chakra-ui/react';
 import { ViewIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 
@@ -258,13 +258,12 @@ function WeighbridgeManagementPage() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [useClientSidePagination, setUseClientSidePagination] = useState(false);
   const [totalTickets, setTotalTickets] = useState(0);
-  const [editingTicket, setEditingTicket] = useState(null); // unused but retained
   const [viewTicket, setViewTicket] = useState(null);
   const [ticketToSubmit, setTicketToSubmit] = useState(null);
 
-  // New state for inline editing of ticket_no
-  const [editingTicketId, setEditingTicketId] = useState(null);
-  const [editingTicketNo, setEditingTicketNo] = useState('');
+  // New: inline row editing states
+  const [editingRowId, setEditingRowId] = useState(null);
+  const [editFormData, setEditFormData] = useState({});
 
   // New state for live search
   const [searchTicketNo, setSearchTicketNo] = useState('');
@@ -1006,49 +1005,106 @@ const saveTicket = async (data) => {
 };
 
 
-// Inline-edit helpers for ticket_no
-const startEditingTicketNo = (ticket) => {
-  const idValue = ticket.id ?? ticket.ticket_id;
-  setEditingTicketId(idValue);
-  setEditingTicketNo(ticket.ticket_no ?? '');
+// Inline-row edit helpers
+const startEditingRow = (row) => {
+  const rowId = row.id ?? row.ticket_id;
+  setEditingRowId(rowId);
+  setEditFormData({
+    ticket_no: row.ticket_no ?? '',
+    gnsw_truck_no: row.gnsw_truck_no ?? '',
+    sad_no: row.sad_no ?? '',
+    gross: row.gross != null ? String(row.gross) : (row.gross_display || ''),
+    tare: row.tare != null ? String(row.tare) : (row.tare_display || ''),
+    net: row.net != null ? String(row.net) : (row.net_display || ''),
+  });
 };
 
-const cancelEditingTicketNo = () => {
-  setEditingTicketId(null);
-  setEditingTicketNo('');
+const cancelEditingRow = () => {
+  setEditingRowId(null);
+  setEditFormData({});
 };
 
-const saveEditingTicketNo = async (ticket) => {
-  const idField = ticket.id ? 'id' : 'ticket_id';
-  const idValue = ticket.id ?? ticket.ticket_id;
+const saveEditingRow = async (originalRow) => {
+  // originalRow is the row object as shown in table prior to edit
+  const rowId = originalRow.id ?? originalRow.ticket_id;
+  if (!rowId) {
+    toast({ title: 'Unable to update', description: 'Row has no identifier', status: 'error', duration: 3000 });
+    return;
+  }
+
+  // Build update payloads with normalized numeric values
+  const ticketsPayload = {
+    ticket_no: editFormData.ticket_no || null,
+    gnsw_truck_no: editFormData.gnsw_truck_no || null,
+    sad_no: editFormData.sad_no || null,
+    gross: numericValue(editFormData.gross),
+    tare: numericValue(editFormData.tare),
+    net: numericValue(editFormData.net),
+  };
+
+  // Remove undefined keys
+  Object.keys(ticketsPayload).forEach(k => {
+    if (ticketsPayload[k] === undefined) delete ticketsPayload[k];
+  });
+
   try {
-    const { error } = await supabase
+    // Update tickets table: prefer id if available else ticket_id
+    const ticketIdField = originalRow.id ? 'id' : (originalRow.ticket_id ? 'ticket_id' : null);
+    const ticketIdValue = originalRow.id ?? originalRow.ticket_id;
+
+    if (!ticketIdField || !ticketIdValue) {
+      throw new Error('Cannot determine primary key for tickets update');
+    }
+
+    const { error: ticketErr } = await supabase
       .from('tickets')
-      .update({ ticket_no: editingTicketNo })
-      .eq(idField, idValue);
+      .update(ticketsPayload)
+      .eq(ticketIdField, ticketIdValue);
 
-    if (error) throw error;
+    if (ticketErr) throw ticketErr;
 
-    toast({
-      title: "Ticket updated",
-      description: `Ticket No updated successfully to ${editingTicketNo}`,
-      status: "success",
-      duration: 3000,
-      isClosable: true,
+    // Update outgate: match by ticket_id if present, otherwise by original ticket_no
+    const outgatePayload = {
+      ticket_no: ticketsPayload.ticket_no ?? originalRow.ticket_no ?? null,
+      vehicle_number: ticketsPayload.gnsw_truck_no ?? originalRow.gnsw_truck_no ?? null,
+      sad_no: ticketsPayload.sad_no ?? originalRow.sad_no ?? null,
+      gross: ticketsPayload.gross ?? originalRow.gross ?? null,
+      tare: ticketsPayload.tare ?? originalRow.tare ?? null,
+      net: ticketsPayload.net ?? originalRow.net ?? null,
+    };
+
+    // Clean up undefined fields
+    Object.keys(outgatePayload).forEach(k => {
+      if (outgatePayload[k] === undefined) delete outgatePayload[k];
     });
 
-    // Refresh the list (server or client mode)
+    let outgateMatch = null;
+    if (originalRow.ticket_id) {
+      outgateMatch = supabase.from('outgate').update(outgatePayload).eq('ticket_id', originalRow.ticket_id);
+      const { error: ogErr } = await outgateMatch;
+      if (ogErr) {
+        // Try matching by ticket_no as fallback
+        if (originalRow.ticket_no) {
+          const { error: ogErr2 } = await supabase.from('outgate').update(outgatePayload).eq('ticket_no', originalRow.ticket_no);
+          if (ogErr2) throw ogErr2;
+        } else {
+          throw ogErr;
+        }
+      }
+    } else if (originalRow.ticket_no) {
+      const { error: ogErr } = await supabase.from('outgate').update(outgatePayload).eq('ticket_no', originalRow.ticket_no);
+      if (ogErr) throw ogErr;
+    } else {
+      // no reliable outgate key — skip updating outgate
+      console.warn('No ticket_id or ticket_no to match outgate row; skipping outgate update');
+    }
+
+    toast({ title: 'Updated', description: 'Ticket (and outgate if present) updated successfully', status: 'success', duration: 3000 });
+    cancelEditingRow();
     await fetchTickets();
-
-    cancelEditingTicketNo();
   } catch (err) {
-    toast({
-      title: "Update failed",
-      description: err?.message || "Could not update ticket number.",
-      status: "error",
-      duration: 5000,
-      isClosable: true,
-    });
+    console.error('Update failed', err);
+    toast({ title: 'Update failed', description: err?.message || 'Could not update', status: 'error', duration: 5000 });
   }
 };
 
@@ -1250,7 +1306,7 @@ return (
                 <Th>Gross (KG)</Th>
                 <Th>Tare (KG)</Th>
                 <Th>Net (KG)</Th>
-                <Th>View</Th>
+                <Th>Actions</Th>
               </Tr>
             </Thead>
             <Tbody>
@@ -1263,58 +1319,117 @@ return (
                 });
 
                 const rowId = t.id ?? t.ticket_id;
+                const isEditing = editingRowId === rowId;
 
                 return (
                   <Tr key={rowId}>
                     <Td>
-                      {editingTicketId === rowId ? (
+                      {isEditing ? (
+                        <Input
+                          size="sm"
+                          value={editFormData.ticket_no || ''}
+                          onChange={(e) => setEditFormData((p) => ({ ...p, ticket_no: e.target.value }))}
+                          width="120px"
+                        />
+                      ) : (
+                        <Text>{t.ticket_no ?? '-'}</Text>
+                      )}
+                    </Td>
+                    <Td>
+                      {isEditing ? (
+                        <Input
+                          size="sm"
+                          value={editFormData.gnsw_truck_no || ''}
+                          onChange={(e) => setEditFormData((p) => ({ ...p, gnsw_truck_no: e.target.value }))}
+                          width="140px"
+                        />
+                      ) : (
+                        <Text>{t.gnsw_truck_no ?? '-'}</Text>
+                      )}
+                    </Td>
+                    <Td>
+                      {isEditing ? (
+                        <Input
+                          size="sm"
+                          value={editFormData.sad_no || ''}
+                          onChange={(e) => setEditFormData((p) => ({ ...p, sad_no: e.target.value }))}
+                          width="100px"
+                        />
+                      ) : (
+                        <Text>{t.sad_no ?? '-'}</Text>
+                      )}
+                    </Td>
+                    <Td>
+                      {isEditing ? (
+                        <Input
+                          size="sm"
+                          value={editFormData.gross || ''}
+                          onChange={(e) => setEditFormData((p) => ({ ...p, gross: e.target.value }))}
+                          width="110px"
+                        />
+                      ) : (
+                        <Text>{computed.grossDisplay || '—'}</Text>
+                      )}
+                    </Td>
+                    <Td>
+                      {isEditing ? (
+                        <Input
+                          size="sm"
+                          value={editFormData.tare || ''}
+                          onChange={(e) => setEditFormData((p) => ({ ...p, tare: e.target.value }))}
+                          width="110px"
+                        />
+                      ) : (
+                        <Text>{computed.tareDisplay || '—'}</Text>
+                      )}
+                    </Td>
+                    <Td>
+                      {isEditing ? (
+                        <Input
+                          size="sm"
+                          value={editFormData.net || ''}
+                          onChange={(e) => setEditFormData((p) => ({ ...p, net: e.target.value }))}
+                          width="110px"
+                        />
+                      ) : (
+                        <Text>{computed.netDisplay || '—'}</Text>
+                      )}
+                    </Td>
+                    <Td>
+                      {isEditing ? (
                         <HStack spacing={2}>
-                          <Input
-                            size="sm"
-                            value={editingTicketNo}
-                            onChange={(e) => setEditingTicketNo(e.target.value)}
-                            width="120px"
-                          />
                           <IconButton
                             size="sm"
                             colorScheme="green"
                             icon={<CheckIcon />}
-                            aria-label="Save ticket no"
-                            onClick={() => saveEditingTicketNo(t)}
+                            aria-label="Save row"
+                            onClick={() => saveEditingRow(t)}
                           />
                           <IconButton
                             size="sm"
                             colorScheme="red"
                             icon={<CloseIcon />}
                             aria-label="Cancel edit"
-                            onClick={cancelEditingTicketNo}
+                            onClick={cancelEditingRow}
                           />
                         </HStack>
                       ) : (
                         <HStack spacing={2}>
-                          <Text>{t.ticket_no ?? '-'}</Text>
                           <IconButton
                             size="sm"
                             icon={<EditIcon />}
-                            aria-label="Edit Ticket No"
-                            onClick={() => startEditingTicketNo(t)}
+                            aria-label="Edit row"
+                            onClick={() => startEditingRow(t)}
+                          />
+                          <IconButton
+                            icon={<ViewIcon />}
+                            aria-label={`View details of ticket ${t.ticket_no}`}
+                            onClick={() => handleView(t)}
+                            size="sm"
+                            colorScheme="teal"
                           />
                         </HStack>
                       )}
-                    </Td>
-                    <Td>{t.gnsw_truck_no}</Td>
-                    <Td>{t.sad_no}</Td>
-                    <Td>{computed.grossDisplay}</Td>
-                    <Td>{computed.tareDisplay}</Td>
-                    <Td>{computed.netDisplay}</Td>
-                    <Td>
-                      <IconButton
-                        icon={<ViewIcon />}
-                        aria-label={`View details of ticket ${t.ticket_no}`}
-                        onClick={() => handleView(t)}
-                        size="sm"
-                        colorScheme="teal"
-                      />
                     </Td>
                   </Tr>
                 );
