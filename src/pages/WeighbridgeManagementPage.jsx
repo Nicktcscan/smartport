@@ -283,7 +283,7 @@ function handleExtract(rawText) {
     return;
   }
 
-  // --- normalize lines and build augmented lines for cross-line detection ---
+  // Normalize and split lines
   const lines = String(rawText || "")
     .replace(/\r\n/g, "\n")
     .replace(/\t/g, " ")
@@ -292,343 +292,281 @@ function handleExtract(rawText) {
     .map((l) => l.trim())
     .filter(Boolean);
 
-  // Augment with merged neighbors to catch "Ticket" on one line, "No: 12345" on next.
-  const augmented = [];
-  for (let i = 0; i < lines.length; i++) {
-    augmented.push(lines[i]);
-    if (i + 1 < lines.length) augmented.push(`${lines[i]} ${lines[i + 1]}`);
-    if (i + 2 < lines.length) augmented.push(`${lines[i]} ${lines[i + 1]} ${lines[i + 2]}`);
-  }
-
   const full = lines.join("\n");
-  const fullNoSpaces = full.replace(/\s+/g, " ");
   const found = {};
 
-  const currentYear = new Date().getFullYear();
-
-  // helpers
   const onlyDigits = (s) => {
-    if (!s && s !== 0) return null;
-    const m = String(s || "").match(/(\d+)/);
-    return m ? m[1] : null;
+    const m = String(s || "").match(/\d+/);
+    return m ? m[0] : null;
   };
 
-  const toNumber = (s) => {
-    if (s === null || s === undefined) return null;
-    const cleaned = String(s).replace(/[^\d.-]/g, "");
-    const n = Number(cleaned);
-    return Number.isFinite(n) ? n : null;
-  };
+  const extractLabelLine = (labelRegex) =>
+    lines.find((l) => labelRegex.test(l)) || null;
 
-  const isTimeLike = (s) => {
-    if (!s) return false;
-    return /^(?:[01]?\d|2[0-3])[:\s]?[0-5]\d(?::[0-5]\d)?$/.test(s.replace(/\s+/g, ""));
-  };
-
-  // try several common date/time patterns and return the matched substring (and parsed Date if possible)
-  function findDateCandidate(text) {
-    if (!text) return null;
-    // common printed format: 15-Sep-25 9:40:06 AM  OR 15-Sep-2025 09:40:06 AM
-    const patterns = [
-      /(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i,
-      /(\d{1,2}\/\d{1,2}\/\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i,
-      /(\d{1,2}-[A-Za-z]{3}-\d{2,4})/i, // date only
-      /(\d{1,2}\/\d{1,2}\/\d{2,4})/i,
-      /(\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}:\d{2})/i,
-    ];
-    for (const pat of patterns) {
-      const m = text.match(pat);
-      if (m && m[1]) return m[1].trim();
-    }
-    return null;
-  }
-
-  function normalizeDateString(dateStr) {
-    if (!dateStr) return null;
-    // Try to detect year and cap to currentYear if OCR produced a future year
-    // Extract year (2 or 4 digits)
-    const yMatch = dateStr.match(/(\d{2,4})\b(?!:)/);
-    if (yMatch && yMatch[1]) {
-      let yr = Number(yMatch[1]);
-      // If two-digit, convert to 2000+yy
-      if (yMatch[1].length === 2) yr = 2000 + yr;
-      // Cap to currentYear if it's in the future
-      if (yr > currentYear) {
-        // If the original was 2-digit, replace with currentYear % 100
-        const twoDigit = String(currentYear).slice(-2);
-        dateStr = dateStr.replace(/\b\d{2,4}\b/, String(currentYear));
-      } else {
-        // keep original
-      }
-    }
-    return dateStr;
-  }
-
-  // parse weight from line: prefer 4-6 digit groups, allow commas, reject unrealistic values
-  function parseWeightFromLine(line) {
+  // Parse a sensible weight from a line:
+  // - prefer 4-6 digit chunk (common for weights)
+  // - reject unrealistic values > 200,000 or < 100
+  const parseWeightFromLine = (line) => {
     if (!line) return null;
-    // capture groups like 88,690 or 88690
-    const matches = Array.from(line.matchAll(/(\d{3,6}(?:[,\s]\d{3})?)/g)).map((m) =>
-      String(m[1]).replace(/[,\s]/g, "")
-    );
-    for (const tok of matches) {
-      const n = Number(tok);
-      if (!Number.isFinite(n)) continue;
-      if (n >= 50 && n <= 500000) return n;
+    // find distinct 4-6 digit tokens
+    const matches = Array.from(line.matchAll(/\b(\d{4,6})\b/g)).map((m) => m[1]);
+    if (matches.length === 0) return null;
+    // Choose the first reasonable candidate
+    for (let i = 0; i < matches.length; i++) {
+      const num = Number(matches[i].replace(/,/g, ""));
+      if (!Number.isFinite(num)) continue;
+      if (num >= 100 && num <= 200000) return num;
     }
     return null;
-  }
+  };
 
-  // gather numeric tokens (2-6 digits) with positions to exclude numbers inside dates later
-  const allNumberMatches = Array.from(full.matchAll(/\b(\d{2,6})\b/g)).map((m) => ({
-    token: m[1],
-    index: m.index,
-  }));
+  // Helper: find all distinct 2-6 digit numbers in doc (used for ticket fallback)
+  const allSmallNumbers = () =>
+    Array.from(full.matchAll(/\b(\d{2,6})\b/g)).map((m) => m[1]);
 
-  // --- 1) Date (do this early to exclude date-derived numbers when picking tickets) ---
-  let dateCandidate = null;
-  // check augmented lines first (bigger chance to capture "Print Date" lines)
-  for (const a of augmented) {
-    const d = findDateCandidate(a);
-    if (d) {
-      dateCandidate = d;
-      break;
-    }
-  }
-  if (!dateCandidate) dateCandidate = findDateCandidate(fullNoSpaces);
-  if (dateCandidate) {
-    dateCandidate = normalizeDateString(dateCandidate);
-    found.date = dateCandidate;
-  }
+  // 1) Ticket No — look for many label variants (Ticket No, Ticket#, Tkt, Pass Number)
+  const ticketLine =
+    extractLabelLine(/\bTicket\s*(?:No\.?|#)?\b/i) ||
+    extractLabelLine(/\bTkt\b/i) ||
+    extractLabelLine(/\bTicket#\b/i) ||
+    extractLabelLine(/\bPass\s*Number\b/i);
 
-  // position-based helper to check if a numeric token occurs inside the found date substring in `full`
-  function tokenOccursInsideDate(tokenObj) {
-    if (!found.date) return false;
-    const dateIdx = full.indexOf(found.date);
-    if (dateIdx === -1) return false;
-    const tokenIdx = tokenObj.index || full.indexOf(tokenObj.token);
-    if (tokenIdx === -1) return false;
-    return tokenIdx >= dateIdx && tokenIdx < dateIdx + found.date.length;
-  }
-
-  // --- 2) Gross / Tare / Net ---
-  // prefer label matching on augmented lines to capture lines split across lines
-  for (const a of augmented) {
-    if (!found.gross && /\bGross\b/i.test(a)) found.gross = parseWeightFromLine(a);
-    if (!found.tare && /\bTare\b/i.test(a)) found.tare = parseWeightFromLine(a);
-    if (!found.net && /\bNet\b/i.test(a)) found.net = parseWeightFromLine(a);
-    if (found.gross && found.tare && found.net) break;
-  }
-  // fallback to scanning full text for unlabeled occurrences
-  if (!found.tare) {
-    const mt = full.match(/Tare\s*[:\-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{2,6}(?:[,\s]\d{3})?)/i);
-    if (mt && mt[1]) {
-      const n = Number(String(mt[1]).replace(/[,\s]/g, ""));
-      if (Number.isFinite(n) && n >= 50 && n <= 500000) found.tare = n;
-    }
-  }
-  if (!found.net) {
-    const mn = full.match(/Net\s*[:\-]?\s*(\d{2,6}(?:[,\s]\d{3})?)/i);
-    if (mn && mn[1]) {
-      const n = Number(String(mn[1]).replace(/[,\s]/g, ""));
-      if (Number.isFinite(n) && n >= 50 && n <= 500000) found.net = n;
-    }
-  }
-  if (!found.gross) {
-    // maybe compute gross from tare+net later; try to pick a gross token if present
-    const mg = full.match(/Gross\s*[:\-]?\s*(\d{2,6}(?:[,\s]\d{3})?)/i);
-    if (mg && mg[1]) {
-      const n = Number(String(mg[1]).replace(/[,\s]/g, ""));
-      if (Number.isFinite(n) && n >= 50 && n <= 500000) found.gross = n;
-    }
-  }
-
-  // If tare & net available, compute gross (most reliable). Do not overwrite if gross looks reasonable.
-  if (Number.isFinite(found.tare) && Number.isFinite(found.net)) {
-    const computedG = Number(found.tare) + Number(found.net);
-    if (!found.gross || Math.abs(found.gross - computedG) > 2) {
-      found.gross = computedG;
-    }
-  } else if (found.gross && (!found.tare || !found.net)) {
-    // if gross present and tare or net missing, we'll compute them later in normalization stage
-  }
-
-  // --- 3) WB ID (WB123) ---
-  for (const a of augmented) {
-    const m = a.match(/\b(WB\d{1,9})\b/i);
+  if (ticketLine) {
+    const m =
+      ticketLine.match(/\b(?:Ticket|Tkt|Pass\s*Number)\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{2,6})/i) ||
+      ticketLine.match(/\b(\d{2,6})\b/);
     if (m && m[1]) {
-      found.wb_id = m[1].toUpperCase();
-      break;
+      found.ticket_no = m[1];
+    }
+  }
+  // fallback: prefer the first 2-6 digit number that is not SAD (we'll capture SAD later)
+  if (!found.ticket_no) {
+    const numbers = allSmallNumbers();
+    if (numbers.length) {
+      // We'll postpone final choice until we know SAD / weights; tentatively store candidates
+      found._ticket_candidates = numbers;
     }
   }
 
-  // --- 4) GNSW Truck No ---
-  for (const a of augmented) {
-    if (/\bGNSW\b.*\bTruck\b/i.test(a) || /\bTruck\s*No\b/i.test(a) || /\bVehicle\s*No\b/i.test(a)) {
-      const m = a.match(/(?:GNSW\s*Truck\s*No|Truck\s*No|Vehicle\s*No)\.?\s*[:\-]?\s*([A-Z0-9\-\s\/]{3,20})/i);
-      if (m && m[1]) {
-        found.gnsw_truck_no = String(m[1]).trim().toUpperCase().replace(/\s+/g, "");
-        break;
-      }
-    }
-  }
-  // fallback: plate-like anywhere in full
-  if (!found.gnsw_truck_no) {
+  // 2) GNSW Truck No — prefer explicit label, else plate-like pattern
+  const gnswLine =
+    extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
+  if (gnswLine) {
+    const m =
+      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i) ||
+      gnswLine.match(/Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i);
+    if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
+  } else {
+    // fallback: plate-like pattern (letters+digits). Avoid picking pure numeric tokens.
     const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
-    if (plateMatch && plateMatch[1]) found.gnsw_truck_no = plateMatch[1].toUpperCase();
+    if (plateMatch && plateMatch[1]) {
+      found.gnsw_truck_no = plateMatch[1].toUpperCase();
+    }
   }
 
-  // --- 5) Container / Consignee / Material ---
-  for (const a of augmented) {
-    if (!found.container_no) {
-      const m = a.match(/Container\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]+)/i);
-      if (m && m[1]) found.container_no = String(m[1]).trim();
-    }
-    if (!found.consignee && /\bConsignee\b/i.test(a)) {
-      const m = a.match(/Consignee\s*[:\-]?\s*(.+?)(?:\bTare\b|$)/i);
-      if (m && m[1]) found.consignee = m[1].trim();
-    }
-    if (!found.material && /\bMaterial\b/i.test(a)) {
-      const m = a.match(/Material\s*[:\-]?\s*(.+)/i);
-      if (m && m[1]) found.material = m[1].trim();
-    }
-    if (found.container_no && found.consignee && found.material) break;
+  // 3) Driver — label-first, strip leading dashes and trailing "Truck..." junk
+  const driverLine = extractLabelLine(/\bDriver\b/i);
+  if (driverLine) {
+    let drv = driverLine.replace(/Driver\s*[:\-]?\s*/i, "").trim();
+    drv = drv.replace(/^[-:]+/, "").trim();
+    drv = drv.replace(/\bTruck\b.*$/i, "").trim();
+    // remove parentheses content like (PT) etc
+    drv = drv.replace(/\(.*?\)/g, "").trim();
+    found.driver = drv || null;
   }
-  // fallback for bulk
-  if (!found.container_no) {
+
+  // 4) Scale Name — explicit label else WBRIDGE\d fallback
+  const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
+  if (scaleLine) {
+    const m = scaleLine.match(/Scale\s*Name\s*[:\-]?\s*([A-Z0-9\-_]+)/i) || scaleLine.match(/Scale\s*[:\-]?\s*([A-Z0-9\-_]+)/i);
+    if (m && m[1]) {
+      const cand = String(m[1]).toUpperCase();
+      // ignore generic "WEIGHT" if possible — prefer WBRIDGE if present later
+      if (!/WEIGHT/i.test(cand)) found.scale_name = cand;
+      else found.scale_name = cand; // keep for now, may be overridden by WBRIDGE below
+    }
+  }
+  if (!found.scale_name || /WEIGHT/i.test(found.scale_name)) {
+    const wb = full.match(/\b(WBRIDGE\d+)\b/i);
+    if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
+  }
+
+  // 5) Gross / Tare / Net — strict label parsing; parse only 4-6 digit groups per line
+  const grossLine = extractLabelLine(/\bGross\b/i);
+  if (grossLine) found.gross = parseWeightFromLine(grossLine);
+
+  const tareLine = extractLabelLine(/\bTare\b/i);
+  if (tareLine) found.tare = parseWeightFromLine(tareLine);
+  else {
+    // sometimes "Tare: (PT) 20740 kg" sits on same line as consignee — check full
+    const mt = full.match(/Tare\s*[:\-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
+    if (mt && mt[1]) {
+      const num = Number(mt[1]);
+      if (Number.isFinite(num) && num >= 100 && num <= 200000) found.tare = num;
+    }
+  }
+
+  const netLine = extractLabelLine(/\bNet\b/i);
+  if (netLine) found.net = parseWeightFromLine(netLine);
+  else {
+    const mn = full.match(/Net\s*[:\-]?\s*(\d{4,6})/i);
+    if (mn && mn[1]) {
+      const num = Number(mn[1]);
+      if (Number.isFinite(num) && num >= 100 && num <= 200000) found.net = num;
+    }
+  }
+
+  // 6) SAD No (now accepts 2-digit SADs)
+  const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
+  if (sadLine) {
+    const m = sadLine.match(/SAD\s*No\.?\s*[:\-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:\-]?\s*(\d{2,6})/i);
+    if (m && m[1]) found.sad_no = m[1];
+  } else {
+    const sadFb = full.match(/\bSAD\s*No\.?\s*[:\-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:\-]?\s*(\d{2,6})/i);
+    if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
+  }
+
+  // 7) Container / Consignee / Material
+  const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
+  if (containerLine) {
+    const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]+)/i);
+    if (m && m[1]) found.container_no = String(m[1]).trim();
+  } else {
+    // fallback: look for known tokens like BULK on its own line
     const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
     if (bulkLine) found.container_no = "BULK";
   }
 
-  // --- 6) SAD No (label-first, accept small 2-digit like 25) ---
-  let sadFound = null;
-  for (const a of augmented) {
-    const m = a.match(/\bS[AD]{1,2}\b\W{0,3}\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{1,6})/i) || a.match(/\bSAD\s*[:\-]?\s*(\d{1,6})/i);
-    if (m && m[1]) {
-      sadFound = m[1];
-      break;
-    }
-  }
-  if (!sadFound) {
-    // fallback: scan full for "SAD <digits>"
-    const m = full.match(/\bS[AD]{1,2}\b\W{0,3}\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{1,6})/i);
-    if (m && m[1]) sadFound = m[1];
-  }
-  if (sadFound) {
-    // normalize (keep as digits)
-    found.sad_no = String(sadFound).replace(/^0+/, (s) => (s === '' ? '0' : s)) || sadFound;
+  const consigneeLine = extractLabelLine(/Consignee\b/i);
+  if (consigneeLine) {
+    let c = consigneeLine.replace(/Consignee\s*[:\-]?\s*/i, "").trim();
+    c = c.split(/\bTare\b/i)[0].trim();
+    c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
+    found.consignee = c || null;
   }
 
-  // --- 7) Driver / Operator extraction ---
-  for (const a of augmented) {
-    if (!found.driver && /\bDriver\b/i.test(a)) {
-      const m = a.match(/Driver\s*[:\-]?\s*(.+?)(?:\bTruck\b|\bSAD\b|\bTare\b|$)/i);
-      if (m && m[1]) {
-        found.driver = m[1].trim().replace(/\(.*?\)/g, "");
-      }
-    }
-    if (!found.operator && /\bOperator\b/i.test(a)) {
-      const m = a.match(/Operator\s*[:\-]?\s*(.+)$/i);
-      if (m && m[1]) found.operator = m[1].trim();
-    }
-    if (found.driver && found.operator) break;
+  const materialLine = extractLabelLine(/Material\b/i);
+  if (materialLine) {
+    const m = materialLine.match(/Material\s*[:\-]?\s*(.+)/i);
+    if (m && m[1]) found.material = m[1].trim();
   }
 
-  // --- 8) Ticket No extraction (robust, prioritized, excludes date/time/weights) ---
-
-  // Helper: candidate tokens (token + index)
-  const candidates = allNumberMatches.slice(); // shallow copy
-
-  // First try label-first patterns on augmented lines (some OCR variants allowed)
-  const ticketLabelPatterns = [
-    /\bTicket\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]{3,20})/i,
-    /\bTkt\s*[:\-]?\s*(\d{2,6})/i,
-    /\bTicket#\s*[:\-]?\s*(\d{2,6})/i,
-    /\bPass\s*Number\s*[:\-]?\s*(\d{2,6})/i,
-    /\bTicket\s*[:\-]?\s*([A-Z0-9\-]{3,20})/i,
-  ];
-
-  for (const a of augmented) {
-    for (const pat of ticketLabelPatterns) {
-      const m = a.match(pat);
-      if (m && m[1]) {
-        // Found label-based ticket. sanitize:
-        let val = String(m[1]).trim();
-        // if it's numeric-like, keep digits only
-        const digits = val.match(/\d+/);
-        if (digits) val = digits[0];
-        found.ticket_no = val;
-        break;
-      }
-    }
-    if (found.ticket_no) break;
+  // 8) WB ID
+  const wbIdLine = extractLabelLine(/\bWB\s*(?:Id|ID)\b/i);
+  if (wbIdLine) {
+    const m = wbIdLine.match(/\b(WB\d{1,9})\b/i);
+    if (m && m[1]) found.wb_id = m[1].toUpperCase();
   }
 
-  // If still not found, try to pick from candidates with filtering & ranking
-  if (!found.ticket_no) {
-    // Build exclude set: weights, SAD, WB id, and tokens that occur inside date substring or are time-like
-    const excludeSet = new Set();
-    if (found.sad_no) excludeSet.add(String(found.sad_no));
-    if (found.wb_id) {
-      const wbDigits = String(found.wb_id).replace(/^WB/i, "");
-      if (wbDigits) excludeSet.add(wbDigits);
+  // 9) Date
+  const dateMatch = full.match(
+    /(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)/i
+  );
+  if (dateMatch && dateMatch[1]) found.date = dateMatch[1].trim();
+
+  // 10) Operator — prefer label; if label present but no clean name afterwards, fall back to literal "Operator"
+  const opLine = extractLabelLine(/\bOperator\b/i);
+  if (opLine) {
+    let op = opLine.replace(/Operator\s*[:\-]?\s*/i, "").trim();
+    // strip timestamps / WB / weight tokens and boolean flags
+    op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
+    op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
+    op = op.replace(/\bWBRIDGE\d+\b/gi, "");
+    op = op.replace(/\b\d{2,6}\s*kg\b/gi, "");
+    op = op.replace(/\b(true|false)\b/ig, "");
+    op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
+    if (op) {
+      const opMatch = op.match(/[A-Za-z][A-Za-z\.\s'\-]{0,40}/);
+      found.operator = opMatch ? opMatch[0].trim() : op;
+    } else {
+      // label existed but no clear name — keep the label as placeholder
+      found.operator = "Operator";
     }
-    ["gross", "tare", "net"].forEach((k) => {
-      if (found[k] !== undefined && found[k] !== null) excludeSet.add(String(found[k]));
-    });
+  }
 
-    // filter helper
-    const filtered = candidates
-      .filter((c) => {
-        // exclude tokens inside the parsed date substring
-        if (tokenOccursInsideDate(c)) return false;
-        // exclude tokens that equal known fields
-        if (excludeSet.has(c.token)) return false;
-        // exclude time-like tokens
-        if (isTimeLike(c.token)) return false;
-        // reject tokens that are part of obvious text like long years (e.g., 2026) - but allow 2-digit SADs below
-        if (/^20\d{2}$/.test(c.token) && Number(c.token) > currentYear) return false;
-        return true;
-      })
-      .map((c) => c.token);
+  // --- Post-processing heuristics ---
 
-    // ranking: prefer 5-digit numeric tickets (common), then 4-6 digits, then any remaining
-    let pick = null;
-    pick = filtered.find((n) => /^\d{5}$/.test(n));
-    if (!pick) pick = filtered.find((n) => /^\d{4,6}$/.test(n));
-    if (!pick) {
-      // prefer tokens that appear near the word "Ticket" in the full text
-      for (const n of filtered) {
-        const ctxIdx = full.indexOf(`Ticket`);
-        if (ctxIdx !== -1) {
-          const near = full.indexOf(n, Math.max(0, ctxIdx - 50));
-          if (near !== -1 && Math.abs(near - ctxIdx) < 100) {
-            pick = n;
-            break;
+  // If we have tare AND net, compute gross = tare + net (this is the most reliable)
+  if (Number.isFinite(found.tare) && Number.isFinite(found.net)) {
+    found.gross = Number(found.tare) + Number(found.net);
+  } else {
+    // If gross is parsed but extremely large or clearly concatenated (> 200,000), discard it
+    if (found.gross && Number(found.gross) > 200000) {
+      found.gross = null;
+    }
+  }
+
+  // If ticket_no not set, pick a candidate from small numbers that isn't SAD or weights or WB id
+  if (!found.ticket_no && found._ticket_candidates && found._ticket_candidates.length) {
+    const exclude = new Set([
+      String(found.sad_no || ""),
+      String(found.tare || ""),
+      String(found.net || ""),
+      String(found.gross || ""),
+      (found.wb_id || "").replace(/^WB/i, ""),
+    ].filter(Boolean));
+
+    // Refined fallback:
+    // - Exclude candidates that are equal to known fields (SAD/weights/WB)
+    // - Exclude candidates that appear inside a "Print Date" / "Date Time" line
+    // - Exclude candidates that occur inside the parsed date substring (if present)
+    // - Exclude time-like fragments (hhmm or hhmmss)
+    // - Prefer exactly 5-digit candidates (typical ticket numbers)
+    const candidate = found._ticket_candidates.find((n) => {
+      // Exclude SAD/weights/WB
+      if (exclude.has(n)) return false;
+
+      // Exclude if number appears inside Print Date / Date Time line
+      const badLine = lines.find((l) => /Print\s*Date|Date\s*Time/i.test(l) && l.includes(n));
+      if (badLine) return false;
+
+      // Exclude numbers that are clearly part of the parsed date substring
+      if (found.date) {
+        const dateIdx = full.indexOf(found.date);
+        if (dateIdx >= 0) {
+          let pos = full.indexOf(n, 0);
+          while (pos !== -1) {
+            if (pos >= dateIdx && pos < dateIdx + found.date.length) return false;
+            pos = full.indexOf(n, pos + 1);
           }
         }
       }
-    }
-    if (!pick && filtered.length) pick = filtered[0];
 
-    if (pick) {
-      found.ticket_no = pick;
-    }
+      // Exclude numbers that look like time-only values (hhmm or hhmmss)
+      if (/^(?:[01]?\d|2[0-3])[0-5]\d(?:[0-5]\d)?$/.test(n)) return false;
+
+      // Prefer exactly 5-digit ticket numbers — reject others
+      if (!/^\d{5}$/.test(n)) return false;
+
+      return true;
+    });
+
+    if (candidate) found.ticket_no = candidate;
+    delete found._ticket_candidates;
   }
 
-  // Normalize ticket_no (digits only when numeric)
-  if (found.ticket_no) {
-    const maybeDigits = String(found.ticket_no).match(/\d+/);
-    if (maybeDigits && maybeDigits[0].length === String(found.ticket_no).length) {
-      found.ticket_no = maybeDigits[0];
+  // Normalize: ticket numeric-only
+  if (found.ticket_no) found.ticket_no = onlyDigits(found.ticket_no);
+
+  // Normalize scale_name uppercase & avoid noisy "WEIGHT" if we found a valid WBRIDGE
+  if (found.scale_name) {
+    const s = String(found.scale_name).toUpperCase();
+    if (/WEIGHT/i.test(s) && full.match(/\b(WBRIDGE\d+)\b/i)) {
+      const wb = full.match(/\b(WBRIDGE\d+)\b/i);
+      if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
+      else found.scale_name = s;
     } else {
-      found.ticket_no = String(found.ticket_no).trim();
+      found.scale_name = s;
     }
   }
 
-  // --- Normalizations & safety checks ---
+  // Trim and remove stray leading characters from driver
+  if (found.driver) {
+    found.driver = String(found.driver).replace(/^[-:\s]+/, "").trim();
+    if (found.driver === "") found.driver = null;
+  }
 
-  // Ensure weights are numeric or null and compute missing fields conservatively
+  // Ensure weights are numbers or null
   ["gross", "tare", "net"].forEach((k) => {
     if (found[k] !== undefined && found[k] !== null) {
       const n = Number(found[k]);
@@ -638,32 +576,7 @@ function handleExtract(rawText) {
     }
   });
 
-  // conservative compute: if tare & net present compute gross; if gross & tare present compute net; if gross & net present compute tare
-  if (found.tare !== null && found.net !== null && (found.gross === null || found.gross === undefined)) {
-    found.gross = found.tare + found.net;
-  }
-  if (found.gross !== null && found.tare !== null && (found.net === null || found.net === undefined)) {
-    found.net = found.gross - found.tare;
-  }
-  if (found.gross !== null && found.net !== null && (found.tare === null || found.tare === undefined)) {
-    found.tare = found.gross - found.net;
-  }
-
-  // Date: if found, ensure not a future year. We already normalized above; final safeguard:
-  if (found.date) {
-    // try to extract year and clamp
-    const y = found.date.match(/\b(\d{2,4})\b(?!:)/);
-    if (y && y[1]) {
-      let yr = Number(y[1]);
-      if (y[1].length === 2) yr = 2000 + yr;
-      if (yr > currentYear) {
-        // replace with currentYear in the string
-        found.date = found.date.replace(/\b\d{2,4}\b(?!:)/, String(currentYear));
-      }
-    }
-  }
-
-  // Build ordered pairs for UI (same ordering as you used)
+  // Build ordered pairs for UI
   const orderedKeys = [
     "ticket_no",
     "gnsw_truck_no",
@@ -686,10 +599,10 @@ function handleExtract(rawText) {
     if (found[k] !== undefined && found[k] !== null) pairs.push({ key: k, value: found[k] });
   });
 
-  // Apply to UI
+  // Set state
   setExtractedPairs(pairs);
 
-  // Merge into formData only if empty-ish
+  // Merge into formData only if empty
   const nextForm = { ...formData };
   pairs.forEach(({ key, value }) => {
     const existing = nextForm[key];
@@ -705,8 +618,6 @@ function handleExtract(rawText) {
     duration: 3000,
     isClosable: true,
   });
-
-  return found; // return for debugging / tests if needed
 }
 
 
