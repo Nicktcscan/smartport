@@ -6,12 +6,8 @@ import {
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Badge, Flex,
   Spinner, Tag, TagLabel, InputGroup, InputRightElement
 } from '@chakra-ui/react';
-import { FaUpload, FaPlus, FaMicrophone, FaSearch, FaEye } from 'react-icons/fa';
+import { FaPlus, FaMicrophone, FaSearch, FaEye } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
-import Tesseract from 'tesseract.js';
-import {
-  suggestSadDetails, parseDocTextForFields, parseNaturalLanguageQuery, explainDiscrepancy
-} from '../hooks/useAIHelper';
 
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed'];
 const SAD_DOCS_BUCKET = 'sad-docs';
@@ -49,20 +45,15 @@ export default function SADDeclaration() {
   // activity timeline (local)
   const [activity, setActivity] = useState([]);
 
-  // AI suggestion state
-  const [aiSuggestionLoading, setAiSuggestionLoading] = useState(false);
-
   // fetch declared SADs
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
       let q = supabase.from('sad_declarations').select('*').order('created_at', { ascending: false });
       if (filter) {
-        // naive filter application (filter is {status, sad_no, regime} ... trust nl parser to return this)
         if (filter.status) q = q.eq('status', filter.status);
         if (filter.sad_no) q = q.eq('sad_no', filter.sad_no);
-        if (filter.regime) q = q.eq('regime', filter.regime);
-        // more complex filters can be added
+        if (filter.regime) q = q.ilike('regime', `%${filter.regime}%`);
       }
       const { data, error } = await q;
       if (error) throw error;
@@ -77,70 +68,73 @@ export default function SADDeclaration() {
 
   useEffect(() => { fetchSADs(); }, []);
 
-  // helper: activity push
+  // helper: activity push (local + optional DB)
   const pushActivity = async (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
     setActivity(prev => [ev, ...prev].slice(0, 100));
-    // optionally persist to DB:
     try {
       await supabase.from('sad_activity').insert([{ text, meta }]);
     } catch (e) {
-      // ignore DB errors — local timeline stays useful
+      // ignore DB errors
     }
   };
 
-  // DOCUMENT OCR + AI parsing pipeline
-  const analyzeFile = async (file) => {
-    // 1. basic client-side OCR
-    try {
-      const { data: { text } } = await Tesseract.recognize(file, 'eng', { logger: m => {} });
-      // 2. ask AI to parse important fields & tags
-      const parsed = await parseDocTextForFields(text);
-      return { text, parsed };
-    } catch (err) {
-      console.warn('analyzeFile error', err);
-      return { text: '', parsed: null, error: err };
-    }
+  // Open document in viewer modal
+  const openDocViewer = (doc) => {
+    setDocViewer({ open: true, doc });
   };
 
-  // upload docs to storage and return array of URLs + tags
+  // upload docs to storage and return array of URLs + tags (OCR removed)
   const uploadDocs = async (sad_no, files = []) => {
     if (!files || files.length === 0) return [];
     const uploaded = [];
+
     for (const f of files) {
       const key = `sad-${sad_no}/${Date.now()}-${f.name.replace(/\s+/g, '_')}`;
+
+      // upload
       const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(key, f, { cacheControl: '3600', upsert: false });
       if (error) {
         console.warn('upload doc failed', error);
         throw error;
       }
-      // public URL or signed URL
-      const { publicURL, error: urlErr } = supabase.storage.from(SAD_DOCS_BUCKET).getPublicUrl(data.path);
+      const filePath = data?.path ?? data?.Key ?? key;
+
+      // get URL (tolerant to SDK shapes)
       let url = null;
-      if (urlErr || !publicURL) {
-        const { signedURL, error: signedErr } = await supabase.storage.from(SAD_DOCS_BUCKET).createSignedUrl(data.path, 60 * 60 * 24 * 7);
-        if (signedErr) throw signedErr;
-        url = signedURL.signedUrl ?? signedURL;
-      } else {
-        url = publicURL;
-      }
-
-      // quick OCR + parse for tags/fields (non-blocking could be used)
-      let parsed = null;
       try {
-        const { text, parsed: p } = await analyzeFile(files.find(x => x.name === f.name) || f);
-        parsed = p;
-      } catch (e) {
-        parsed = null;
+        const getPublic = await supabase.storage.from(SAD_DOCS_BUCKET).getPublicUrl(filePath);
+        const publicUrl =
+          (getPublic?.data && (getPublic.data.publicUrl || getPublic.data.publicURL)) ??
+          getPublic?.publicURL ??
+          null;
+
+        if (publicUrl) {
+          url = publicUrl;
+        } else {
+          const signedResp = await supabase.storage.from(SAD_DOCS_BUCKET).createSignedUrl(filePath, 60 * 60 * 24 * 7);
+          const signedUrl =
+            (signedResp?.data && (signedResp.data.signedUrl || signedResp.data.signedURL)) ??
+            signedResp?.signedUrl ??
+            signedResp?.signedURL ??
+            null;
+          if (!signedUrl) throw new Error('Could not obtain public or signed URL for uploaded file.');
+          url = signedUrl;
+        }
+      } catch (uErr) {
+        console.warn('Getting URL failed', uErr);
+        throw uErr;
       }
 
-      uploaded.push({ name: f.name, path: data.path, url, tags: (parsed?.tags || []), parsed });
+      // No OCR/analysis performed here (removed). Keep tags empty for now.
+      uploaded.push({ name: f.name, path: filePath, url, tags: [], parsed: null });
       await pushActivity(`Uploaded doc ${f.name} for SAD ${sad_no}`, { sad_no, file: f.name });
     }
+
     return uploaded;
   };
 
-  // create SAD record (with AI-assisted fallback)
+  // create SAD record
   const handleCreateSAD = async () => {
     if (!sadNo || !declaredWeight) {
       toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
@@ -148,10 +142,8 @@ export default function SADDeclaration() {
     }
     setLoading(true);
     try {
-      // upload docs first (they are analyzed during upload)
       const docRecords = await uploadDocs(sadNo, docs);
 
-      // payload
       const payload = {
         sad_no: sadNo,
         regime: regime || null,
@@ -193,7 +185,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // update status
+  // update SAD status (manual)
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
@@ -218,7 +210,6 @@ export default function SADDeclaration() {
       await pushActivity(`Recalculated total for ${sad_no}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
-      // auto status: if within 1% mark as Completed
       const row = (await supabase.from('sad_declarations').select('declared_weight').eq('sad_no', sad_no)).data?.[0];
       if (row) {
         const declared = Number(row.declared_weight || 0);
@@ -245,104 +236,39 @@ export default function SADDeclaration() {
     return 'orange';
   };
 
-  // get recorded sum (client)
-  const getRecordedSum = async (sad_no) => {
-    const { data, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', sad_no);
-    if (error) {
-      console.warn('getRecordedSum', error);
-      return 0;
-    }
-    return (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-  };
-
-  // AI suggestion on sadNo change
-  useEffect(() => {
-    let mounted = true;
-    async function runSuggestion() {
-      if (!sadNo) return;
-      setAiSuggestionLoading(true);
-      try {
-        // first try to find previous entry
-        const { data: prev } = await supabase.from('sad_declarations').select('*').eq('sad_no', sadNo).limit(1).maybeSingle();
-        if (prev) {
-          // populate from DB record if present
-          if (!regime && prev.regime) setRegime(prev.regime);
-          if (!declaredWeight && prev.declared_weight) setDeclaredWeight(String(prev.declared_weight));
-          if (mounted) {
-            setAiSuggestionLoading(false);
-            await pushActivity(`Autofilled from DB for SAD ${sadNo}`);
-            return;
-          }
-        }
-
-        // call AI for suggestions
-        try {
-          const resp = await suggestSadDetails(sadNo);
-          if (mounted && resp?.suggestion) {
-            // AI returns an object like { regime, declared_weight, reason }
-            if (resp.suggestion.regime && !regime) setRegime(resp.suggestion.regime);
-            if (resp.suggestion.declared_weight && !declaredWeight) setDeclaredWeight(String(resp.suggestion.declared_weight));
-            await pushActivity(`AI suggested fields for ${sadNo}`, resp.suggestion);
-          }
-        } catch (aiErr) {
-          console.warn('AI suggestion failed', aiErr);
-        }
-      } catch (err) {
-        console.warn('suggest effect err', err);
-      } finally {
-        setAiSuggestionLoading(false);
-      }
-    }
-    runSuggestion();
-    return () => { mounted = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sadNo]);
-
-  // handle file change (analyze and attach tags)
+  // handle file change (OCR removed) — just attach files for upload
   const onFilesChange = async (fileList) => {
-    setLoading(true);
     try {
       const arr = Array.from(fileList || []);
-      // lightweight immediate OCR+parse for suggestions
-      const analyzed = await Promise.all(arr.map(async f => {
-        try {
-          const { text, parsed } = await analyzeFile(f);
-          return { file: f, text, parsed, tags: parsed?.tags || [] };
-        } catch (e) {
-          return { file: f, text: '', parsed: null, tags: [] };
-        }
-      }));
-      // convert to just files and keep parsed info locally (we push parsed when uploading)
-      setDocs(analyzed.map(a => a.file));
-      // show toast with parsed suggestions
-      const suggestions = analyzed.map(a => `${a.file.name}: ${a.parsed?.type || a.parsed?.tags?.join(', ') || 'no tags'}`).join('; ');
-      if (suggestions) toast({ title: 'Doc analysis', description: suggestions, status: 'info', duration: 6000 });
+      setDocs(arr);
+      toast({ title: 'Files attached', description: `${arr.length} file(s) attached — OCR/analysis disabled`, status: 'info', duration: 4000 });
     } catch (e) {
       console.warn('onFilesChange', e);
-      toast({ title: 'File analyze error', description: e?.message || 'Could not analyze files', status: 'error' });
-    } finally {
-      setLoading(false);
+      toast({ title: 'File attach error', description: e?.message || 'Could not attach files', status: 'error' });
     }
   };
 
-  // open doc viewer
-  const openDocViewer = (doc) => {
-    setDocViewer({ open: true, doc });
-  };
-
-  // natural language search
+  // Natural-language-ish search (local, simple rules)
   const runNlQuery = async () => {
     if (!nlQuery) return fetchSADs();
     setNlLoading(true);
     try {
-      const resp = await parseNaturalLanguageQuery(nlQuery);
-      // resp.filter is expected to be an object of simple eq filters: {status, sad_no, regime}
-      if (resp?.filter) {
-        fetchSADs(resp.filter);
-        await pushActivity(`NL search: "${nlQuery}"`, resp.filter);
-      } else {
-        toast({ title: 'Could not parse query', description: 'Try simpler phrasing', status: 'warning' });
-      }
+      const q = nlQuery.toLowerCase();
+      const filter = {};
+
+      if (/\bcompleted\b/.test(q)) filter.status = 'Completed';
+      else if (/\bin progress\b/.test(q) || /\binprogress\b/.test(q)) filter.status = 'In Progress';
+      else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
+
+      // if query contains a number, treat as SAD number
+      const num = q.match(/\b(\d{1,10})\b/);
+      if (num) filter.sad_no = num[1];
+
+      // otherwise fallback to regime substring search
+      if (!filter.sad_no && !filter.status) filter.regime = nlQuery;
+
+      await fetchSADs(filter);
+      await pushActivity(`Search: "${nlQuery}"`, filter);
     } catch (e) {
       console.error('NL query failed', e);
       toast({ title: 'Search failed', description: e?.message || 'Unexpected', status: 'error' });
@@ -380,22 +306,27 @@ export default function SADDeclaration() {
     setListening(true);
   };
 
-  // explain discrepancy with AI for a SAD (on demand)
+  // Local, non-AI explain discrepancy
   const handleExplainDiscrepancy = async (s) => {
     const recorded = Number(s.total_recorded_weight || 0);
     const declared = Number(s.declared_weight || 0);
-    try {
-      const result = await explainDiscrepancy({ sad_no: s.sad_no, declared, recorded, ticketsPreview: detailTickets.slice(0, 5) });
-      if (result?.explanation) {
-        toast({ title: `Discrepancy analysis for ${s.sad_no}`, description: result.explanation, status: 'info', duration: 10000 });
-        await pushActivity(`AI explained discrepancy for ${s.sad_no}`);
-      } else {
-        toast({ title: 'No analysis', description: 'AI returned no explanation', status: 'warning' });
-      }
-    } catch (e) {
-      console.error('explain err', e);
-      toast({ title: 'Explain failed', description: e?.message || 'Unexpected', status: 'error' });
+    if (!declared) {
+      toast({ title: 'No declared weight', description: `SAD ${s.sad_no} has no declared weight to compare.`, status: 'warning' });
+      await pushActivity(`Explain: no declared weight for ${s.sad_no}`);
+      return;
     }
+    const diff = recorded - declared;
+    const pct = ((diff / declared) * 100).toFixed(2);
+    let msg = '';
+    if (Math.abs(diff) / Math.max(1, declared) < 0.01) {
+      msg = `Recorded matches declared within 1% (${recorded} kg vs ${declared} kg).`;
+    } else if (diff > 0) {
+      msg = `Recorded is ${diff.toLocaleString()} kg (${pct}%) higher than declared — investigate extra tickets or duplicates.`;
+    } else {
+      msg = `Recorded is ${Math.abs(diff).toLocaleString()} kg (${Math.abs(pct)}%) lower than declared — check missing tickets or document mismatch.`;
+    }
+    toast({ title: `Discrepancy for ${s.sad_no}`, description: msg, status: 'info', duration: 10000 });
+    await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
   };
 
   // tiny predictive analytics: compute expected total by using average of past SADs in same regime
@@ -410,7 +341,7 @@ export default function SADDeclaration() {
   // UI render
   return (
     <Container maxW="7xl" py={6}>
-      <Heading mb={4}>SAD Declaration (AI-enabled)</Heading>
+      <Heading mb={4}>SAD Declaration</Heading>
 
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
@@ -423,7 +354,6 @@ export default function SADDeclaration() {
                 <Button size="sm" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Clear</Button>
               </InputRightElement>
             </InputGroup>
-            {aiSuggestionLoading && <Text fontSize="sm" color="gray.500">AI suggesting...</Text>}
           </FormControl>
 
           <FormControl>
@@ -454,7 +384,7 @@ export default function SADDeclaration() {
           <Heading size="sm">SAD Dashboard</Heading>
           <HStack>
             <InputGroup size="sm" width="360px">
-              <Input placeholder="Search (natural language) e.g. 'completed imports last week' " value={nlQuery} onChange={(e) => setNlQuery(e.target.value)} />
+              <Input placeholder="Search e.g. 'completed imports last week' or SAD number" value={nlQuery} onChange={(e) => setNlQuery(e.target.value)} />
               <InputRightElement>
                 <IconButton size="sm" icon={<FaSearch />} aria-label="Search" onClick={runNlQuery} isLoading={nlLoading} />
                 <IconButton ml={2} size="sm" title="Voice" icon={<FaMicrophone />} onClick={startListening} isLoading={listening} />
@@ -579,7 +509,6 @@ export default function SADDeclaration() {
             {docViewer.doc ? (
               <>
                 <Text mb={2}><strong>{docViewer.doc.name}</strong></Text>
-                {/* basic viewer: if image show <img>, if PDF show <iframe> */}
                 {/\.(jpe?g|png|gif|bmp|webp)$/i.test(docViewer.doc.url) ? (
                   <img src={docViewer.doc.url} alt={docViewer.doc.name} style={{ maxWidth: '100%' }} />
                 ) : (
