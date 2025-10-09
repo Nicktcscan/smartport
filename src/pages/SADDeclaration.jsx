@@ -13,6 +13,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
+const REGIME_OPTIONS = ['Import', 'Export'];
 
 function exportToCSV(rows = [], filename = 'export.csv') {
   if (!rows || rows.length === 0) return;
@@ -703,7 +704,9 @@ export default function SADDeclaration() {
 
           <FormControl>
             <FormLabel>Regime</FormLabel>
-            <Input value={regime} onChange={(e) => setRegime(e.target.value)} placeholder="e.g. Import" />
+            <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
+              {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+            </Select>
           </FormControl>
 
           <FormControl>
@@ -740,7 +743,10 @@ export default function SADDeclaration() {
             {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
           </Select>
 
-          <Input placeholder="Filter by regime" size="sm" value={regimeFilter} onChange={(e) => setRegimeFilter(e.target.value)} maxW="200px" />
+          <Select placeholder="Filter by regime" size="sm" value={regimeFilter} onChange={(e) => setRegimeFilter(e.target.value)} maxW="200px">
+            <option value="">All</option>
+            {REGIME_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+          </Select>
 
           <Select size="sm" value={sortBy} onChange={(e) => setSortBy(e.target.value)} maxW="200px">
             <option value="created_at">Newest</option>
@@ -803,7 +809,10 @@ export default function SADDeclaration() {
 
                       <Td>
                         {editingSadId === s.sad_no ? (
-                          <Input size="sm" value={editData.regime ?? ''} onChange={(e) => setEditData(d => ({ ...d, regime: e.target.value }))} />
+                          <Select size="sm" value={editData.regime ?? ''} onChange={(e) => setEditData(d => ({ ...d, regime: e.target.value }))}>
+                            <option value="">Select regime</option>
+                            {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                          </Select>
                         ) : (
                           <Text>{s.regime || '—'}</Text>
                         )}
