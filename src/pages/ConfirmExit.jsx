@@ -239,19 +239,52 @@ export default function ConfirmExit() {
   // Fetch confirmed exits and dedupe (keep latest per ticket_id)
   const fetchConfirmedExits = useCallback(async () => {
     try {
-      // include weighed_at in select
+      /*
+        IMPORTANT:
+        - outgate table does NOT have weighed_at column.
+        - We want to derive weighed_at from tickets.date (the ticket entry time)
+        - Use a relationship select to bring in tickets.date and map it to weighed_at.
+        - The select below requests the related tickets.date via a foreign key relationship (tickets).
+        - This returns rows where `tickets` is an array (may be empty). We map to set weighed_at = tickets[0].date when present.
+      */
       const { data, error } = await supabase
         .from('outgate')
-        .select('id, ticket_id, ticket_no, vehicle_number, container_id, sad_no, gross, tare, net, created_at, weighed_at, file_url, file_name, driver')
-        .order('created_at', { ascending: false }); // newest first
+        .select(`
+          id,
+          ticket_id,
+          ticket_no,
+          vehicle_number,
+          container_id,
+          sad_no,
+          gross,
+          tare,
+          net,
+          created_at,
+          file_url,
+          file_name,
+          driver,
+          tickets ( date )
+        `)
+        .order('created_at', { ascending: false });
 
       if (error) throw error;
 
       const rows = data || [];
 
+      // Map weighed_at from tickets.date (if available) and flatten tickets field
+      const mapped = rows.map((r) => {
+        const ticketDate = (r.tickets && Array.isArray(r.tickets) && r.tickets[0] && r.tickets[0].date) ? r.tickets[0].date : null;
+        // Keep original fields, add weighed_at, and remove embedded tickets array (optional)
+        const { tickets: _tickets, ...rest } = r;
+        return {
+          ...rest,
+          weighed_at: ticketDate,
+        };
+      });
+
       // Deduplicate by ticket_id: keep the first (newest) row per ticket_id
       const dedupeMap = new Map();
-      for (const r of rows) {
+      for (const r of mapped) {
         if (r.ticket_id) {
           if (!dedupeMap.has(r.ticket_id)) {
             dedupeMap.set(r.ticket_id, r);
@@ -260,7 +293,7 @@ export default function ConfirmExit() {
       }
 
       const deduped = Array.from(dedupeMap.values());
-      const noTicketIdRows = rows.filter((r) => !r.ticket_id);
+      const noTicketIdRows = mapped.filter((r) => !r.ticket_id);
       const finalConfirmed = [...deduped, ...noTicketIdRows];
 
       // best-effort: extract driver names for missing driver fields from PDFs (non-blocking)
