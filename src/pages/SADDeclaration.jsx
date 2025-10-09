@@ -1,16 +1,46 @@
 // src/pages/SADDeclaration.jsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box, Button, Container, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
   Text, Table, Thead, Tbody, Tr, Th, Td, VStack, HStack, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Badge, Flex,
-  Spinner, Tag, TagLabel, InputGroup, InputRightElement
+  Spinner, Tag, TagLabel, InputGroup, InputRightElement, Stat, StatLabel, StatNumber, StatHelpText, StatGroup
 } from '@chakra-ui/react';
-import { FaPlus, FaMicrophone, FaSearch, FaEye } from 'react-icons/fa';
+import { FaPlus, FaMicrophone, FaSearch, FaEye, FaFileExport } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
+import { motion, AnimatePresence } from 'framer-motion';
 
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed'];
 const SAD_DOCS_BUCKET = 'sad-docs';
+const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
+
+function exportToCSV(rows = [], filename = 'export.csv') {
+  if (!rows || rows.length === 0) return;
+  const headers = Object.keys(rows[0]);
+  const csv = [
+    headers.join(','),
+    ...rows.map((r) =>
+      headers
+        .map((h) => {
+          const v = r[h] ?? '';
+          const s = typeof v === 'string' ? v : String(v);
+          return `"${s.replace(/"/g, '""')}"`;
+        })
+        .join(',')
+    ),
+  ].join('\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 export default function SADDeclaration() {
   const toast = useToast();
@@ -19,11 +49,13 @@ export default function SADDeclaration() {
   const [sadNo, setSadNo] = useState('');
   const [regime, setRegime] = useState('');
   const [declaredWeight, setDeclaredWeight] = useState('');
-  const [docs, setDocs] = useState([]); // File objects
+  const [docs, setDocs] = useState([]);
 
-  // list
+  // list + realtime
   const [sads, setSads] = useState([]);
   const [loading, setLoading] = useState(false);
+  const sadsRef = useRef([]);
+  sadsRef.current = sads;
 
   // modal / detail
   const [selectedSad, setSelectedSad] = useState(null);
@@ -34,18 +66,32 @@ export default function SADDeclaration() {
   // doc viewer
   const [docViewer, setDocViewer] = useState({ open: false, doc: null });
 
-  // NL search
+  // NL search + filters + sorting + pagination
   const [nlQuery, setNlQuery] = useState('');
   const [nlLoading, setNlLoading] = useState(false);
+  const [statusFilter, setStatusFilter] = useState('');
+  const [regimeFilter, setRegimeFilter] = useState('');
+  const [sortBy, setSortBy] = useState('created_at'); // created_at, declared_weight, discrepancy
+  const [sortDir, setSortDir] = useState('desc'); // asc/desc
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(12);
+
+  // inline editing
+  const [editingSadId, setEditingSadId] = useState(null);
+  const [editData, setEditData] = useState({});
+
+  // activity timeline (local)
+  const [activity, setActivity] = useState([]);
+
+  // realtime subscriptions refs
+  const subRef = useRef(null);
+  const ticketsSubRef = useRef(null);
 
   // voice
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
 
-  // activity timeline (local)
-  const [activity, setActivity] = useState([]);
-
-  // fetch declared SADs
+  // basic load / fetch
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
@@ -57,7 +103,14 @@ export default function SADDeclaration() {
       }
       const { data, error } = await q;
       if (error) throw error;
-      setSads(data || []);
+
+      const normalized = (data || []).map((r) => ({
+        ...r,
+        docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
+        total_recorded_weight: r.total_recorded_weight ?? 0,
+      }));
+
+      setSads(normalized);
     } catch (err) {
       console.error('fetchSADs', err);
       toast({ title: 'Failed to load SADs', description: err?.message || 'Unexpected', status: 'error' });
@@ -66,12 +119,64 @@ export default function SADDeclaration() {
     }
   };
 
-  useEffect(() => { fetchSADs(); }, []);
+  useEffect(() => {
+    fetchSADs();
+    // realtime subscription to sad_declarations table
+    let unsub = null;
+    try {
+      if (supabase.channel) {
+        const ch = supabase.channel('public:sad_declarations')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, (payload) => {
+            // refresh list on changes - light strategy: fetchSADs -> preserves server ordering & computed fields
+            fetchSADs();
+            pushActivity(`Realtime: SAD ${payload.event} ${payload?.new?.sad_no || payload?.old?.sad_no || ''}`, { payloadEvent: payload.event });
+          })
+          .subscribe();
+        subRef.current = ch;
+        unsub = () => supabase.removeChannel(ch).catch(() => {});
+      } else {
+        // legacy subscribe
+        const s = supabase.from('sad_declarations').on('*', () => {
+          fetchSADs();
+        }).subscribe();
+        subRef.current = s;
+        unsub = () => { try { s.unsubscribe(); } catch (e) {} };
+      }
+    } catch (e) {
+      console.warn('Realtime subscribe failed', e);
+    }
+
+    // also subscribe to tickets (to keep totals up-to-date)
+    try {
+      if (supabase.channel) {
+        const tch = supabase.channel('public:tickets')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+            fetchSADs(); // recalc displayed totals
+            pushActivity('Realtime: tickets changed', {});
+          })
+          .subscribe();
+        ticketsSubRef.current = tch;
+        const ticketsUnsub = () => supabase.removeChannel(tch).catch(() => {});
+        // ensure both get unsubscribed
+        const bothUnsub = () => { try { ticketsUnsub(); } catch (e) {}; if (unsub) unsub(); };
+        return bothUnsub;
+      }
+    } catch (e) {
+      console.warn('Tickets realtime subscribe failed', e);
+    }
+
+    return () => {
+      try {
+        if (subRef.current && supabase.removeChannel) supabase.removeChannel(subRef.current).catch(() => {});
+      } catch (e) {}
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // helper: activity push (local + optional DB)
   const pushActivity = async (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
-    setActivity(prev => [ev, ...prev].slice(0, 100));
+    setActivity(prev => [ev, ...prev].slice(0, 200));
     try {
       await supabase.from('sad_activity').insert([{ text, meta }]);
     } catch (e) {
@@ -126,7 +231,6 @@ export default function SADDeclaration() {
         throw uErr;
       }
 
-      // No OCR/analysis performed here (removed). Keep tags empty for now.
       uploaded.push({ name: f.name, path: filePath, url, tags: [], parsed: null });
       await pushActivity(`Uploaded doc ${f.name} for SAD ${sad_no}`, { sad_no, file: f.name });
     }
@@ -150,6 +254,8 @@ export default function SADDeclaration() {
         declared_weight: Number(declaredWeight),
         docs: docRecords,
         status: 'In Progress',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       };
 
       const { error } = await supabase.from('sad_declarations').insert([payload]);
@@ -185,7 +291,65 @@ export default function SADDeclaration() {
     }
   };
 
-  // update SAD status (manual)
+  // update SAD status or other fields (inline edit -> persist)
+  const startEdit = (sad) => {
+    setEditingSadId(sad.sad_no);
+    setEditData({
+      regime: sad.regime ?? '',
+      declared_weight: sad.declared_weight ?? 0,
+      status: sad.status ?? 'In Progress',
+    });
+  };
+
+  const cancelEdit = () => {
+    setEditingSadId(null);
+    setEditData({});
+  };
+
+  const saveEdit = async (sad_no) => {
+    const before = (sadsRef.current || []).find(s => s.sad_no === sad_no) || {};
+    const after = { ...before, ...editData, updated_at: new Date().toISOString() };
+
+    // optimistic UI
+    setSads(prev => prev.map(s => s.sad_no === sad_no ? { ...s, ...after } : s));
+    setEditingSadId(null);
+    setEditData({});
+
+    try {
+      const payload = {
+        regime: after.regime ?? null,
+        declared_weight: Number(after.declared_weight ?? 0),
+        status: after.status ?? null,
+        updated_at: new Date().toISOString(),
+      };
+      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
+      if (error) throw error;
+
+      // log change to change log table (if present)
+      try {
+        await supabase.from('sad_change_logs').insert([{
+          sad_no,
+          changed_by: null,
+          before: JSON.stringify(before),
+          after: JSON.stringify(after),
+          created_at: new Date().toISOString(),
+        }]);
+      } catch (e) {
+        // ignore if table not present
+      }
+
+      await pushActivity(`Edited SAD ${sad_no}`, { before, after });
+      toast({ title: 'Saved', description: `SAD ${sad_no} updated`, status: 'success' });
+      fetchSADs();
+    } catch (err) {
+      console.error('saveEdit', err);
+      toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
+      // roll back UI
+      fetchSADs();
+    }
+  };
+
+  // update SAD status (manual quick select)
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
@@ -236,7 +400,7 @@ export default function SADDeclaration() {
     return 'orange';
   };
 
-  // handle file change (OCR removed) — just attach files for upload
+  // handle file change (OCR removed)
   const onFilesChange = async (fileList) => {
     try {
       const arr = Array.from(fileList || []);
@@ -248,7 +412,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // Natural-language-ish search (local, simple rules)
+  // NL search
   const runNlQuery = async () => {
     if (!nlQuery) return fetchSADs();
     setNlLoading(true);
@@ -264,7 +428,6 @@ export default function SADDeclaration() {
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
-      // otherwise fallback to regime substring search
       if (!filter.sad_no && !filter.status) filter.regime = nlQuery;
 
       await fetchSADs(filter);
@@ -306,7 +469,7 @@ export default function SADDeclaration() {
     setListening(true);
   };
 
-  // Local, non-AI explain discrepancy
+  // Local explain discrepancy
   const handleExplainDiscrepancy = async (s) => {
     const recorded = Number(s.total_recorded_weight || 0);
     const declared = Number(s.declared_weight || 0);
@@ -329,40 +492,222 @@ export default function SADDeclaration() {
     await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
   };
 
-  // tiny predictive analytics: compute expected total by using average of past SADs in same regime
+  // prediction helper (median of peer totals)
   const getPredictedTotal = (sad) => {
-    if (!sads || !sad?.regime) return null;
-    const peers = sads.filter(x => x.regime === sad.regime && x.total_recorded_weight).map(x => Number(x.total_recorded_weight));
-    if (!peers.length) return null;
-    const avg = peers.reduce((a, b) => a + b, 0) / peers.length;
-    return Math.round(avg);
+    if (!Array.isArray(sads) || !sad || !sad.regime) return null;
+    const peerTotals = sads
+      .filter((x) => x.regime === sad.regime && x.sad_no !== sad.sad_no && x.total_recorded_weight != null)
+      .map((x) => Number(x.total_recorded_weight || 0))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (peerTotals.length < 2) return null;
+    const sorted = peerTotals.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median = (sorted.length % 2 === 1) ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    return Math.round(median);
   };
 
-  // UI render
-  return (
-    <Container maxW="7xl" py={6}>
-      <Heading mb={4}>SAD Declaration</Heading>
+  // REGIME level aggregates
+  const regimeAggregates = useMemo(() => {
+    const map = {};
+    for (const s of sads) {
+      const r = s.regime || 'Unknown';
+      if (!map[r]) map[r] = { count: 0, declared: 0, recorded: 0 };
+      map[r].count += 1;
+      map[r].declared += Number(s.declared_weight || 0);
+      map[r].recorded += Number(s.total_recorded_weight || 0);
+    }
+    return map;
+  }, [sads]);
 
+  // Discrepancy / anomaly detection across entire dataset (z-score on ratio)
+  const anomalyResults = useMemo(() => {
+    const ratios = sads.map(s => {
+      const d = Number(s.declared_weight || 0);
+      const r = Number(s.total_recorded_weight || 0);
+      if (!d) return null;
+      return r / d;
+    }).filter(Boolean);
+    if (!ratios.length) return { mean: 1, std: 0, flagged: [] };
+    const mean = ratios.reduce((a, b) => a + b, 0) / ratios.length;
+    const variance = ratios.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / ratios.length;
+    const std = Math.sqrt(variance);
+    const flagged = [];
+    for (const s of sads) {
+      const d = Number(s.declared_weight || 0);
+      const r = Number(s.total_recorded_weight || 0);
+      if (!d) continue;
+      const ratio = r / d;
+      const z = std > 0 ? (ratio - mean) / std : 0;
+      // flag if ratio deviates more than 2 std devs or ratio outside 0.8..1.2
+      if (Math.abs(z) > 2 || ratio < 0.8 || ratio > 1.2) flagged.push({ sad: s, z, ratio });
+    }
+    return { mean, std, flagged };
+  }, [sads]);
+
+  // Derived dashboard stats
+  const dashboardStats = useMemo(() => {
+    const totalSADs = sads.length;
+    const totalDeclared = sads.reduce((a, b) => a + Number(b.declared_weight || 0), 0);
+    const totalRecorded = sads.reduce((a, b) => a + Number(b.total_recorded_weight || 0), 0);
+    const completed = sads.filter(s => s.status === 'Completed').length;
+    const activeDiscreps = anomalyResults.flagged.length;
+    return { totalSADs, totalDeclared, totalRecorded, completed, activeDiscreps };
+  }, [sads, anomalyResults]);
+
+  // Pagination & filtering pipeline
+  const filteredSads = useMemo(() => {
+    let arr = Array.isArray(sads) ? sads.slice() : [];
+    if (statusFilter) arr = arr.filter(s => (s.status || '').toLowerCase() === statusFilter.toLowerCase());
+    if (regimeFilter) arr = arr.filter(s => String(s.regime || '').toLowerCase().includes(String(regimeFilter).toLowerCase()));
+    if (nlQuery) {
+      const q = nlQuery.toLowerCase();
+      arr = arr.filter(s =>
+        (String(s.sad_no || '').toLowerCase().includes(q)) ||
+        (String(s.regime || '').toLowerCase().includes(q)) ||
+        (String(s.docs || []).join(' ').toLowerCase().includes(q))
+      );
+    }
+    // sorting
+    const dir = sortDir === 'asc' ? 1 : -1;
+    arr.sort((a, b) => {
+      if (sortBy === 'declared_weight') return (Number(a.declared_weight || 0) - Number(b.declared_weight || 0)) * dir;
+      if (sortBy === 'recorded') return (Number(a.total_recorded_weight || 0) - Number(b.total_recorded_weight || 0)) * dir;
+      if (sortBy === 'discrepancy') {
+        const da = Number(a.total_recorded_weight || 0) - Number(a.declared_weight || 0);
+        const db = Number(b.total_recorded_weight || 0) - Number(b.declared_weight || 0);
+        return (da - db) * dir;
+      }
+      // default created_at
+      const ta = new Date(a.created_at || a.updated_at || 0).getTime();
+      const tb = new Date(b.created_at || b.updated_at || 0).getTime();
+      return (ta - tb) * -dir; // newest first by default
+    });
+    return arr;
+  }, [sads, statusFilter, regimeFilter, nlQuery, sortBy, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredSads.length / pageSize));
+  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]); // reset if needed
+  const pagedSads = filteredSads.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
+
+  // Export current filtered view
+  const handleExportFilteredCSV = () => {
+    const rows = filteredSads.map(s => ({
+      sad_no: s.sad_no,
+      regime: s.regime,
+      declared_weight: s.declared_weight,
+      total_recorded_weight: s.total_recorded_weight,
+      status: s.status,
+      created_at: s.created_at,
+      updated_at: s.updated_at,
+    }));
+    exportToCSV(rows, `sad_declarations_export_${new Date().toISOString().slice(0,10)}.csv`);
+    toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
+  };
+
+  // Manual backup to storage (client-triggered). For weekly scheduling use a server job.
+  const handleManualBackupToStorage = async () => {
+    try {
+      const rows = sads.map(s => ({
+        sad_no: s.sad_no,
+        regime: s.regime,
+        declared_weight: s.declared_weight,
+        total_recorded_weight: s.total_recorded_weight,
+        status: s.status,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+      }));
+      const csv = [
+        Object.keys(rows[0] || {}).join(','),
+        ...rows.map(r => Object.values(r).map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')),
+      ].join('\n');
+
+      const filename = `backup/sad_declarations_backup_${new Date().toISOString().slice(0,10)}.csv`;
+      const blob = new Blob([csv], { type: 'text/csv' });
+      // Supabase storage requires file, we need to upload via put - SDK accepts Blob in browser
+      const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
+      if (error) throw error;
+      await pushActivity('Manual backup uploaded', { path: filename });
+      toast({ title: 'Backup uploaded', description: `Saved as ${filename}`, status: 'success' });
+    } catch (err) {
+      console.error('backup failed', err);
+      toast({ title: 'Backup failed', description: err?.message || 'Unexpected', status: 'error' });
+    }
+  };
+
+  // UI helpers
+  const renderDocsCell = (s) => {
+    if (!s.docs || !s.docs.length) return <Text color="gray.500">—</Text>;
+    return (
+      <VStack align="start">
+        {s.docs.map((d, i) => (
+          <HStack key={i}>
+            <a href={d.url || '#'} target="_blank" rel="noreferrer">{d.name || d.path || 'doc'}</a>
+            {Array.isArray(d.tags) && d.tags.map((t, j) => <Tag key={j} size="xs" ml={1}><TagLabel>{t}</TagLabel></Tag>)}
+            <IconButton size="xs" icon={<FaEye />} aria-label="view" onClick={() => openDocViewer(d)} />
+          </HStack>
+        ))}
+      </VStack>
+    );
+  };
+
+  // Framer motion row variants used in AnimatePresence
+  const RowMotion = motion(Tr);
+
+  // Simple small controls for quick filtering/sorting
+  // Note: you can move these controls into a separate toolbar component later
+  return (
+    <Container maxW="8xl" py={6}>
+      <Heading mb={4}>SAD Declaration Panel</Heading>
+
+      {/* Top cards */}
+      <StatGroup mb={4}>
+        <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <StatLabel>Total SADs</StatLabel>
+          <StatNumber>{dashboardStats.totalSADs}</StatNumber>
+          <StatHelpText>Today & overall</StatHelpText>
+        </Stat>
+
+        <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <StatLabel>Declared (kg)</StatLabel>
+          <StatNumber>{dashboardStats.totalDeclared.toLocaleString()}</StatNumber>
+          <StatHelpText>Sum declared weight</StatHelpText>
+        </Stat>
+
+        <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <StatLabel>Recorded (kg)</StatLabel>
+          <StatNumber>{dashboardStats.totalRecorded.toLocaleString()}</StatNumber>
+          <StatHelpText>Sum recorded weight</StatHelpText>
+        </Stat>
+
+        <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <StatLabel>Active discrepancies</StatLabel>
+          <StatNumber>{dashboardStats.activeDiscreps}</StatNumber>
+          <StatHelpText>{((dashboardStats.activeDiscreps / Math.max(1, dashboardStats.totalSADs)) * 100).toFixed(1)}% of SADs</StatHelpText>
+        </Stat>
+
+        <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <StatLabel>% Completed</StatLabel>
+          <StatNumber>{dashboardStats.totalSADs ? Math.round((dashboardStats.completed / dashboardStats.totalSADs) * 100) : 0}%</StatNumber>
+          <StatHelpText>{dashboardStats.completed} completed</StatHelpText>
+        </Stat>
+      </StatGroup>
+
+      {/* Create / controls */}
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
           <FormControl>
             <FormLabel>SAD Number</FormLabel>
-            <InputGroup>
-              <Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} placeholder="e.g. 25" />
-              <InputRightElement width="6rem">
-                <Button size="sm" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Clear</Button>
-              </InputRightElement>
-            </InputGroup>
+            <Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} placeholder="e.g. 25" />
           </FormControl>
 
           <FormControl>
-            <FormLabel>Regime / Declaration Type</FormLabel>
+            <FormLabel>Regime</FormLabel>
             <Input value={regime} onChange={(e) => setRegime(e.target.value)} placeholder="e.g. Import" />
           </FormControl>
 
           <FormControl>
-            <FormLabel>Declared Total Weight (kg)</FormLabel>
+            <FormLabel>Declared Weight (kg)</FormLabel>
             <Input type="number" value={declaredWeight} onChange={(e) => setDeclaredWeight(e.target.value)} placeholder="e.g. 100000" />
           </FormControl>
 
@@ -376,23 +721,56 @@ export default function SADDeclaration() {
         <HStack mt={3}>
           <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading}>Register SAD</Button>
           <Button onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
+
+          <Box ml="auto" display="flex" gap={2}>
+            <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV}>Export filtered CSV</Button>
+            <Button size="sm" variant="ghost" onClick={handleManualBackupToStorage}>Backup to storage</Button>
+          </Box>
         </HStack>
       </Box>
 
+      {/* Filters / search / sorting / pagination */}
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
-        <Flex justify="space-between" align="center" mb={3}>
-          <Heading size="sm">SAD Dashboard</Heading>
-          <HStack>
-            <InputGroup size="sm" width="360px">
-              <Input placeholder="Search e.g. 'completed imports last week' or SAD number" value={nlQuery} onChange={(e) => setNlQuery(e.target.value)} />
-              <InputRightElement>
-                <IconButton size="sm" icon={<FaSearch />} aria-label="Search" onClick={runNlQuery} isLoading={nlLoading} />
-                <IconButton ml={2} size="sm" title="Voice" icon={<FaMicrophone />} onClick={startListening} isLoading={listening} />
-              </InputRightElement>
-            </InputGroup>
-          </HStack>
-        </Flex>
+        <Flex gap={3} align="center" wrap="wrap">
+          <Input placeholder="Search (SAD, Regime, docs...)" value={nlQuery} onChange={(e) => setNlQuery(e.target.value)} maxW="360px" />
+          <Button size="sm" onClick={runNlQuery} isLoading={nlLoading}>Search</Button>
 
+          <Select placeholder="Filter by status" size="sm" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} maxW="160px">
+            <option value="">All</option>
+            {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
+          </Select>
+
+          <Input placeholder="Filter by regime" size="sm" value={regimeFilter} onChange={(e) => setRegimeFilter(e.target.value)} maxW="200px" />
+
+          <Select size="sm" value={sortBy} onChange={(e) => setSortBy(e.target.value)} maxW="200px">
+            <option value="created_at">Newest</option>
+            <option value="declared_weight">Declared weight</option>
+            <option value="recorded">Recorded weight</option>
+            <option value="discrepancy">Discrepancy</option>
+          </Select>
+
+          <Select size="sm" value={sortDir} onChange={(e) => setSortDir(e.target.value)} maxW="120px">
+            <option value="desc">Desc</option>
+            <option value="asc">Asc</option>
+          </Select>
+
+          <Box ml="auto" display="flex" gap={3} alignItems="center">
+            <Text fontSize="sm" color="gray.600">Page</Text>
+            <Select size="sm" value={page} onChange={(e) => setPage(Number(e.target.value))} maxW="120px">
+              {Array.from({ length: totalPages }).map((_, i) => <option key={i+1} value={i+1}>{i+1}</option>)}
+            </Select>
+            <Select size="sm" value={pageSize} onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }} maxW="120px">
+              <option value={6}>6</option>
+              <option value={12}>12</option>
+              <option value={24}>24</option>
+              <option value={50}>50</option>
+            </Select>
+          </Box>
+        </Flex>
+      </Box>
+
+      {/* Table */}
+      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         {loading ? <Spinner /> : (
           <Table size="sm" variant="striped">
             <Thead>
@@ -402,58 +780,91 @@ export default function SADDeclaration() {
                 <Th isNumeric>Declared (kg)</Th>
                 <Th isNumeric>Recorded (kg)</Th>
                 <Th>Status</Th>
+                <Th>Discrepancy</Th>
                 <Th>Docs</Th>
                 <Th>Actions</Th>
-                <Th>AI</Th>
               </Tr>
             </Thead>
             <Tbody>
-              {sads.map((s) => {
-                const predicted = getPredictedTotal(s);
-                return (
-                  <Tr key={s.sad_no}>
-                    <Td>{s.sad_no}</Td>
-                    <Td>{s.regime || '—'}</Td>
-                    <Td isNumeric>{Number(s.declared_weight || 0).toLocaleString()}</Td>
-                    <Td isNumeric>{Number(s.total_recorded_weight || 0).toLocaleString()}</Td>
-                    <Td>
-                      <HStack>
-                        <Box width="10px" height="10px" borderRadius="full" bg={getIndicator(s.declared_weight, s.total_recorded_weight)} />
-                        <Text>{s.status}</Text>
-                        {predicted && <Badge colorScheme="purple">Pred: {predicted.toLocaleString()}</Badge>}
-                      </HStack>
-                    </Td>
-                    <Td>
-                      {(s.docs || []).length ? (
-                        <VStack align="start">
-                          {(s.docs || []).map((d, i) => (
-                            <HStack key={i}>
-                              <a href={d.url || '#'} target="_blank" rel="noreferrer">{d.name || d.path || 'doc'}</a>
-                              {d.tags?.map((t, j) => <Tag size="sm" key={j}><TagLabel>{t}</TagLabel></Tag>)}
-                              <IconButton size="xs" icon={<FaEye />} aria-label="view" onClick={() => openDocViewer(d)} />
-                            </HStack>
-                          ))}
-                        </VStack>
-                      ) : <Text color="gray.500">—</Text>}
-                    </Td>
-                    <Td>
-                      <HStack>
-                        <Button size="sm" onClick={() => openSadDetail(s)}>View</Button>
-                        <Select size="sm" value={s.status} onChange={(e) => updateSadStatus(s.sad_no, e.target.value)}>
-                          {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
-                        </Select>
-                        <Button size="sm" onClick={() => recalcTotalForSad(s.sad_no)}>Recalc</Button>
-                      </HStack>
-                    </Td>
-                    <Td>
-                      <VStack align="start">
-                        <Button size="xs" onClick={() => handleExplainDiscrepancy(s)}>Explain</Button>
-                        <Button size="xs" onClick={() => pushActivity(`Manual check requested for ${s.sad_no}`)}>Log Check</Button>
-                      </VStack>
-                    </Td>
-                  </Tr>
-                );
-              })}
+              <AnimatePresence>
+                {pagedSads.map((s) => {
+                  const predicted = getPredictedTotal(s);
+                  const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
+                  const indicator = getIndicator(s.declared_weight, s.total_recorded_weight);
+                  const anomaly = anomalyResults.flagged.find(f => f.sad.sad_no === s.sad_no);
+                  const bgColor = s.status === 'Completed' ? 'green.50' : (anomaly ? 'red.50' : 'white');
+
+                  return (
+                    <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
+                      <Td>
+                        <Text fontWeight="bold">{s.sad_no}</Text>
+                        {predicted !== null && <Badge ml={2} colorScheme="purple">Pred {predicted.toLocaleString()}</Badge>}
+                      </Td>
+
+                      <Td>
+                        {editingSadId === s.sad_no ? (
+                          <Input size="sm" value={editData.regime ?? ''} onChange={(e) => setEditData(d => ({ ...d, regime: e.target.value }))} />
+                        ) : (
+                          <Text>{s.regime || '—'}</Text>
+                        )}
+                      </Td>
+
+                      <Td isNumeric>
+                        {editingSadId === s.sad_no ? (
+                          <Input size="sm" type="number" value={editData.declared_weight ?? 0} onChange={(e) => setEditData(d => ({ ...d, declared_weight: e.target.value }))} />
+                        ) : (
+                          <Text>{Number(s.declared_weight || 0).toLocaleString()}</Text>
+                        )}
+                      </Td>
+
+                      <Td isNumeric>
+                        <Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text>
+                      </Td>
+
+                      <Td>
+                        {editingSadId === s.sad_no ? (
+                          <Select size="sm" value={editData.status ?? s.status} onChange={(e) => setEditData(d => ({ ...d, status: e.target.value }))}>
+                            {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
+                          </Select>
+                        ) : (
+                          <HStack>
+                            <Box width="10px" height="10px" borderRadius="full" bg={indicator} />
+                            <Text>{s.status}</Text>
+                            {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
+                          </HStack>
+                        )}
+                      </Td>
+
+                      <Td>
+                        <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
+                          {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
+                        </Text>
+                      </Td>
+
+                      <Td>{renderDocsCell(s)}</Td>
+
+                      <Td>
+                        <HStack>
+                          {editingSadId === s.sad_no ? (
+                            <>
+                              <Button size="xs" colorScheme="green" onClick={() => saveEdit(s.sad_no)}>Save</Button>
+                              <Button size="xs" onClick={cancelEdit}>Cancel</Button>
+                            </>
+                          ) : (
+                            <>
+                              <Button size="xs" onClick={() => openSadDetail(s)}>View</Button>
+                              <Button size="xs" onClick={() => startEdit(s)}>Edit</Button>
+                              <Select size="xs" value={s.status} onChange={(e) => updateSadStatus(s.sad_no, e.target.value)}>
+                                {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
+                              </Select>
+                            </>
+                          )}
+                        </HStack>
+                      </Td>
+                    </RowMotion>
+                  );
+                })}
+              </AnimatePresence>
             </Tbody>
           </Table>
         )}
