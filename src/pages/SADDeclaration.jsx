@@ -4,13 +4,16 @@ import {
   Box, Button, Container, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
   Text, Table, Thead, Tbody, Tr, Th, Td, VStack, HStack, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Badge, Flex,
-  Spinner, Tag, TagLabel, InputGroup, InputRightElement, Stat, StatLabel, StatNumber, StatHelpText, StatGroup
+  Spinner, Tag, TagLabel, InputGroup, InputRightElement, Stat, StatLabel, StatNumber, StatHelpText, StatGroup,
+  Menu, MenuButton, MenuList, MenuItem, MenuDivider, Tooltip
 } from '@chakra-ui/react';
-import { FaPlus, FaMicrophone, FaSearch, FaEye, FaFileExport } from 'react-icons/fa';
+import {
+  FaPlus, FaMicrophone, FaSearch, FaEye, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload
+} from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const SAD_STATUS = ['In Progress', 'On Hold', 'Completed'];
+const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 const REGIME_OPTIONS = ['Import', 'Export'];
@@ -66,6 +69,9 @@ export default function SADDeclaration() {
 
   // doc viewer
   const [docViewer, setDocViewer] = useState({ open: false, doc: null });
+
+  // docs list modal (new)
+  const [docsModal, setDocsModal] = useState({ open: false, docs: [], sad_no: null });
 
   // NL search + filters + sorting + pagination
   const [nlQuery, setNlQuery] = useState('');
@@ -188,6 +194,11 @@ export default function SADDeclaration() {
   // Open document in viewer modal
   const openDocViewer = (doc) => {
     setDocViewer({ open: true, doc });
+  };
+
+  // Open docs modal for a SAD (new)
+  const openDocsModal = (sad) => {
+    setDocsModal({ open: true, docs: Array.isArray(sad.docs) ? sad.docs : [], sad_no: sad.sad_no });
   };
 
   // upload docs to storage and return array of URLs + tags (OCR removed)
@@ -389,6 +400,42 @@ export default function SADDeclaration() {
     }
   };
 
+  // archive SAD (soft)
+  const archiveSad = async (sad_no) => {
+    try {
+      const { error } = await supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
+      if (error) throw error;
+      toast({ title: 'Archived', description: `SAD ${sad_no} archived`, status: 'info' });
+      await pushActivity(`Archived SAD ${sad_no}`);
+      fetchSADs();
+    } catch (err) {
+      console.error('archiveSad', err);
+      toast({ title: 'Archive failed', description: err?.message || 'Unexpected', status: 'error' });
+    }
+  };
+
+  // export single SAD to CSV (basic)
+  const exportSingleSAD = async (s) => {
+    try {
+      const rows = [{
+        sad_no: s.sad_no,
+        regime: s.regime,
+        declared_weight: s.declared_weight,
+        total_recorded_weight: s.total_recorded_weight,
+        status: s.status,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+        docs: (s.docs || []).map(d => d.name || d.path).join('; '),
+      }];
+      exportToCSV(rows, `sad_${s.sad_no}_export.csv`);
+      toast({ title: 'Export started', description: `SAD ${s.sad_no} exported`, status: 'success' });
+      await pushActivity(`Exported SAD ${s.sad_no}`);
+    } catch (err) {
+      console.error('exportSingleSAD', err);
+      toast({ title: 'Export failed', description: err?.message || 'Unexpected', status: 'error' });
+    }
+  };
+
   // indicator color by discrepancy
   const getIndicator = (declared, recorded) => {
     const d = Number(declared || 0);
@@ -491,20 +538,6 @@ export default function SADDeclaration() {
     }
     toast({ title: `Discrepancy for ${s.sad_no}`, description: msg, status: 'info', duration: 10000 });
     await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
-  };
-
-  // prediction helper (median of peer totals)
-  const getPredictedTotal = (sad) => {
-    if (!Array.isArray(sads) || !sad || !sad.regime) return null;
-    const peerTotals = sads
-      .filter((x) => x.regime === sad.regime && x.sad_no !== sad.sad_no && x.total_recorded_weight != null)
-      .map((x) => Number(x.total_recorded_weight || 0))
-      .filter((n) => Number.isFinite(n) && n > 0);
-    if (peerTotals.length < 2) return null;
-    const sorted = peerTotals.slice().sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    const median = (sorted.length % 2 === 1) ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
-    return Math.round(median);
   };
 
   // REGIME level aggregates
@@ -635,19 +668,27 @@ export default function SADDeclaration() {
     }
   };
 
-  // UI helpers
+  // UI helpers: render docs cell as a compact button that opens the modal
   const renderDocsCell = (s) => {
-    if (!s.docs || !s.docs.length) return <Text color="gray.500">—</Text>;
+    const count = Array.isArray(s.docs) ? s.docs.length : 0;
+    if (!count) return <Text color="gray.500">—</Text>;
     return (
-      <VStack align="start">
-        {s.docs.map((d, i) => (
-          <HStack key={i}>
-            <a href={d.url || '#'} target="_blank" rel="noreferrer">{d.name || d.path || 'doc'}</a>
-            {Array.isArray(d.tags) && d.tags.map((t, j) => <Tag key={j} size="xs" ml={1}><TagLabel>{t}</TagLabel></Tag>)}
-            <IconButton size="xs" icon={<FaEye />} aria-label="view" onClick={() => openDocViewer(d)} />
-          </HStack>
-        ))}
-      </VStack>
+      <HStack>
+        <Button size="xs" onClick={() => openDocsModal(s)}>
+          View docs ({count})
+        </Button>
+        <Tooltip label="Quick preview first doc">
+          <IconButton
+            aria-label="Preview first doc"
+            size="xs"
+            icon={<FaEye />}
+            onClick={() => {
+              const docsArr = Array.isArray(s.docs) ? s.docs : [];
+              if (docsArr.length) openDocViewer(docsArr[0]);
+            }}
+          />
+        </Tooltip>
+      </HStack>
     );
   };
 
@@ -794,17 +835,14 @@ export default function SADDeclaration() {
             <Tbody>
               <AnimatePresence>
                 {pagedSads.map((s) => {
-                  const predicted = getPredictedTotal(s);
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
                   const indicator = getIndicator(s.declared_weight, s.total_recorded_weight);
                   const anomaly = anomalyResults.flagged.find(f => f.sad.sad_no === s.sad_no);
-                  const bgColor = s.status === 'Completed' ? 'green.50' : (anomaly ? 'red.50' : 'white');
 
                   return (
                     <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
                       <Td>
                         <Text fontWeight="bold">{s.sad_no}</Text>
-                        {predicted !== null && <Badge ml={2} colorScheme="purple">Pred {predicted.toLocaleString()}</Badge>}
                       </Td>
 
                       <Td>
@@ -860,13 +898,22 @@ export default function SADDeclaration() {
                               <Button size="xs" onClick={cancelEdit}>Cancel</Button>
                             </>
                           ) : (
-                            <>
-                              <Button size="xs" onClick={() => openSadDetail(s)}>View</Button>
-                              <Button size="xs" onClick={() => startEdit(s)}>Edit</Button>
-                              <Select size="xs" value={s.status} onChange={(e) => updateSadStatus(s.sad_no, e.target.value)}>
-                                {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
-                              </Select>
-                            </>
+                            <Menu>
+                              <MenuButton as={IconButton} aria-label="Actions" icon={<FaEllipsisV />} size="sm" />
+                              <MenuList>
+                                <MenuItem icon={<FaEye />} onClick={() => openSadDetail(s)}>View Details</MenuItem>
+                                <MenuItem icon={<FaEdit />} onClick={() => startEdit(s)}>Edit</MenuItem>
+                                <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
+                                <MenuDivider />
+                                <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export SAD</MenuItem>
+                                <MenuDivider />
+                                <MenuItem icon={<FaTrashAlt />} onClick={() => {
+                                  if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) {
+                                    archiveSad(s.sad_no);
+                                  }
+                                }}>Archive SAD</MenuItem>
+                              </MenuList>
+                            </Menu>
                           )}
                         </HStack>
                       </Td>
@@ -915,6 +962,57 @@ export default function SADDeclaration() {
           </ModalBody>
           <ModalFooter>
             <Button onClick={() => setIsModalOpen(false)}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Docs modal (NEW) */}
+      <Modal isOpen={docsModal.open} onClose={() => setDocsModal({ open: false, docs: [], sad_no: null })} size="lg" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Attached Documents{docsModal.sad_no ? ` — SAD ${docsModal.sad_no}` : ''}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            {(!docsModal.docs || !docsModal.docs.length) ? (
+              <Text color="gray.500">No documents attached</Text>
+            ) : (
+              <Table size="sm">
+                <Thead>
+                  <Tr>
+                    <Th>Filename</Th>
+                    <Th>Tags</Th>
+                    <Th>Actions</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {docsModal.docs.map((d, i) => (
+                    <Tr key={i}>
+                      <Td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name || d.path || 'doc'}</Td>
+                      <Td>
+                        {(d.tags || []).length ? (d.tags.map((t, j) => <Tag key={j} size="sm" mr={1}><TagLabel>{t}</TagLabel></Tag>)) : <Text color="gray.500">—</Text>}
+                      </Td>
+                      <Td>
+                        <HStack>
+                          <Button size="xs" onClick={() => openDocViewer(d)}>View</Button>
+                          <IconButton
+                            size="xs"
+                            aria-label="Download"
+                            icon={<FaDownload />}
+                            onClick={() => {
+                              // open in new tab to allow user to download
+                              if (d.url) window.open(d.url, '_blank');
+                            }}
+                          />
+                        </HStack>
+                      </Td>
+                    </Tr>
+                  ))}
+                </Tbody>
+              </Table>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={() => setDocsModal({ open: false, docs: [], sad_no: null })}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
