@@ -284,7 +284,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // fetch tickets for SAD detail
+  // fetch tickets for SAD detail -> FIX: compute recorded weight as SUM of all ticket.net values
   const openSadDetail = async (sad) => {
     setSelectedSad(sad);
     setIsModalOpen(true);
@@ -292,7 +292,18 @@ export default function SADDeclaration() {
     try {
       const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', sad.sad_no).order('date', { ascending: false });
       if (error) throw error;
-      setDetailTickets(data || []);
+      const tickets = data || [];
+
+      // SUM net (or weight) across all tickets for this SAD
+      const totalRecorded = tickets.reduce((acc, t) => acc + Number(t.net ?? t.weight ?? 0), 0);
+
+      // update detail tickets and selectedSad so modal shows cumulative total
+      setDetailTickets(tickets);
+      setSelectedSad(prev => ({ ...sad, total_recorded_weight: totalRecorded }));
+
+      // update local sads list so table immediately reflects summation (UI-only; DOES NOT persist)
+      setSads(prev => prev.map(x => x.sad_no === sad.sad_no ? { ...x, total_recorded_weight: totalRecorded } : x));
+
       await pushActivity(`Viewed SAD ${sad.sad_no} details`);
     } catch (err) {
       console.error('openSadDetail', err);
@@ -685,8 +696,7 @@ export default function SADDeclaration() {
             onClick={() => {
               const docsArr = Array.isArray(s.docs) ? s.docs : [];
               if (docsArr.length) openDocViewer(docsArr[0]);
-            }}
-          />
+            }} />
         </Tooltip>
       </HStack>
     );
