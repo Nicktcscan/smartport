@@ -172,14 +172,14 @@ export default function SADDeclaration() {
         prevDischargeRef.current.add(s.sad_no);
         toast({
           title: 'Discharge Completed',
-          description: `SAD ${s.sad_no} has met its declared weight (${Number(s.total_recorded_weight).toLocaleString()} / ${Number(s.declared_weight).toLocaleString()}).`,
+          description: `SAD ${s.sad_no} has completed discharge (${Number(s.total_recorded_weight).toLocaleString()} / ${Number(s.declared_weight).toLocaleString()}).`,
           status: 'success',
           duration: 5000,
           isClosable: true,
           position: 'bottom-right',
           variant: 'subtle',
         });
-        await pushActivity(`Discharge met for ${s.sad_no}`, { sad_no: s.sad_no });
+        await pushActivity(`Discharge completed for the SAD Number "${s.sad_no}"`, { sad_no: s.sad_no });
       }
 
       setSads(enhanced);
