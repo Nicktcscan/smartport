@@ -4,7 +4,7 @@ import {
   Box, Button, Container, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
   Text, Table, Thead, Tbody, Tr, Th, Td, VStack, HStack, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Badge, Flex,
-  Spinner, Tag, TagLabel, InputGroup, InputRightElement, Stat, StatLabel, StatNumber, StatHelpText, StatGroup,
+  Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText, StatGroup,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, Tooltip
 } from '@chakra-ui/react';
 import {
@@ -78,8 +78,8 @@ export default function SADDeclaration() {
   const [nlLoading, setNlLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [regimeFilter, setRegimeFilter] = useState('');
-  const [sortBy, setSortBy] = useState('created_at');
-  const [sortDir, setSortDir] = useState('desc');
+  const [sortBy, setSortBy] = useState('created_at'); // created_at, declared_weight, discrepancy
+  const [sortDir, setSortDir] = useState('desc'); // asc/desc
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
@@ -135,6 +135,7 @@ export default function SADDeclaration() {
       if (supabase.channel) {
         const ch = supabase.channel('public:sad_declarations')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, (payload) => {
+            // refresh list on changes - light strategy: fetchSADs -> preserves server ordering & computed fields
             fetchSADs();
             pushActivity(`Realtime: SAD ${payload.event} ${payload?.new?.sad_no || payload?.old?.sad_no || ''}`, { payloadEvent: payload.event });
           })
@@ -142,6 +143,7 @@ export default function SADDeclaration() {
         subRef.current = ch;
         unsub = () => supabase.removeChannel(ch).catch(() => {});
       } else {
+        // legacy subscribe
         const s = supabase.from('sad_declarations').on('*', () => {
           fetchSADs();
         }).subscribe();
@@ -157,12 +159,13 @@ export default function SADDeclaration() {
       if (supabase.channel) {
         const tch = supabase.channel('public:tickets')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-            fetchSADs();
+            fetchSADs(); // recalc displayed totals
             pushActivity('Realtime: tickets changed', {});
           })
           .subscribe();
         ticketsSubRef.current = tch;
         const ticketsUnsub = () => supabase.removeChannel(tch).catch(() => {});
+        // ensure both get unsubscribed
         const bothUnsub = () => { try { ticketsUnsub(); } catch (e) {}; if (unsub) unsub(); };
         return bothUnsub;
       }
@@ -393,6 +396,7 @@ export default function SADDeclaration() {
     } catch (err) {
       console.error('saveEdit', err);
       toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
+      // roll back UI
       fetchSADs();
     }
   };
@@ -532,6 +536,7 @@ export default function SADDeclaration() {
       else if (/\bin progress\b/.test(q) || /\binprogress\b/.test(q)) filter.status = 'In Progress';
       else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
 
+      // if query contains a number, treat as SAD number
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
@@ -631,6 +636,7 @@ export default function SADDeclaration() {
       if (!d) continue;
       const ratio = r / d;
       const z = std > 0 ? (ratio - mean) / std : 0;
+      // flag if ratio deviates more than 2 std devs or ratio outside 0.8..1.2
       if (Math.abs(z) > 2 || ratio < 0.8 || ratio > 1.2) flagged.push({ sad: s, z, ratio });
     }
     return { mean, std, flagged };
@@ -669,15 +675,16 @@ export default function SADDeclaration() {
         const db = Number(b.total_recorded_weight || 0) - Number(b.declared_weight || 0);
         return (da - db) * dir;
       }
+      // default created_at
       const ta = new Date(a.created_at || a.updated_at || 0).getTime();
       const tb = new Date(b.created_at || b.updated_at || 0).getTime();
-      return (ta - tb) * -dir;
+      return (ta - tb) * -dir; // newest first by default
     });
     return arr;
   }, [sads, statusFilter, regimeFilter, nlQuery, sortBy, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSads.length / pageSize));
-  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]);
+  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]); // reset if needed
   const pagedSads = filteredSads.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
 
   // Export current filtered view
@@ -695,7 +702,7 @@ export default function SADDeclaration() {
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
   };
 
-  // Manual backup to storage (client-triggered)
+  // Manual backup to storage (client-triggered). For weekly scheduling use a server job.
   const handleManualBackupToStorage = async () => {
     try {
       const rows = sads.map(s => ({
@@ -714,6 +721,7 @@ export default function SADDeclaration() {
 
       const filename = `backup/sad_declarations_backup_${new Date().toISOString().slice(0,10)}.csv`;
       const blob = new Blob([csv], { type: 'text/csv' });
+      // Supabase storage requires file, we need to upload via put - SDK accepts Blob in browser
       const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
       if (error) throw error;
       await pushActivity('Manual backup uploaded', { path: filename });
@@ -724,26 +732,21 @@ export default function SADDeclaration() {
     }
   };
 
-  // UI helpers: render docs cell as a compact button that opens the modal
+  // UI helpers: render docs cell as a compact button that opens the modal (removed eye icon from main table)
   const renderDocsCell = (s) => {
     const count = Array.isArray(s.docs) ? s.docs.length : 0;
     if (!count) return <Text color="gray.500">—</Text>;
     return (
-      <HStack>
-        <Button size="xs" onClick={() => openDocsModal(s)}>
-          View docs ({count})
+      <HStack spacing={2}>
+        <Button
+          size="xs"
+          variant="ghost"
+          onClick={() => openDocsModal(s)}
+          aria-label={`View ${count} documents for SAD ${s.sad_no}`}
+          title={`View ${count} attached document${count > 1 ? 's' : ''}`}
+        >
+          Docs <Badge ml={2} colorScheme="purple">{count}</Badge>
         </Button>
-        <Tooltip label="Quick preview first doc">
-          <IconButton
-            aria-label="Preview first doc"
-            size="xs"
-            icon={<FaEye />}
-            onClick={() => {
-              const docsArr = Array.isArray(s.docs) ? s.docs : [];
-              if (docsArr.length) openDocViewer(docsArr[0]);
-            }}
-          />
-        </Tooltip>
       </HStack>
     );
   };
@@ -765,7 +768,7 @@ export default function SADDeclaration() {
       <Heading mb={4}>SAD Declaration Panel</Heading>
 
       {/* Top cards */}
-      <StatGroup mb={4}>
+      <StatGroup mb={4} gap={3}>
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{dashboardStats.totalSADs}</StatNumber>
@@ -880,7 +883,7 @@ export default function SADDeclaration() {
       </Box>
 
       {/* Table */}
-      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+      <Box bg="white" p={2} borderRadius="md" boxShadow="sm" mb={6}>
         {loading ? <Spinner /> : (
           <Table size="sm" variant="striped">
             <Thead>
@@ -891,7 +894,7 @@ export default function SADDeclaration() {
                 <Th isNumeric>Recorded (kg)</Th>
                 <Th>Status</Th>
                 <Th>Discrepancy</Th>
-                <Th>Docs</Th>
+                <Th>Attached Docs</Th>
                 <Th>Actions</Th>
               </Tr>
             </Thead>
@@ -904,10 +907,19 @@ export default function SADDeclaration() {
                   const met = declaredMet(s);
                   const accepting = typeof s.accepting_tickets === 'boolean' ? s.accepting_tickets : true;
 
+                  // subtle visual for anomaly/completed
+                  const rowBg = anomaly ? 'rgba(255,240,240,0.6)' : undefined;
+
                   return (
-                    <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
+                    <RowMotion
+                      key={s.sad_no}
+                      {...MOTION_ROW}
+                      style={{ background: rowBg, transition: 'background-color .12s ease' }}
+                    >
                       <Td>
-                        <Text fontWeight="bold">{s.sad_no}</Text>
+                        <Tooltip label={`SAD ${s.sad_no}`} aria-label={`SAD ${s.sad_no}`}>
+                          <Text fontWeight="bold" maxW="140px" whiteSpace="nowrap" overflow="hidden" textOverflow="ellipsis">{s.sad_no}</Text>
+                        </Tooltip>
                       </Td>
 
                       <Td>
@@ -944,7 +956,7 @@ export default function SADDeclaration() {
                               <Box width="10px" height="10px" borderRadius="full" bg={indicator} />
                               <Text>{s.status}</Text>
                               {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
-                              {!accepting && <Badge colorScheme="gray" ml={1}><FaLock /> No tickets</Badge>}
+                              {!accepting && <Badge colorScheme="gray" ml={1}>No tickets</Badge>}
                             </HStack>
                             {/* show notice when declared met but status not Completed */}
                             {met && s.status !== 'Completed' && (
@@ -981,21 +993,15 @@ export default function SADDeclaration() {
                                 <MenuDivider />
                                 {accepting ? (
                                   <MenuItem icon={<FaLock />} onClick={() => {
-                                    if (window.confirm(`Disable ticket acceptance for ${s.sad_no}?`)) {
-                                      setAcceptingTickets(s.sad_no, false);
-                                    }
+                                    if (window.confirm(`Disable ticket acceptance for ${s.sad_no}?`)) setAcceptingTickets(s.sad_no, false);
                                   }}>Disable tickets</MenuItem>
                                 ) : (
                                   <MenuItem icon={<FaUnlock />} onClick={() => {
-                                    if (window.confirm(`Re-enable ticket acceptance for ${s.sad_no}?`)) {
-                                      setAcceptingTickets(s.sad_no, true);
-                                    }
+                                    if (window.confirm(`Re-enable ticket acceptance for ${s.sad_no}?`)) setAcceptingTickets(s.sad_no, true);
                                   }}>Enable tickets</MenuItem>
                                 )}
                                 <MenuItem icon={<FaTrashAlt />} onClick={() => {
-                                  if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) {
-                                    archiveSad(s.sad_no);
-                                  }
+                                  if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) archiveSad(s.sad_no);
                                 }}>Archive SAD</MenuItem>
                               </MenuList>
                             </Menu>
@@ -1071,16 +1077,16 @@ export default function SADDeclaration() {
                 <Thead>
                   <Tr>
                     <Th>Filename</Th>
-                    <Th>Tags</Th>
                     <Th>Actions</Th>
                   </Tr>
                 </Thead>
                 <Tbody>
                   {docsModal.docs.map((d, i) => (
                     <Tr key={i}>
-                      <Td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name || d.path || 'doc'}</Td>
-                      <Td>
-                        {(d.tags || []).length ? (d.tags.map((t, j) => <Tag key={j} size="sm" mr={1}><TagLabel>{t}</TagLabel></Tag>)) : <Text color="gray.500">—</Text>}
+                      <Td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <Tooltip label={d.name || d.path || 'doc'} aria-label={`Filename ${d.name || d.path || 'doc'}`}>
+                          <Text>{d.name || d.path || 'doc'}</Text>
+                        </Tooltip>
                       </Td>
                       <Td>
                         <HStack>
@@ -1090,6 +1096,7 @@ export default function SADDeclaration() {
                             aria-label="Download"
                             icon={<FaDownload />}
                             onClick={() => {
+                              // open in new tab to allow user to download
                               if (d.url) window.open(d.url, '_blank');
                             }}
                           />
