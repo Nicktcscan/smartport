@@ -8,7 +8,7 @@ import {
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, Tooltip
 } from '@chakra-ui/react';
 import {
-  FaPlus, FaMicrophone, FaSearch, FaEye, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload
+  FaPlus, FaMicrophone, FaSearch, FaEye, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaLock, FaUnlock
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -78,8 +78,8 @@ export default function SADDeclaration() {
   const [nlLoading, setNlLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
   const [regimeFilter, setRegimeFilter] = useState('');
-  const [sortBy, setSortBy] = useState('created_at'); // created_at, declared_weight, discrepancy
-  const [sortDir, setSortDir] = useState('desc'); // asc/desc
+  const [sortBy, setSortBy] = useState('created_at');
+  const [sortDir, setSortDir] = useState('desc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
@@ -115,6 +115,7 @@ export default function SADDeclaration() {
         ...r,
         docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
         total_recorded_weight: r.total_recorded_weight ?? 0,
+        accepting_tickets: typeof r.accepting_tickets === 'boolean' ? r.accepting_tickets : true,
       }));
 
       setSads(normalized);
@@ -134,7 +135,6 @@ export default function SADDeclaration() {
       if (supabase.channel) {
         const ch = supabase.channel('public:sad_declarations')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, (payload) => {
-            // refresh list on changes - light strategy: fetchSADs -> preserves server ordering & computed fields
             fetchSADs();
             pushActivity(`Realtime: SAD ${payload.event} ${payload?.new?.sad_no || payload?.old?.sad_no || ''}`, { payloadEvent: payload.event });
           })
@@ -142,7 +142,6 @@ export default function SADDeclaration() {
         subRef.current = ch;
         unsub = () => supabase.removeChannel(ch).catch(() => {});
       } else {
-        // legacy subscribe
         const s = supabase.from('sad_declarations').on('*', () => {
           fetchSADs();
         }).subscribe();
@@ -158,13 +157,12 @@ export default function SADDeclaration() {
       if (supabase.channel) {
         const tch = supabase.channel('public:tickets')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-            fetchSADs(); // recalc displayed totals
+            fetchSADs();
             pushActivity('Realtime: tickets changed', {});
           })
           .subscribe();
         ticketsSubRef.current = tch;
         const ticketsUnsub = () => supabase.removeChannel(tch).catch(() => {});
-        // ensure both get unsubscribed
         const bothUnsub = () => { try { ticketsUnsub(); } catch (e) {}; if (unsub) unsub(); };
         return bothUnsub;
       }
@@ -266,6 +264,7 @@ export default function SADDeclaration() {
         declared_weight: Number(declaredWeight),
         docs: docRecords,
         status: 'In Progress',
+        accepting_tickets: true,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -284,7 +283,31 @@ export default function SADDeclaration() {
     }
   };
 
-  // fetch tickets for SAD detail -> FIX: compute recorded weight as SUM of all ticket.net values
+  // Helper: if declared met, set accepting_tickets = false (persist to DB if possible)
+  const lockSadIfComplete = async (sad_no, totalRecorded, declared) => {
+    const declaredNum = Number(declared || 0);
+    if (!declaredNum) return;
+    if (totalRecorded >= declaredNum) {
+      // update local UI immediately
+      setSads(prev => prev.map(s => s.sad_no === sad_no ? { ...s, accepting_tickets: false } : s));
+      setSelectedSad(prev => prev && prev.sad_no === sad_no ? { ...prev, accepting_tickets: false } : prev);
+
+      // attempt to persist flag to DB (if column exists)
+      try {
+        const { error } = await supabase.from('sad_declarations').update({ accepting_tickets: false, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
+        if (error) {
+          // If the column doesn't exist or other error, we ignore but keep UI locked
+          console.warn('Could not set accepting_tickets flag in DB', error);
+        } else {
+          await pushActivity(`Locked SAD ${sad_no} (declared met)`);
+        }
+      } catch (e) {
+        console.warn('lockSadIfComplete db update failed', e);
+      }
+    }
+  };
+
+  // fetch tickets for SAD detail -> compute recorded as SUM and lock if reached
   const openSadDetail = async (sad) => {
     setSelectedSad(sad);
     setIsModalOpen(true);
@@ -301,8 +324,11 @@ export default function SADDeclaration() {
       setDetailTickets(tickets);
       setSelectedSad(prev => ({ ...sad, total_recorded_weight: totalRecorded }));
 
-      // update local sads list so table immediately reflects summation (UI-only; DOES NOT persist)
+      // update local sads list so table immediately reflects summation (UI-only)
       setSads(prev => prev.map(x => x.sad_no === sad.sad_no ? { ...x, total_recorded_weight: totalRecorded } : x));
+
+      // Lock SAD if declared weight is met
+      await lockSadIfComplete(sad.sad_no, totalRecorded, sad.declared_weight);
 
       await pushActivity(`Viewed SAD ${sad.sad_no} details`);
     } catch (err) {
@@ -367,8 +393,27 @@ export default function SADDeclaration() {
     } catch (err) {
       console.error('saveEdit', err);
       toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
-      // roll back UI
       fetchSADs();
+    }
+  };
+
+  // set accepting_tickets flag manually
+  const setAcceptingTickets = async (sad_no, allow) => {
+    // update local UI first
+    setSads(prev => prev.map(s => s.sad_no === sad_no ? { ...s, accepting_tickets: !!allow } : s));
+    setSelectedSad(prev => prev && prev.sad_no === sad_no ? { ...prev, accepting_tickets: !!allow } : prev);
+
+    try {
+      const { error } = await supabase.from('sad_declarations').update({ accepting_tickets: !!allow, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
+      if (error) {
+        console.warn('setAcceptingTickets failed', error);
+        toast({ title: 'Could not update acceptance flag', description: error.message || 'Unexpected', status: 'warning' });
+      } else {
+        await pushActivity(`${allow ? 'Enabled' : 'Disabled'} ticket acceptance for ${sad_no}`);
+        toast({ title: `Tickets ${allow ? 'enabled' : 'disabled'}`, description: `Ticket acceptance ${allow ? 're-enabled' : 'disabled'} for ${sad_no}`, status: 'info' });
+      }
+    } catch (e) {
+      console.warn('setAcceptingTickets error', e);
     }
   };
 
@@ -397,12 +442,16 @@ export default function SADDeclaration() {
       await pushActivity(`Recalculated total for ${sad_no}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
+
+      // lock if complete
       const row = (await supabase.from('sad_declarations').select('declared_weight').eq('sad_no', sad_no)).data?.[0];
       if (row) {
         const declared = Number(row.declared_weight || 0);
+        await lockSadIfComplete(sad_no, total, declared);
         const diff = Math.abs(declared - total);
         if (declared > 0 && (diff / declared) < 0.01) {
-          await updateSadStatus(sad_no, 'Completed');
+          // do NOT auto-change status; only suggest
+          await pushActivity(`Declared weight met within 1% for ${sad_no}`);
         }
       }
     } catch (err) {
@@ -483,7 +532,6 @@ export default function SADDeclaration() {
       else if (/\bin progress\b/.test(q) || /\binprogress\b/.test(q)) filter.status = 'In Progress';
       else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
 
-      // if query contains a number, treat as SAD number
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
@@ -583,7 +631,6 @@ export default function SADDeclaration() {
       if (!d) continue;
       const ratio = r / d;
       const z = std > 0 ? (ratio - mean) / std : 0;
-      // flag if ratio deviates more than 2 std devs or ratio outside 0.8..1.2
       if (Math.abs(z) > 2 || ratio < 0.8 || ratio > 1.2) flagged.push({ sad: s, z, ratio });
     }
     return { mean, std, flagged };
@@ -622,16 +669,15 @@ export default function SADDeclaration() {
         const db = Number(b.total_recorded_weight || 0) - Number(b.declared_weight || 0);
         return (da - db) * dir;
       }
-      // default created_at
       const ta = new Date(a.created_at || a.updated_at || 0).getTime();
       const tb = new Date(b.created_at || b.updated_at || 0).getTime();
-      return (ta - tb) * -dir; // newest first by default
+      return (ta - tb) * -dir;
     });
     return arr;
   }, [sads, statusFilter, regimeFilter, nlQuery, sortBy, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSads.length / pageSize));
-  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]); // reset if needed
+  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]);
   const pagedSads = filteredSads.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
 
   // Export current filtered view
@@ -649,7 +695,7 @@ export default function SADDeclaration() {
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
   };
 
-  // Manual backup to storage (client-triggered). For weekly scheduling use a server job.
+  // Manual backup to storage (client-triggered)
   const handleManualBackupToStorage = async () => {
     try {
       const rows = sads.map(s => ({
@@ -668,7 +714,6 @@ export default function SADDeclaration() {
 
       const filename = `backup/sad_declarations_backup_${new Date().toISOString().slice(0,10)}.csv`;
       const blob = new Blob([csv], { type: 'text/csv' });
-      // Supabase storage requires file, we need to upload via put - SDK accepts Blob in browser
       const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
       if (error) throw error;
       await pushActivity('Manual backup uploaded', { path: filename });
@@ -696,7 +741,8 @@ export default function SADDeclaration() {
             onClick={() => {
               const docsArr = Array.isArray(s.docs) ? s.docs : [];
               if (docsArr.length) openDocViewer(docsArr[0]);
-            }} />
+            }}
+          />
         </Tooltip>
       </HStack>
     );
@@ -705,8 +751,15 @@ export default function SADDeclaration() {
   // Framer motion row variants used in AnimatePresence
   const RowMotion = motion(Tr);
 
-  // Simple small controls for quick filtering/sorting
-  // Note: you can move these controls into a separate toolbar component later
+  // Small helper to detect declared met
+  const declaredMet = (s) => {
+    const declared = Number(s?.declared_weight || 0);
+    if (!declared) return false;
+    const recorded = Number(s?.total_recorded_weight || 0);
+    return recorded >= declared;
+  };
+
+  // Render
   return (
     <Container maxW="8xl" py={6}>
       <Heading mb={4}>SAD Declaration Panel</Heading>
@@ -848,6 +901,8 @@ export default function SADDeclaration() {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
                   const indicator = getIndicator(s.declared_weight, s.total_recorded_weight);
                   const anomaly = anomalyResults.flagged.find(f => f.sad.sad_no === s.sad_no);
+                  const met = declaredMet(s);
+                  const accepting = typeof s.accepting_tickets === 'boolean' ? s.accepting_tickets : true;
 
                   return (
                     <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
@@ -884,11 +939,18 @@ export default function SADDeclaration() {
                             {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
                           </Select>
                         ) : (
-                          <HStack>
-                            <Box width="10px" height="10px" borderRadius="full" bg={indicator} />
-                            <Text>{s.status}</Text>
-                            {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
-                          </HStack>
+                          <VStack align="start" spacing={0}>
+                            <HStack>
+                              <Box width="10px" height="10px" borderRadius="full" bg={indicator} />
+                              <Text>{s.status}</Text>
+                              {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
+                              {!accepting && <Badge colorScheme="gray" ml={1}><FaLock /> No tickets</Badge>}
+                            </HStack>
+                            {/* show notice when declared met but status not Completed */}
+                            {met && s.status !== 'Completed' && (
+                              <Text fontSize="xs" color="green.700">Declared weight met — please change status to Completed. New tickets are blocked.</Text>
+                            )}
+                          </VStack>
                         )}
                       </Td>
 
@@ -917,6 +979,19 @@ export default function SADDeclaration() {
                                 <MenuDivider />
                                 <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export SAD</MenuItem>
                                 <MenuDivider />
+                                {accepting ? (
+                                  <MenuItem icon={<FaLock />} onClick={() => {
+                                    if (window.confirm(`Disable ticket acceptance for ${s.sad_no}?`)) {
+                                      setAcceptingTickets(s.sad_no, false);
+                                    }
+                                  }}>Disable tickets</MenuItem>
+                                ) : (
+                                  <MenuItem icon={<FaUnlock />} onClick={() => {
+                                    if (window.confirm(`Re-enable ticket acceptance for ${s.sad_no}?`)) {
+                                      setAcceptingTickets(s.sad_no, true);
+                                    }
+                                  }}>Enable tickets</MenuItem>
+                                )}
                                 <MenuItem icon={<FaTrashAlt />} onClick={() => {
                                   if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) {
                                     archiveSad(s.sad_no);
@@ -947,7 +1022,13 @@ export default function SADDeclaration() {
               <>
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={2}>Recorded weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
-                <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
+                <Text mb={2}>Status: <strong>{selectedSad.status}</strong></Text>
+                {!selectedSad.accepting_tickets && <Badge colorScheme="gray" mb={2}>Ticket acceptance disabled</Badge>}
+                {declaredMet(selectedSad) && selectedSad.status !== 'Completed' && (
+                  <Box mb={3} p={2} bg="green.50" borderRadius="md">
+                    <Text fontSize="sm" color="green.800">Declared weight has been reached. New tickets are blocked for this SAD. Please change status to Completed if appropriate.</Text>
+                  </Box>
+                )}
 
                 <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
                 {detailLoading ? <Text>Loading...</Text> : (
@@ -1009,7 +1090,6 @@ export default function SADDeclaration() {
                             aria-label="Download"
                             icon={<FaDownload />}
                             onClick={() => {
-                              // open in new tab to allow user to download
                               if (d.url) window.open(d.url, '_blank');
                             }}
                           />
