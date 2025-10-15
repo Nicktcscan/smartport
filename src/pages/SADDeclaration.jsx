@@ -8,12 +8,10 @@ import {
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, Tooltip
 } from '@chakra-ui/react';
 import {
-  FaPlus, FaMicrophone, FaSearch, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf
+  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
-import jsPDF from 'jspdf';
-import 'jspdf-autotable';
 
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
@@ -87,6 +85,7 @@ export default function SADDeclaration() {
 
   // inline editing
   const [editingSadId, setEditingSadId] = useState(null);
+  // keep editing values as raw strings to avoid cursor-jump/focus loss
   const [editData, setEditData] = useState({});
 
   // activity timeline (local)
@@ -95,10 +94,6 @@ export default function SADDeclaration() {
   // realtime subscriptions refs
   const subRef = useRef(null);
   const ticketsSubRef = useRef(null);
-
-  // voice
-  const recognitionRef = useRef(null);
-  const [listening, setListening] = useState(false);
 
   // track previously announced "discharge completed" SADs so we only toast once per session
   const prevDischargeRef = useRef(new Set());
@@ -123,6 +118,7 @@ export default function SADDeclaration() {
       const normalized = (data || []).map((r) => ({
         ...r,
         docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
+        // keep existing total_recorded_weight as fallback (DB may already hold it),
         total_recorded_weight: Number(r.total_recorded_weight ?? 0),
       }));
 
@@ -253,7 +249,7 @@ export default function SADDeclaration() {
     try {
       await supabase.from('sad_activity').insert([{ text, meta }]);
     } catch (e) {
-      // ignore DB errors
+      // ignore DB errors (don't disrupt UX)
     }
   };
 
@@ -380,7 +376,7 @@ export default function SADDeclaration() {
     setEditingSadId(sad.sad_no);
     setEditData({
       regime: sad.regime ?? '',
-      declared_weight: sad.declared_weight ?? 0,
+      declared_weight: String(sad.declared_weight ?? ''), // keep as string while editing
       status: sad.status ?? 'In Progress',
     });
   };
@@ -392,7 +388,13 @@ export default function SADDeclaration() {
 
   const saveEdit = async (sad_no) => {
     const before = (sadsRef.current || []).find(s => s.sad_no === sad_no) || {};
-    const after = { ...before, ...editData, updated_at: new Date().toISOString() };
+    const after = {
+      ...before,
+      regime: editData.regime ?? before.regime,
+      declared_weight: Number(editData.declared_weight ?? before.declared_weight ?? 0),
+      status: editData.status ?? before.status,
+      updated_at: new Date().toISOString()
+    };
 
     // optimistic UI
     setSads(prev => prev.map(s => s.sad_no === sad_no ? { ...s, ...after } : s));
@@ -561,7 +563,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // NL search helper which also uses fetch if user triggered a search button
+  // NL search
   const runNlQuery = async () => {
     if (!nlQuery) return fetchSADs();
     setNlLoading(true);
@@ -589,35 +591,6 @@ export default function SADDeclaration() {
     }
   };
 
-  // voice commands (Web Speech API)
-  const startListening = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      toast({ title: 'Voice not supported', description: 'Your browser does not have SpeechRecognition', status: 'warning' });
-      return;
-    }
-    const rec = new SpeechRecognition();
-    rec.lang = 'en-US';
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    rec.onresult = async (e) => {
-      const text = e.results[0][0].transcript;
-      setNlQuery(text);
-      await runNlQuery();
-      setListening(false);
-      rec.stop();
-    };
-    rec.onerror = (err) => {
-      console.warn('Voice err', err);
-      toast({ title: 'Voice error', description: err.error || 'Failed to record', status: 'error' });
-      setListening(false);
-    };
-    rec.onend = () => setListening(false);
-    rec.start();
-    recognitionRef.current = rec;
-    setListening(true);
-  };
-
   // Local explain discrepancy
   const handleExplainDiscrepancy = async (s) => {
     const recorded = Number(s.total_recorded_weight || 0);
@@ -639,6 +612,82 @@ export default function SADDeclaration() {
     }
     toast({ title: `Discrepancy for ${s.sad_no}`, description: msg, status: 'info', duration: 10000 });
     await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
+  };
+
+  // Generate printable report (user prints -> Save as PDF)
+  const generatePdfReport = async (s) => {
+    try {
+      // fetch tickets to include in report
+      const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', s.sad_no).order('date', { ascending: false });
+      if (error) {
+        console.warn('Could not fetch tickets for PDF', error);
+      }
+
+      const declared = Number(s.declared_weight || 0);
+      const recorded = Number(s.total_recorded_weight || 0);
+
+      const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>SAD ${s.sad_no} Report</title>
+          <style>
+            body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
+            h1 { font-size: 20px; margin-bottom: 8px; }
+            .meta { margin-bottom: 16px; }
+            .meta p { margin: 4px 0; }
+            table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+            th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+            th { background: #f4f4f4; }
+            .small { font-size: 12px; color: #555; }
+            .badge { display:inline-block; padding:4px 8px; border-radius:4px; background:#eee; font-size:12px; margin-left:8px; }
+          </style>
+        </head>
+        <body>
+          <h1>SAD ${s.sad_no} — Report</h1>
+          <div class="meta">
+            <p><strong>Regime:</strong> ${s.regime || '—'}</p>
+            <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
+            <p><strong>Recorded weight:</strong> ${recorded.toLocaleString()} kg ${s.dischargeCompleted ? '<span class="badge">Discharge Completed</span>' : ''}</p>
+            <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Updated: ${s.updated_at || '—'}</p>
+            <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
+          </div>
+
+          <h2>Tickets</h2>
+          ${tickets.length ? `
+            <table>
+              <thead><tr><th>Ticket</th><th>Truck</th><th>Net (kg)</th><th>Date</th></tr></thead>
+              <tbody>
+                ${tickets.map(t => `<tr>
+                  <td>${t.ticket_no || ''}</td>
+                  <td>${t.gnsw_truck_no || ''}</td>
+                  <td style="text-align:right">${Number(t.net ?? t.weight ?? 0).toLocaleString()}</td>
+                  <td>${t.date ? new Date(t.date).toLocaleString() : '—'}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          ` : '<p class="small">No tickets recorded.</p>'}
+          <script>
+            // auto print when opened (user can choose Save as PDF)
+            setTimeout(() => { window.print(); }, 300);
+          </script>
+        </body>
+      </html>
+      `;
+
+      const w = window.open('', '_blank', 'noopener,noreferrer');
+      if (!w) {
+        toast({ title: 'Blocked', description: 'Popup blocked — allow popups for this site to print PDF.', status: 'warning' });
+        return;
+      }
+      w.document.open();
+      w.document.write(html);
+      w.document.close();
+    } catch (err) {
+      console.error('generatePdfReport', err);
+      toast({ title: 'Report failed', description: err?.message || 'Could not generate report', status: 'error' });
+    }
   };
 
   // REGIME level aggregates
@@ -689,32 +738,24 @@ export default function SADDeclaration() {
     return { totalSADs, totalDeclared, totalRecorded, completed, activeDiscreps };
   }, [sads, anomalyResults]);
 
-  // -----------------------
-  // Filtering, searching, sorting & pagination
-  // Fix: make search robust (avoid String(...).join bug)
-  // -----------------------
+  // Pagination & filtering pipeline
   const filteredSads = useMemo(() => {
     let arr = Array.isArray(sads) ? sads.slice() : [];
-
-    // status/regime filters
     if (statusFilter) arr = arr.filter(s => (s.status || '').toLowerCase() === statusFilter.toLowerCase());
     if (regimeFilter) arr = arr.filter(s => String(s.regime || '').toLowerCase().includes(String(regimeFilter).toLowerCase()));
-
-    // NL search text over multiple fields (safe join)
     if (nlQuery) {
       const q = nlQuery.toLowerCase();
       arr = arr.filter(s => {
-        const docNames = (Array.isArray(s.docs) ? s.docs.map(d => (d && (d.name || d.path)) || '').join(' ') : '');
-        const text = [
-          s.sad_no ?? '',
-          s.regime ?? '',
-          s.status ?? '',
-          docNames
-        ].join(' ').toLowerCase();
-        return text.includes(q);
+        // SAD number
+        if ((String(s.sad_no || '')).toLowerCase().includes(q)) return true;
+        // regime
+        if ((String(s.regime || '')).toLowerCase().includes(q)) return true;
+        // docs: handle array or string safely
+        const docsText = Array.isArray(s.docs) ? s.docs.map(d => (d && (d.name || d.path || d.url || '') )).join(' ') : String(s.docs || '');
+        if (docsText.toLowerCase().includes(q)) return true;
+        return false;
       });
     }
-
     // sorting
     const dir = sortDir === 'asc' ? 1 : -1;
     arr.sort((a, b) => {
@@ -730,7 +771,6 @@ export default function SADDeclaration() {
       const tb = new Date(b.created_at || b.updated_at || 0).getTime();
       return (ta - tb) * -dir; // newest first by default
     });
-
     return arr;
   }, [sads, statusFilter, regimeFilter, nlQuery, sortBy, sortDir]);
 
@@ -783,84 +823,17 @@ export default function SADDeclaration() {
     }
   };
 
-  // UI helpers: render docs cell as a compact button that opens the modal (Removed eye icon from main table)
+  // UI helpers: render docs cell as a compact button that opens the modal
   const renderDocsCell = (s) => {
     const count = Array.isArray(s.docs) ? s.docs.length : 0;
     if (!count) return <Text color="gray.500">—</Text>;
     return (
       <HStack>
-        <Button type="button" size="xs" onClick={() => openDocsModal(s)}>
+        <Button size="xs" onClick={() => openDocsModal(s)}>
           View docs ({count})
         </Button>
       </HStack>
     );
-  };
-
-  // -----------------------
-  // PDF generation for SAD
-  // -----------------------
-  const exportSADtoPDF = async (sad) => {
-    try {
-      // fetch tickets to include full details (ensure we have latest)
-      const { data: tickets = [], error: tErr } = await supabase.from('tickets').select('*').eq('sad_no', sad.sad_no).order('date', { ascending: false });
-      if (tErr) console.warn('Could not fetch tickets for PDF', tErr);
-
-      const doc = new jsPDF({ unit: 'pt', format: 'a4' });
-      const marginLeft = 40;
-      let y = 40;
-
-      doc.setFontSize(18);
-      doc.text(`SAD Report — ${sad.sad_no}`, marginLeft, y);
-      y += 28;
-
-      doc.setFontSize(11);
-      doc.text(`Generated: ${new Date().toLocaleString()}`, marginLeft, y);
-      y += 20;
-
-      doc.setFontSize(12);
-      doc.text(`Regime: ${sad.regime || '—'}`, marginLeft, y);
-      doc.text(`Status: ${sad.status || '—'}`, marginLeft + 300, y);
-      y += 16;
-
-      doc.text(`Declared weight: ${Number(sad.declared_weight || 0).toLocaleString()} kg`, marginLeft, y);
-      doc.text(`Recorded weight: ${Number(sad.total_recorded_weight || 0).toLocaleString()} kg`, marginLeft + 300, y);
-      y += 18;
-
-      if (sad.docs && sad.docs.length) {
-        doc.text(`Attached documents: ${sad.docs.length}`, marginLeft, y);
-        y += 16;
-      }
-
-      // tickets table
-      y += 6;
-      const tableBody = (tickets || []).map(t => ([
-        t.ticket_no || '',
-        t.gnsw_truck_no || '',
-        String(Number(t.net ?? t.weight ?? 0)),
-        t.date ? new Date(t.date).toLocaleString() : '',
-      ]));
-
-      if (tableBody.length) {
-        doc.autoTable({
-          head: [['Ticket', 'Truck', 'Net (kg)', 'Date']],
-          body: tableBody,
-          startY: y,
-          margin: { left: marginLeft, right: 40 },
-          styles: { fontSize: 10 },
-          headStyles: { fillColor: [60, 60, 60] },
-        });
-      } else {
-        doc.text('No tickets recorded for this SAD.', marginLeft, y);
-      }
-
-      // download the PDF
-      doc.save(`SAD_${sad.sad_no}_report.pdf`);
-      toast({ title: 'PDF generated', description: `SAD ${sad.sad_no} PDF created`, status: 'success' });
-      await pushActivity(`Generated PDF for ${sad.sad_no}`);
-    } catch (err) {
-      console.error('exportSADtoPDF', err);
-      toast({ title: 'PDF generation failed', description: err?.message || 'Unexpected', status: 'error' });
-    }
   };
 
   // Framer motion row variants used in AnimatePresence
@@ -935,12 +908,12 @@ export default function SADDeclaration() {
         </SimpleGrid>
 
         <HStack mt={3}>
-          <Button type="button" colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading}>Register SAD</Button>
-          <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
+          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading}>Register SAD</Button>
+          <Button onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
 
           <Box ml="auto" display="flex" gap={2}>
-            <Button type="button" size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV}>Export filtered CSV</Button>
-            <Button type="button" size="sm" variant="ghost" onClick={handleManualBackupToStorage}>Backup to storage</Button>
+            <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV}>Export filtered CSV</Button>
+            <Button size="sm" variant="ghost" onClick={handleManualBackupToStorage}>Backup to storage</Button>
           </Box>
         </HStack>
       </Box>
@@ -949,7 +922,7 @@ export default function SADDeclaration() {
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Flex gap={3} align="center" wrap="wrap">
           <Input placeholder="Search (SAD, Regime, docs...)" value={nlQuery} onChange={(e) => setNlQuery(e.target.value)} maxW="360px" />
-          <Button type="button" size="sm" onClick={runNlQuery} isLoading={nlLoading}>Search</Button>
+          <Button size="sm" onClick={runNlQuery} isLoading={nlLoading}>Search</Button>
 
           <Select placeholder="Filter by status" size="sm" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} maxW="160px">
             <option value="">All</option>
@@ -1030,7 +1003,21 @@ export default function SADDeclaration() {
 
                       <Td isNumeric>
                         {editingSadId === s.sad_no ? (
-                          <Input size="sm" type="number" value={editData.declared_weight ?? 0} onChange={(e) => setEditData(d => ({ ...d, declared_weight: e.target.value }))} />
+                          // keep input value as string to avoid cursor jump
+                          <Input
+                            size="sm"
+                            type="number"
+                            value={editData.declared_weight ?? ''}
+                            onChange={(e) => setEditData(d => ({ ...d, declared_weight: e.target.value }))}
+                            onKeyDown={(e) => {
+                              // prevent Enter from triggering any unintended form submit/refresh
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                // optionally commit save on Enter by uncommenting below
+                                // saveEdit(s.sad_no);
+                              }
+                            }}
+                          />
                         ) : (
                           <Text>{Number(s.declared_weight || 0).toLocaleString()}</Text>
                         )}
@@ -1058,8 +1045,8 @@ export default function SADDeclaration() {
                             {s.dischargeCompleted && s.status !== 'Completed' && (
                               <HStack spacing={2}>
                                 <Text fontSize="xs" color="gray.600">Declared met — please mark as Completed</Text>
-                                <Button type="button" size="xs" onClick={() => updateSadStatus(s.sad_no, 'Completed')}>Mark Completed</Button>
-                                <Button type="button" size="xs" variant="outline" onClick={() => lockSADForNewTickets(s.sad_no)}>Lock to new tickets</Button>
+                                <Button size="xs" onClick={() => updateSadStatus(s.sad_no, 'Completed')}>Mark Completed</Button>
+                                <Button size="xs" variant="outline" onClick={() => lockSADForNewTickets(s.sad_no)}>Lock to new tickets</Button>
                               </HStack>
                             )}
                           </VStack>
@@ -1078,8 +1065,8 @@ export default function SADDeclaration() {
                         <HStack>
                           {editingSadId === s.sad_no ? (
                             <>
-                              <Button type="button" size="xs" colorScheme="green" onClick={() => saveEdit(s.sad_no)}>Save</Button>
-                              <Button type="button" size="xs" onClick={cancelEdit}>Cancel</Button>
+                              <Button size="xs" colorScheme="green" onClick={() => saveEdit(s.sad_no)}>Save</Button>
+                              <Button size="xs" onClick={cancelEdit}>Cancel</Button>
                             </>
                           ) : (
                             <Menu>
@@ -1087,7 +1074,7 @@ export default function SADDeclaration() {
                               <MenuList>
                                 <MenuItem icon={<FaEdit />} onClick={() => startEdit(s)}>Edit</MenuItem>
                                 <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
-                                <MenuItem icon={<FaFilePdf />} onClick={() => exportSADtoPDF(s)}>Export PDF</MenuItem>
+                                <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
                                 <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
                                 <MenuDivider />
                                 <MenuItem icon={<FaTrashAlt />} onClick={() => {
@@ -1126,8 +1113,9 @@ export default function SADDeclaration() {
                         Discharge Completed — declared total met ({Number(selectedSad.total_recorded_weight || 0).toLocaleString()} / {Number(selectedSad.declared_weight || 0).toLocaleString()})
                       </Text>
                       <HStack>
-                        {selectedSad.status !== 'Completed' && <Button type="button" size="sm" onClick={() => updateSadStatus(selectedSad.sad_no, 'Completed')}>Mark Completed</Button>}
-                        <Button type="button" size="sm" variant="outline" onClick={() => lockSADForNewTickets(selectedSad.sad_no)}>Lock to new tickets</Button>
+                        {selectedSad.status !== 'Completed' && <Button size="sm" onClick={() => updateSadStatus(selectedSad.sad_no, 'Completed')}>Mark Completed</Button>}
+                        <Button size="sm" variant="outline" onClick={() => lockSADForNewTickets(selectedSad.sad_no)}>Lock to new tickets</Button>
+                        <Button size="sm" onClick={() => generatePdfReport(selectedSad)}>Print / Save PDF</Button>
                       </HStack>
                     </HStack>
                   </Box>
@@ -1159,7 +1147,7 @@ export default function SADDeclaration() {
             )}
           </ModalBody>
           <ModalFooter>
-            <Button type="button" onClick={() => setIsModalOpen(false)}>Close</Button>
+            <Button onClick={() => setIsModalOpen(false)}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1191,9 +1179,8 @@ export default function SADDeclaration() {
                       </Td>
                       <Td>
                         <HStack>
-                          <Button type="button" size="xs" onClick={() => openDocViewer(d)}>View</Button>
+                          <Button size="xs" onClick={() => openDocViewer(d)}>View</Button>
                           <IconButton
-                            type="button"
                             size="xs"
                             aria-label="Download"
                             icon={<FaDownload />}
@@ -1211,7 +1198,7 @@ export default function SADDeclaration() {
             )}
           </ModalBody>
           <ModalFooter>
-            <Button type="button" onClick={() => setDocsModal({ open: false, docs: [], sad_no: null })}>Close</Button>
+            <Button onClick={() => setDocsModal({ open: false, docs: [], sad_no: null })}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1238,7 +1225,7 @@ export default function SADDeclaration() {
             ) : <Text>No doc</Text>}
           </ModalBody>
           <ModalFooter>
-            <Button type="button" onClick={() => setDocViewer({ open: false, doc: null })}>Close</Button>
+            <Button onClick={() => setDocViewer({ open: false, doc: null })}>Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
