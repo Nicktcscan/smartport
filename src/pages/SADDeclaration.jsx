@@ -1222,7 +1222,6 @@ export default function SADDeclaration() {
                 <Thead>
                   <Tr>
                     <Th>Filename</Th>
-                    <Th>Tags</Th>
                     <Th>Actions</Th>
                   </Tr>
                 </Thead>
@@ -1230,9 +1229,6 @@ export default function SADDeclaration() {
                   {docsModal.docs.map((d, i) => (
                     <Tr key={i}>
                       <Td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name || d.path || 'doc'}</Td>
-                      <Td>
-                        {(d.tags || []).length ? (d.tags.map((t, j) => <Tag key={j} size="sm" mr={1}><TagLabel>{t}</TagLabel></Tag>)) : <Text color="gray.500">—</Text>}
-                      </Td>
                       <Td>
                         <HStack>
                           <Button size="xs" onClick={() => openDocViewer(d)} type="button">View</Button>
