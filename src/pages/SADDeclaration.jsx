@@ -12,12 +12,20 @@ import {
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
-import logo from '../assets/logo.png'; // ensure this file exists
+import logo from '../assets/logo.png'; // ensure this path exists
 
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 const REGIME_OPTIONS = ['Import', 'Export'];
+
+// map manual statuses to UI colors
+const STATUS_COLOR = {
+  'In Progress': 'red',
+  'Completed': 'green',
+  'On Hold': 'yellow',
+  'Archived': 'gray'
+};
 
 function exportToCSV(rows = [], filename = 'export.csv') {
   if (!rows || rows.length === 0) return;
@@ -84,14 +92,16 @@ export default function SADDeclaration() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
-  // edit modal (replace inline editing)
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editModalSad, setEditModalSad] = useState(null); // sad being edited
-  const [editModalData, setEditModalData] = useState({ regime: '', declared_weight: '', status: '' });
+  // edit modal (replaces inline editing)
+  const [editModal, setEditModal] = useState({ open: false, sad: null, form: {} });
   const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
 
-  // activity timeline (local)
+  // archive confirmation modal
+  const [archiveModal, setArchiveModal] = useState({ open: false, sad_no: null });
+
+  // activity timeline (local + optional DB)
   const [activity, setActivity] = useState([]);
+  const ACTIVITY_LS_KEY = 'sad_activity_v1';
 
   // realtime subscriptions refs
   const subRef = useRef(null);
@@ -103,51 +113,35 @@ export default function SADDeclaration() {
   // pending refresh flag when fetchSADs call happens while editing - apply after editing if set
   const pendingRefreshRef = useRef(false);
 
-  // flag whether sad_activity table exists to avoid repeated 404s
-  const activityTableAvailableRef = useRef(true);
-
   // ---------------------
-  // load activity from localStorage on mount
+  // init activity from localStorage
   // ---------------------
   useEffect(() => {
     try {
-      const raw = localStorage.getItem('sad_activity_local');
-      if (raw) setActivity(JSON.parse(raw));
-    } catch (e) {
-      // ignore
-    }
-
-    // quick probe to check if sad_activity exists (avoid flooding network with inserts that 404)
-    (async () => {
-      try {
-        // try a harmless select to detect existence
-        const { error } = await supabase.from('sad_activity').select('text').limit(1);
-        if (error) {
-          // mark unavailable so we don't insert repeatedly
-          activityTableAvailableRef.current = false;
-        } else {
-          activityTableAvailableRef.current = true;
-        }
-      } catch (e) {
-        activityTableAvailableRef.current = false;
+      const raw = localStorage.getItem(ACTIVITY_LS_KEY);
+      if (raw) {
+        setActivity(JSON.parse(raw));
       }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    } catch (e) {
+      console.warn('Could not load activity from localStorage', e);
+    }
   }, []);
 
   // persist activity to localStorage whenever it changes
   useEffect(() => {
     try {
-      localStorage.setItem('sad_activity_local', JSON.stringify(activity));
-    } catch (e) {}
+      localStorage.setItem(ACTIVITY_LS_KEY, JSON.stringify(activity.slice(0, 200)));
+    } catch (e) {
+      console.warn('Could not save activity to localStorage', e);
+    }
   }, [activity]);
 
   // ---------------------
-  // fetchSADs (with correct recorded totals)
+  // fetchSADs (with correct recorded totals) - does NOT auto-change status
   // ---------------------
   const fetchSADs = async (filter = null) => {
-    // If user is actively editing (modal open), avoid applying a refresh to prevent focus loss.
-    if (editModalOpen) {
+    // If edit modal open, queue a refresh instead of applying immediately (prevents focus loss)
+    if (editModal.open) {
       pendingRefreshRef.current = true;
       return;
     }
@@ -168,21 +162,18 @@ export default function SADDeclaration() {
       const normalized = (data || []).map((r) => ({
         ...r,
         docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
-        // keep existing total_recorded_weight as fallback (DB may already hold it),
         total_recorded_weight: Number(r.total_recorded_weight ?? 0),
       }));
 
       // gather sad numbers to query tickets for sums
       const sadNos = normalized.map((s) => s.sad_no).filter(Boolean);
       if (sadNos.length) {
-        // fetch tickets for these SADs and compute sum(net) per sad_no
         const { data: tickets, error: tErr } = await supabase
           .from('tickets')
           .select('sad_no, net, weight')
           .in('sad_no', sadNos);
 
         if (tErr) {
-          // don't fail whole flow if this fails; keep DB totals if present
           console.warn('Could not fetch tickets to compute totals', tErr);
         } else {
           const totals = {};
@@ -205,7 +196,7 @@ export default function SADDeclaration() {
         }
       }
 
-      // compute dischargeCompleted flag (only informational — does not change status)
+      // compute dischargeCompleted flag (for info only) but DO NOT change status automatically
       const enhanced = normalized.map((s) => {
         const declared = Number(s.declared_weight || 0);
         const recorded = Number(s.total_recorded_weight || 0);
@@ -213,21 +204,18 @@ export default function SADDeclaration() {
         return { ...s, total_recorded_weight: recorded, dischargeCompleted };
       });
 
-      // detect newly completed (toast once per SAD per session) — informational only
+      // Informational toast about newly reached threshold (does not change status)
       const newlyCompleted = enhanced.filter((s) => s.dischargeCompleted && !prevDischargeRef.current.has(s.sad_no));
       for (const s of newlyCompleted) {
         prevDischargeRef.current.add(s.sad_no);
-        // Gentle toast (informational)
         toast({
-          title: 'Discharge Completed (info)',
+          title: 'Discharge threshold met',
           description: `SAD ${s.sad_no} has met its declared weight (${Number(s.total_recorded_weight).toLocaleString()} / ${Number(s.declared_weight).toLocaleString()}). Status remains manual.`,
           status: 'info',
-          duration: 5000,
+          duration: 6000,
           isClosable: true,
-          position: 'bottom-right',
-          variant: 'subtle',
         });
-        await pushActivity(`Discharge met for ${s.sad_no}`, { sad_no: s.sad_no });
+        await pushActivity(`Discharge threshold observed for ${s.sad_no}`, { sad_no: s.sad_no });
       }
 
       setSads(enhanced);
@@ -247,7 +235,6 @@ export default function SADDeclaration() {
       if (supabase.channel) {
         const ch = supabase.channel('public:sad_declarations')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, (payload) => {
-            // refresh list on changes - keep server ordering & computed fields
             fetchSADs();
             pushActivity(`Realtime: SAD ${payload.event} ${payload?.new?.sad_no || payload?.old?.sad_no || ''}`, { payloadEvent: payload.event });
           })
@@ -255,7 +242,6 @@ export default function SADDeclaration() {
         subRef.current = ch;
         unsub = () => supabase.removeChannel(ch).catch(() => {});
       } else {
-        // legacy subscribe
         const s = supabase.from('sad_declarations').on('*', () => {
           fetchSADs();
         }).subscribe();
@@ -271,13 +257,12 @@ export default function SADDeclaration() {
       if (supabase.channel) {
         const tch = supabase.channel('public:tickets')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-            fetchSADs(); // recalc displayed totals
+            fetchSADs();
             pushActivity('Realtime: tickets changed', {});
           })
           .subscribe();
         ticketsSubRef.current = tch;
         const ticketsUnsub = () => supabase.removeChannel(tch).catch(() => {});
-        // ensure both get unsubscribed
         const bothUnsub = () => { try { ticketsUnsub(); } catch (e) {}; if (unsub) unsub(); };
         return bothUnsub;
       }
@@ -297,16 +282,10 @@ export default function SADDeclaration() {
   const pushActivity = async (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
     setActivity(prev => [ev, ...prev].slice(0, 200));
-    // Try to persist to DB only if we previously determined the table exists
-    if (!activityTableAvailableRef.current) return;
     try {
-      const { error } = await supabase.from('sad_activity').insert([{ text, meta }]);
-      if (error) {
-        // If it errors (table doesn't exist), stop trying in the future
-        activityTableAvailableRef.current = false;
-      }
+      await supabase.from('sad_activity').insert([{ text, meta }]);
     } catch (e) {
-      activityTableAvailableRef.current = false;
+      // ignore DB errors (table may not exist)
     }
   };
 
@@ -320,15 +299,13 @@ export default function SADDeclaration() {
     setDocsModal({ open: true, docs: Array.isArray(sad.docs) ? sad.docs : [], sad_no: sad.sad_no });
   };
 
-  // upload docs to storage and return array of URLs + tags
+  // upload docs to storage and return array of URLs + tags (OCR removed)
   const uploadDocs = async (sad_no, files = []) => {
     if (!files || files.length === 0) return [];
     const uploaded = [];
 
     for (const f of files) {
       const key = `sad-${sad_no}/${Date.now()}-${f.name.replace(/\s+/g, '_')}`;
-
-      // upload
       const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(key, f, { cacheControl: '3600', upsert: false });
       if (error) {
         console.warn('upload doc failed', error);
@@ -336,7 +313,6 @@ export default function SADDeclaration() {
       }
       const filePath = data?.path ?? data?.Key ?? key;
 
-      // get URL (tolerant to SDK shapes)
       let url = null;
       try {
         const getPublic = await supabase.storage.from(SAD_DOCS_BUCKET).getPublicUrl(filePath);
@@ -385,10 +361,10 @@ export default function SADDeclaration() {
         regime: regime || null,
         declared_weight: Number(declaredWeight),
         docs: docRecords,
-        // explicitly default to In Progress (manual status)
         status: 'In Progress',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+        total_recorded_weight: 0
       };
 
       const { error } = await supabase.from('sad_declarations').insert([payload]);
@@ -416,7 +392,6 @@ export default function SADDeclaration() {
       const tickets = data || [];
       setDetailTickets(tickets);
 
-      // ensure selectedSad shows correct total recorded (cumulative net)
       const computedTotal = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
       setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)) }));
 
@@ -430,68 +405,57 @@ export default function SADDeclaration() {
     }
   };
 
-  // start edit flow: open edit modal (block auto-refresh while open)
-  const openEditModal = (sad) => {
-    setEditModalSad(sad);
-    setEditModalData({
-      regime: sad.regime ?? '',
-      declared_weight: String(sad.declared_weight ?? ''),
-      status: sad.status ?? 'In Progress',
+  // open edit modal (replaces inline startEdit)
+  const openEditModal = (s) => {
+    setEditModal({
+      open: true,
+      sad: s,
+      form: {
+        regime: s.regime ?? '',
+        declared_weight: String(s.declared_weight ?? ''),
+        status: s.status ?? 'In Progress',
+      }
     });
-    setEditModalOpen(true);
   };
 
   // cancel edit modal
   const cancelEditModal = () => {
-    setEditModalOpen(false);
-    setEditModalSad(null);
-    setEditModalData({});
-    // if a refresh was queued while editing, apply it now
+    setEditModal({ open: false, sad: null, form: {} });
     if (pendingRefreshRef.current) {
       pendingRefreshRef.current = false;
       fetchSADs();
     }
   };
 
-  // perform save after confirmation
-  const performSaveEdit = async () => {
-    if (!editModalSad) return;
-    const sad_no = editModalSad.sad_no;
-    // call saveEdit which handles optimistic update and DB
-    await saveEdit(sad_no);
-    setConfirmSaveOpen(false);
-    setEditModalOpen(false);
-    setEditModalSad(null);
-    setEditModalData({});
-  };
-
-  // save edit (only fields provided by user) - keeps manual status only
-  const saveEdit = async (sad_no) => {
+  // save edit (called after confirmation)
+  const saveEditConfirmed = async () => {
+    const sad = editModal.sad;
+    if (!sad) return;
+    const sad_no = sad.sad_no;
     const before = (sadsRef.current || []).find(s => s.sad_no === sad_no) || {};
-    // Only apply fields user explicitly entered; do not auto-change status
     const after = {
       ...before,
-      regime: editModalData.regime ?? before.regime,
-      declared_weight: Number(editModalData.declared_weight ?? before.declared_weight ?? 0),
-      status: editModalData.status ?? before.status,
+      regime: editModal.form.regime ?? before.regime,
+      declared_weight: Number(editModal.form.declared_weight ?? before.declared_weight ?? 0),
+      status: editModal.form.status ?? before.status,
       updated_at: new Date().toISOString()
     };
 
     // optimistic UI
     setSads(prev => prev.map(s => s.sad_no === sad_no ? { ...s, ...after } : s));
+    setEditModal({ open: false, sad: null, form: {} });
+    setConfirmSaveOpen(false);
 
     try {
       const payload = {
         regime: after.regime ?? null,
         declared_weight: Number(after.declared_weight ?? 0),
-        // status is whatever the user selected; do NOT infer from weights
         status: after.status ?? null,
         updated_at: new Date().toISOString(),
       };
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
       if (error) throw error;
 
-      // log change to change log table (if present)
       try {
         await supabase.from('sad_change_logs').insert([{
           sad_no,
@@ -500,9 +464,7 @@ export default function SADDeclaration() {
           after: JSON.stringify(after),
           created_at: new Date().toISOString(),
         }]);
-      } catch (e) {
-        // ignore if table not present
-      }
+      } catch (e) {}
 
       await pushActivity(`Edited SAD ${sad_no}`, { before, after });
       toast({ title: 'Saved', description: `SAD ${sad_no} updated`, status: 'success' });
@@ -510,10 +472,8 @@ export default function SADDeclaration() {
     } catch (err) {
       console.error('saveEdit', err);
       toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
-      // roll back UI
       fetchSADs();
     } finally {
-      // if a refresh was queued while editing, apply it now
       if (pendingRefreshRef.current) {
         pendingRefreshRef.current = false;
         fetchSADs();
@@ -521,7 +481,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // update SAD status (manual quick select) - still goes through DB
+  // update SAD status quick-select (still manual)
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
@@ -545,15 +505,36 @@ export default function SADDeclaration() {
       await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
       await pushActivity(`Recalculated total for ${sad_no}: ${total}`);
       fetchSADs();
-      toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
+      toast({ title: 'Recalculated', description: `Discharged ${total.toLocaleString()}`, status: 'success' });
+      const row = (await supabase.from('sad_declarations').select('declared_weight').eq('sad_no', sad_no)).data?.[0];
+      if (row) {
+        const declared = Number(row.declared_weight || 0);
+        const diff = Math.abs(declared - total);
+        if (declared > 0 && (diff / declared) < 0.01) {
+          toast({
+            title: 'Note: near match',
+            description: `SAD ${sad_no} discharged ~ matches declared — status remains manual.`,
+            status: 'info',
+            duration: 6000,
+            isClosable: true,
+          });
+        }
+      }
     } catch (err) {
       console.error('recalcTotalForSad', err);
       toast({ title: 'Could not recalc', description: err?.message || 'Unexpected', status: 'error' });
     }
   };
 
-  // archive SAD (soft)
-  const archiveSad = async (sad_no) => {
+  // archive SAD (opens confirm modal)
+  const openArchiveModal = (sad_no) => {
+    setArchiveModal({ open: true, sad_no });
+  };
+
+  const confirmArchive = async () => {
+    const sad_no = archiveModal.sad_no;
+    setArchiveModal({ open: false, sad_no: null });
+    if (!sad_no) return;
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
       if (error) throw error;
@@ -573,7 +554,7 @@ export default function SADDeclaration() {
         sad_no: s.sad_no,
         regime: s.regime,
         declared_weight: s.declared_weight,
-        total_recorded_weight: s.total_recorded_weight,
+        discharged: s.total_recorded_weight,
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
@@ -600,7 +581,7 @@ export default function SADDeclaration() {
       console.warn('Could not set closed flag', err);
       toast({
         title: 'Could not lock at DB level',
-        description: 'To fully prevent new tickets you need server-side enforcement (add a `closed_to_tickets` column or check on ticket creation). Showing UI block locally.',
+        description: 'To fully prevent new tickets you need server-side enforcement (add a `closed_to_tickets` column or check on ticket creation).',
         status: 'warning',
         duration: 7000,
         isClosable: true,
@@ -608,17 +589,12 @@ export default function SADDeclaration() {
     }
   };
 
-  // indicator color by manual status (manual-only)
-  const getStatusColor = (status) => {
-    if (!status) return 'gray';
-    if (status === 'In Progress') return 'red';
-    if (status === 'Completed') return 'green';
-    if (status === 'On Hold') return 'yellow';
-    if (status === 'Archived') return 'gray';
-    return 'gray';
+  // indicator color by manual status only (ignore declared vs discharged)
+  const getIndicator = (status) => {
+    return STATUS_COLOR[status] || 'gray';
   };
 
-  // handle file change (OCR removed)
+  // handle file change (attach)
   const onFilesChange = async (fileList) => {
     try {
       const arr = Array.from(fileList || []);
@@ -645,7 +621,6 @@ export default function SADDeclaration() {
       else if (/\bin progress\b/.test(q) || /\binprogress\b/.test(q)) filter.status = 'In Progress';
       else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
 
-      // if query contains a number, treat as SAD number
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
@@ -661,56 +636,52 @@ export default function SADDeclaration() {
     }
   };
 
-  // Local explain discrepancy (informational)
+  // Local explain discrepancy (human readable)
   const handleExplainDiscrepancy = async (s) => {
-    const recorded = Number(s.total_recorded_weight || 0);
+    const discharged = Number(s.total_recorded_weight || 0);
     const declared = Number(s.declared_weight || 0);
     if (!declared) {
       toast({ title: 'No declared weight', description: `SAD ${s.sad_no} has no declared weight to compare.`, status: 'warning' });
       await pushActivity(`Explain: no declared weight for ${s.sad_no}`);
       return;
     }
-    const diff = recorded - declared;
-    const pct = ((diff / declared) * 100).toFixed(2);
+    const diff = discharged - declared;
+    const pct = ((Math.abs(diff) / (declared || 1)) * 100).toFixed(2);
     let msg = '';
-    if (Math.abs(diff) / Math.max(1, declared) < 0.01) {
-      msg = `Recorded matches declared within 1% (${recorded} kg vs ${declared} kg).`;
-    } else if (diff > 0) {
-      msg = `Recorded is ${diff.toLocaleString()} kg (${pct}%) higher than declared — investigate extra tickets or duplicates.`;
+    if (discharged === declared) {
+      msg = `Declared and discharged match exactly (${declared} kg). Status remains manual.`;
+    } else if (declared > discharged) {
+      msg = `Overdeclared: Declared (${declared.toLocaleString()} kg) is greater than Discharged (${discharged.toLocaleString()} kg) — missing ${ (declared - discharged).toLocaleString() } kg (${pct}%).`;
     } else {
-      msg = `Recorded is ${Math.abs(diff).toLocaleString()} kg (${Math.abs(pct)}%) lower than declared — check missing tickets or document mismatch.`;
+      msg = `Underdeclared: Discharged (${discharged.toLocaleString()} kg) is greater than Declared (${declared.toLocaleString()} kg) — extra ${ (discharged - declared).toLocaleString() } kg (${pct}%).`;
     }
     toast({ title: `Discrepancy for ${s.sad_no}`, description: msg, status: 'info', duration: 10000 });
     await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
   };
 
   // Generate printable report (user prints -> Save as PDF)
-  // IMPORTANT: open the popup synchronously to avoid blockers, then write content after fetching.
+  // open window synchronously first to avoid blockers
   const generatePdfReport = async (s) => {
-    // open window synchronously on click to satisfy popup blocker rules
     const w = window.open('', '_blank', 'noopener,noreferrer');
     if (!w) {
       toast({ title: 'Blocked', description: 'Popup blocked — allow popups for this site to print PDF.', status: 'warning' });
       return;
     }
 
-    // show a small placeholder while we fetch (prevents about:blank)
-    w.document.open();
-    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing report...</title></head><body><p>Preparing report... please wait.</p></body></html>');
-    w.document.close();
+    try {
+      w.document.open();
+      w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing report...</title></head><body><p>Preparing report... please wait.</p></body></html>');
+      w.document.close();
+    } catch (e) {}
 
     try {
-      // fetch tickets to include in report
       const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', s.sad_no).order('date', { ascending: false });
       if (error) {
         console.warn('Could not fetch tickets for PDF', error);
       }
 
       const declared = Number(s.declared_weight || 0);
-      const recorded = Number(s.total_recorded_weight || 0);
-
-      // use the imported logo path
-      const logoUrl = logo;
+      const discharged = Number(s.total_recorded_weight || 0);
 
       const html = `
       <!doctype html>
@@ -719,71 +690,66 @@ export default function SADDeclaration() {
           <meta charset="utf-8" />
           <title>SAD ${s.sad_no} Report</title>
           <style>
-            @page { size: A4; margin: 20mm; }
-            body { font-family: Arial, sans-serif; padding: 0; color: #111; width: 210mm; box-sizing: border-box; margin: 0 auto; }
-            .container { padding: 20px; }
-            header { display:flex; align-items:center; gap:12px; margin-bottom: 12px; }
-            header img { height:48px; }
+            @page { size: A4; margin: 12mm; }
+            html, body { width: 210mm; height: auto; margin: 0; padding: 0; -webkit-print-color-adjust: exact; }
+            body { font-family: Arial, sans-serif; padding: 12mm; color: #111; box-sizing: border-box; }
+            .header { display:flex; align-items:center; gap:12px; margin-bottom: 12px; }
+            .logo { height:48px; width:auto; }
             h1 { font-size: 18px; margin: 0; }
-            .company { font-size: 12px; color:#333; font-weight:600; }
-            .meta { margin-bottom: 12px; }
+            .meta { margin-top:8px; margin-bottom: 12px; }
             .meta p { margin: 4px 0; }
-            table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 12px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 12px; }
             th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
-            th { background: #f4f4f4; font-weight:600; }
-            .small { font-size: 11px; color: #555; }
+            th { background: #f4f4f4; }
+            .small { font-size: 12px; color: #555; }
             .badge { display:inline-block; padding:4px 8px; border-radius:4px; background:#eee; font-size:12px; margin-left:8px; }
           </style>
         </head>
         <body>
-          <div class="container">
-            <header>
-              <img src="${logoUrl}" alt="Company logo" />
-              <div>
-                <div class="company">NICK TC-SCAN (GAMBIA) LTD</div>
-                <div style="font-size:13px;color:#666;">SAD Report — ${s.sad_no}</div>
-              </div>
-            </header>
-
-            <h1>SAD ${s.sad_no} — Report</h1>
-            <div class="meta">
-              <p><strong>Regime:</strong> ${s.regime || '—'}</p>
-              <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
-              <p><strong>Recorded weight:</strong> ${recorded.toLocaleString()} kg ${s.dischargeCompleted ? '<span class="badge">Discharge Completed</span>' : ''}</p>
-              <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Updated: ${s.updated_at || '—'}</p>
-              <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
+          <div class="header">
+            <img class="logo" src="${logo}" alt="Company logo" />
+            <div>
+              <div style="font-weight:bold">NICK TC-SCAN (GAMBIA) LTD</div>
+              <div class="small">SAD Report — ${s.sad_no}</div>
             </div>
-
-            <h2>Tickets</h2>
-            ${tickets.length ? `
-              <table>
-                <thead><tr><th>Ticket</th><th>Truck</th><th style="text-align:right">Net (kg)</th><th>Date</th></tr></thead>
-                <tbody>
-                  ${tickets.map(t => `<tr>
-                    <td>${t.ticket_no || ''}</td>
-                    <td>${t.gnsw_truck_no || ''}</td>
-                    <td style="text-align:right">${Number(t.net ?? t.weight ?? 0).toLocaleString()}</td>
-                    <td>${t.date ? new Date(t.date).toLocaleString() : '—'}</td>
-                  </tr>`).join('')}
-                </tbody>
-              </table>
-            ` : '<p class="small">No tickets recorded.</p>'}
-            <script>
-              setTimeout(() => { window.print(); }, 300);
-            </script>
           </div>
+
+          <h1>SAD ${s.sad_no} — Report</h1>
+          <div class="meta">
+            <p><strong>Regime:</strong> ${s.regime || '—'}</p>
+            <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
+            <p><strong>Discharged (kg):</strong> ${discharged.toLocaleString()} kg</p>
+            <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Updated: ${s.updated_at || '—'}</p>
+            <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
+          </div>
+
+          <h2>Tickets</h2>
+          ${tickets.length ? `
+            <table>
+              <thead><tr><th>Ticket</th><th>Truck</th><th style="text-align:right">Net (kg)</th><th>Date</th></tr></thead>
+              <tbody>
+                ${tickets.map(t => `<tr>
+                  <td>${t.ticket_no || ''}</td>
+                  <td>${t.gnsw_truck_no || ''}</td>
+                  <td style="text-align:right">${Number(t.net ?? t.weight ?? 0).toLocaleString()}</td>
+                  <td>${t.date ? new Date(t.date).toLocaleString() : '—'}</td>
+                </tr>`).join('')}
+              </tbody>
+            </table>
+          ` : '<p class="small">No tickets recorded.</p>'}
+          <script>
+            setTimeout(() => { window.print(); }, 300);
+          </script>
         </body>
       </html>
       `;
 
-      // write final html to the already-opened window
       w.document.open();
       w.document.write(html);
       w.document.close();
     } catch (err) {
       console.error('generatePdfReport', err);
       try {
-        // show an error message in the report window if possible
         w.document.open();
         w.document.write('<!doctype html><html><body><p>Failed to generate report. See console for details.</p></body></html>');
         w.document.close();
@@ -792,20 +758,20 @@ export default function SADDeclaration() {
     }
   };
 
-  // REGIME aggregates
+  // REGIME level aggregates
   const regimeAggregates = useMemo(() => {
     const map = {};
     for (const s of sads) {
       const r = s.regime || 'Unknown';
-      if (!map[r]) map[r] = { count: 0, declared: 0, recorded: 0 };
+      if (!map[r]) map[r] = { count: 0, declared: 0, discharged: 0 };
       map[r].count += 1;
       map[r].declared += Number(s.declared_weight || 0);
-      map[r].recorded += Number(s.total_recorded_weight || 0);
+      map[r].discharged += Number(s.total_recorded_weight || 0);
     }
     return map;
   }, [sads]);
 
-  // Discrepancy / anomaly detection (informational)
+  // Discrepancy detection (we still compute but will not show Outlier)
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
       const d = Number(s.declared_weight || 0);
@@ -824,13 +790,12 @@ export default function SADDeclaration() {
       if (!d) continue;
       const ratio = r / d;
       const z = std > 0 ? (ratio - mean) / std : 0;
-      // flag if ratio deviates more than 2 std devs or ratio outside 0.8..1.2
       if (Math.abs(z) > 2 || ratio < 0.8 || ratio > 1.2) flagged.push({ sad: s, z, ratio });
     }
     return { mean, std, flagged };
   }, [sads]);
 
-  // Dashboard stats: Total Completed, Total In Progress, Total On Hold (per your request)
+  // Derived dashboard stats: Completed / In Progress / On Hold counts
   const dashboardStats = useMemo(() => {
     const totalCompleted = sads.filter(s => s.status === 'Completed').length;
     const totalInProgress = sads.filter(s => s.status === 'In Progress').length;
@@ -847,36 +812,31 @@ export default function SADDeclaration() {
     if (nlQuery) {
       const q = nlQuery.toLowerCase();
       arr = arr.filter(s => {
-        // SAD number
         if ((String(s.sad_no || '')).toLowerCase().includes(q)) return true;
-        // regime
         if ((String(s.regime || '')).toLowerCase().includes(q)) return true;
-        // docs: handle array or string safely
         const docsText = Array.isArray(s.docs) ? s.docs.map(d => (d && (d.name || d.path || d.url || '') )).join(' ') : String(s.docs || '');
         if (docsText.toLowerCase().includes(q)) return true;
         return false;
       });
     }
-    // sorting
     const dir = sortDir === 'asc' ? 1 : -1;
     arr.sort((a, b) => {
       if (sortBy === 'declared_weight') return (Number(a.declared_weight || 0) - Number(b.declared_weight || 0)) * dir;
-      if (sortBy === 'recorded') return (Number(a.total_recorded_weight || 0) - Number(b.total_recorded_weight || 0)) * dir;
+      if (sortBy === 'recorded' || sortBy === 'discharged') return (Number(a.total_recorded_weight || 0) - Number(b.total_recorded_weight || 0)) * dir;
       if (sortBy === 'discrepancy') {
         const da = Number(a.total_recorded_weight || 0) - Number(a.declared_weight || 0);
         const db = Number(b.total_recorded_weight || 0) - Number(b.declared_weight || 0);
         return (da - db) * dir;
       }
-      // default created_at
       const ta = new Date(a.created_at || a.updated_at || 0).getTime();
       const tb = new Date(b.created_at || b.updated_at || 0).getTime();
-      return (ta - tb) * -dir; // newest first by default
+      return (ta - tb) * -dir;
     });
     return arr;
   }, [sads, statusFilter, regimeFilter, nlQuery, sortBy, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSads.length / pageSize));
-  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]); // reset if needed
+  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]);
   const pagedSads = filteredSads.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
 
   // Export current filtered view
@@ -885,7 +845,7 @@ export default function SADDeclaration() {
       sad_no: s.sad_no,
       regime: s.regime,
       declared_weight: s.declared_weight,
-      total_recorded_weight: s.total_recorded_weight,
+      discharged: s.total_recorded_weight,
       status: s.status,
       created_at: s.created_at,
       updated_at: s.updated_at,
@@ -894,14 +854,14 @@ export default function SADDeclaration() {
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
   };
 
-  // Manual backup to storage (client-triggered). For weekly scheduling use a server job.
+  // Manual backup to storage (client-triggered)
   const handleManualBackupToStorage = async () => {
     try {
       const rows = sads.map(s => ({
         sad_no: s.sad_no,
         regime: s.regime,
         declared_weight: s.declared_weight,
-        total_recorded_weight: s.total_recorded_weight,
+        discharged: s.total_recorded_weight,
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
@@ -913,7 +873,6 @@ export default function SADDeclaration() {
 
       const filename = `backup/sad_declarations_backup_${new Date().toISOString().slice(0,10)}.csv`;
       const blob = new Blob([csv], { type: 'text/csv' });
-      // Supabase storage requires file, we need to upload via put - SDK accepts Blob in browser
       const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
       if (error) throw error;
       await pushActivity('Manual backup uploaded', { path: filename });
@@ -937,7 +896,6 @@ export default function SADDeclaration() {
     );
   };
 
-  // Framer motion row variants used in AnimatePresence
   const RowMotion = motion(Tr);
 
   // -----------------------
@@ -947,7 +905,7 @@ export default function SADDeclaration() {
     <Container maxW="8xl" py={6}>
       <Heading mb={4}>SAD Declaration Panel</Heading>
 
-      {/* Top cards: Total Completed, In Progress, On Hold */}
+      {/* Top cards: changed to Completed / In Progress / On Hold counts */}
       <StatGroup mb={4}>
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
           <StatLabel>Total SADs</StatLabel>
@@ -970,11 +928,11 @@ export default function SADDeclaration() {
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
           <StatLabel>Total On Hold</StatLabel>
           <StatNumber>{dashboardStats.totalOnHold}</StatNumber>
-          <StatHelpText>Manually placed on hold</StatHelpText>
+          <StatHelpText>Manual On Hold</StatHelpText>
         </Stat>
       </StatGroup>
 
-      {/* Create / controls - wrapped in a form to prevent enter reloading */}
+      {/* Create / controls */}
       <Box as="form" onSubmit={(e) => { e.preventDefault(); handleCreateSAD(); }} bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
@@ -1033,7 +991,7 @@ export default function SADDeclaration() {
           <Select size="sm" value={sortBy} onChange={(e) => setSortBy(e.target.value)} maxW="200px">
             <option value="created_at">Newest</option>
             <option value="declared_weight">Declared weight</option>
-            <option value="recorded">Recorded weight</option>
+            <option value="discharged">Discharged weight</option>
             <option value="discrepancy">Discrepancy</option>
           </Select>
 
@@ -1066,7 +1024,7 @@ export default function SADDeclaration() {
                 <Th>SAD</Th>
                 <Th>Regime</Th>
                 <Th isNumeric>Declared (kg)</Th>
-                <Th isNumeric>Recorded (kg)</Th>
+                <Th isNumeric>Discharged (kg)</Th>
                 <Th>Status</Th>
                 <Th>Discrepancy</Th>
                 <Th>Docs</Th>
@@ -1076,13 +1034,14 @@ export default function SADDeclaration() {
             <Tbody>
               <AnimatePresence>
                 {pagedSads.map((s) => {
-                  const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
-                  const statusColor = getStatusColor(s.status);
-                  const anomaly = anomalyResults.flagged.find(f => f.sad.sad_no === s.sad_no);
-
-                  // map statusColor to Chakra bg names for dot and text color
-                  const dotBg = statusColor;
-                  const textColor = statusColor === 'red' ? 'red.600' : (statusColor === 'green' ? 'green.600' : (statusColor === 'yellow' ? 'orange.600' : 'gray.600'));
+                  const discharged = Number(s.total_recorded_weight || 0);
+                  const declared = Number(s.declared_weight || 0);
+                  const discrepancyVal = discharged - declared;
+                  const manualIndicator = getIndicator(s.status);
+                  let discrepancyLabel = '';
+                  if (declared > discharged) discrepancyLabel = 'Overdeclared';
+                  else if (discharged > declared) discrepancyLabel = 'Underdeclared';
+                  else discrepancyLabel = '';
 
                   return (
                     <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
@@ -1105,18 +1064,16 @@ export default function SADDeclaration() {
                       <Td>
                         <VStack align="start" spacing={1}>
                           <HStack>
-                            <Box width="10px" height="10px" borderRadius="full" bg={dotBg} />
-                            <Text color={textColor}>{s.status}</Text>
-                            {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
-                            {/* Show informational badge if declared matched recorded but do NOT change status */}
-                            {s.dischargeCompleted && <Badge colorScheme="green">Declared met</Badge>}
+                            <Box width="10px" height="10px" borderRadius="full" bg={manualIndicator} />
+                            <Text>{s.status}</Text>
+                            {discrepancyLabel && <Badge colorScheme={discrepancyLabel === 'Overdeclared' ? 'yellow' : 'red'}>{discrepancyLabel}</Badge>}
                           </HStack>
                         </VStack>
                       </Td>
 
                       <Td>
-                        <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
-                          {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
+                        <Text color={discrepancyVal === 0 ? 'gray.600' : (discrepancyVal > 0 ? 'red.600' : 'orange.600')}>
+                          {discrepancyVal === 0 ? '0' : discrepancyVal.toLocaleString()}
                         </Text>
                       </Td>
 
@@ -1132,11 +1089,7 @@ export default function SADDeclaration() {
                               <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
                               <MenuDivider />
-                              <MenuItem icon={<FaTrashAlt />} onClick={() => {
-                                if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) {
-                                  archiveSad(s.sad_no);
-                                }
-                              }}>Archive SAD</MenuItem>
+                              <MenuItem icon={<FaTrashAlt />} onClick={() => openArchiveModal(s.sad_no)}>Archive SAD</MenuItem>
                             </MenuList>
                           </Menu>
                         </HStack>
@@ -1150,61 +1103,6 @@ export default function SADDeclaration() {
         )}
       </Box>
 
-      {/* Edit modal (replaces inline edit) */}
-      <Modal isOpen={editModalOpen} onClose={cancelEditModal} size="md" isCentered>
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Edit SAD {editModalSad?.sad_no}</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            <SimpleGrid columns={1} spacing={3}>
-              <FormControl>
-                <FormLabel>Regime</FormLabel>
-                <Select value={editModalData.regime ?? ''} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
-                  <option value="">Select regime</option>
-                  {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                </Select>
-              </FormControl>
-
-              <FormControl>
-                <FormLabel>Declared Weight (kg)</FormLabel>
-                <Input type="number" value={editModalData.declared_weight ?? ''} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: e.target.value }))} />
-              </FormControl>
-
-              <FormControl>
-                <FormLabel>Status</FormLabel>
-                <Select value={editModalData.status ?? 'In Progress'} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))}>
-                  {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
-                </Select>
-                <Text fontSize="xs" color="gray.500" mt={1}>Status is manual-only. It will not auto-change when weights meet.</Text>
-              </FormControl>
-            </SimpleGrid>
-          </ModalBody>
-
-          <ModalFooter>
-            <Button variant="ghost" mr={3} onClick={cancelEditModal} type="button">Cancel</Button>
-            <Button colorScheme="blue" onClick={() => setConfirmSaveOpen(true)} type="button">Save</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* Confirm Save modal */}
-      <Modal isOpen={confirmSaveOpen} onClose={() => setConfirmSaveOpen(false)} isCentered>
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Confirm Save</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            <Text>Are you sure you want to save changes to SAD {editModalSad?.sad_no}? This will update only the fields you edited (status only if selected).</Text>
-          </ModalBody>
-
-          <ModalFooter>
-            <Button variant="ghost" mr={3} onClick={() => setConfirmSaveOpen(false)} type="button">Cancel</Button>
-            <Button colorScheme="green" onClick={performSaveEdit} type="button">Confirm Save</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
       {/* SAD detail modal */}
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} size="xl" scrollBehavior="inside">
         <ModalOverlay />
@@ -1214,24 +1112,8 @@ export default function SADDeclaration() {
           <ModalBody>
             {selectedSad && (
               <>
-                {/* Banner when discharge completed (informational only) */}
-                {selectedSad.dischargeCompleted && (
-                  <Box mb={3} p={3} bg="green.50" borderRadius="md" border="1px solid" borderColor="green.100">
-                    <HStack justify="space-between">
-                      <Text fontSize="sm">
-                        Declared total met ({Number(selectedSad.total_recorded_weight || 0).toLocaleString()} / {Number(selectedSad.declared_weight || 0).toLocaleString()})
-                      </Text>
-                      <HStack>
-                        {selectedSad.status !== 'Completed' && <Button size="sm" onClick={() => updateSadStatus(selectedSad.sad_no, 'Completed')} type="button">Mark Completed</Button>}
-                        <Button size="sm" variant="outline" onClick={() => lockSADForNewTickets(selectedSad.sad_no)} type="button">Lock to new tickets</Button>
-                        <Button size="sm" onClick={() => generatePdfReport(selectedSad)} type="button">Print / Save PDF</Button>
-                      </HStack>
-                    </HStack>
-                  </Box>
-                )}
-
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                <Text mb={2}>Recorded weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
+                <Text mb={2}>Discharged (kg): <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
 
                 <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
@@ -1294,7 +1176,6 @@ export default function SADDeclaration() {
                             aria-label="Download"
                             icon={<FaDownload />}
                             onClick={() => {
-                              // open in new tab to allow user to download
                               if (d.url) window.open(d.url, '_blank');
                             }}
                           />
@@ -1335,6 +1216,74 @@ export default function SADDeclaration() {
           </ModalBody>
           <ModalFooter>
             <Button onClick={() => setDocViewer({ open: false, doc: null })} type="button">Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Edit Modal */}
+      <Modal isOpen={editModal.open} onClose={cancelEditModal} size="md" isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Edit SAD {editModal.sad?.sad_no}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <SimpleGrid columns={1} spacing={3}>
+              <FormControl>
+                <FormLabel>Regime</FormLabel>
+                <Select value={editModal.form.regime ?? ''} onChange={(e) => setEditModal(m => ({ ...m, form: { ...m.form, regime: e.target.value } }))}>
+                  <option value="">Select regime</option>
+                  {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </Select>
+              </FormControl>
+
+              <FormControl>
+                <FormLabel>Declared Weight (kg)</FormLabel>
+                <Input type="number" value={editModal.form.declared_weight ?? ''} onChange={(e) => setEditModal(m => ({ ...m, form: { ...m.form, declared_weight: e.target.value } }))} />
+              </FormControl>
+
+              <FormControl>
+                <FormLabel>Status</FormLabel>
+                <Select value={editModal.form.status ?? ''} onChange={(e) => setEditModal(m => ({ ...m, form: { ...m.form, status: e.target.value } }))}>
+                  {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
+                </Select>
+              </FormControl>
+            </SimpleGrid>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" mr={3} onClick={cancelEditModal}>Cancel</Button>
+            <Button colorScheme="teal" onClick={() => setConfirmSaveOpen(true)}>Save</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Confirm Save Modal */}
+      <Modal isOpen={confirmSaveOpen} onClose={() => setConfirmSaveOpen(false)} isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Confirm Save</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <Text>Are you sure you want to save changes to SAD {editModal.sad?.sad_no}? This will update the record in the database.</Text>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" mr={3} onClick={() => setConfirmSaveOpen(false)}>Cancel</Button>
+            <Button colorScheme="teal" onClick={saveEditConfirmed}>Confirm Save</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Archive Confirm Modal */}
+      <Modal isOpen={archiveModal.open} onClose={() => setArchiveModal({ open: false, sad_no: null })} isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Confirm Archive</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <Text>Are you sure you want to archive SAD {archiveModal.sad_no}? Archiving marks the SAD as Archived (soft delete).</Text>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" mr={3} onClick={() => setArchiveModal({ open: false, sad_no: null })}>Cancel</Button>
+            <Button colorScheme="red" onClick={confirmArchive}>Archive</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
