@@ -12,7 +12,9 @@ import {
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
+import logo from '../assets/logo.png'; // ensure this file exists
 
+const COMPANY_NAME = 'NICK TC-SCAN (GAMBIA) LTD';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
@@ -88,7 +90,7 @@ export default function SADDeclaration() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
-  // activity timeline (local)
+  // activity timeline (local + persisted)
   const [activity, setActivity] = useState([]);
 
   // realtime subscriptions refs
@@ -100,6 +102,30 @@ export default function SADDeclaration() {
 
   // pending refresh flag when fetchSADs call happens while editing - apply after editing if set
   const pendingRefreshRef = useRef(false);
+
+  // ---------------------
+  // load persisted activity from localStorage
+  // ---------------------
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('sad_activity');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setActivity(parsed);
+      }
+    } catch (e) {
+      // ignore parse errors
+    }
+  }, []);
+
+  // persist activity when it changes
+  useEffect(() => {
+    try {
+      localStorage.setItem('sad_activity', JSON.stringify(activity));
+    } catch (e) {
+      // ignore quota errors
+    }
+  }, [activity]);
 
   // ---------------------
   // fetchSADs (with correct recorded totals)
@@ -247,12 +273,11 @@ export default function SADDeclaration() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // helper: activity push (local-only to avoid 404s from non-existent table)
+  // helper: activity push (local-only)
   const pushActivity = (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
     setActivity(prev => [ev, ...prev].slice(0, 200));
-    // NOTE: removed remote insert to non-existent `sad_activity` table to avoid 404s.
-    // If you have a server-side table for activity, implement a backend endpoint or change this to write to that table.
+    // Remote writes removed — activity persisted to localStorage only.
   };
 
   // Open document in viewer modal
@@ -402,6 +427,9 @@ export default function SADDeclaration() {
       toast({ title: 'No SAD selected', status: 'warning' });
       return;
     }
+    const confirm = window.confirm('Save changes to this SAD?');
+    if (!confirm) return;
+
     const sad_no = editModalSad.sad_no;
     const before = (sadsRef.current || []).find(s => s.sad_no === sad_no) || {};
     const after = {
@@ -595,7 +623,6 @@ export default function SADDeclaration() {
       else if (/\bin progress\b/.test(q) || /\binprogress\b/.test(q)) filter.status = 'In Progress';
       else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
 
-      // if query contains a number, treat as SAD number
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
@@ -638,19 +665,19 @@ export default function SADDeclaration() {
   // IMPORTANT: open the popup synchronously to avoid blockers, then write content after fetching.
   const generatePdfReport = async (s) => {
     // open window synchronously on click to satisfy popup blocker rules
-    const w = window.open('', `_blank`);
+    const w = window.open('', '_blank');
     if (!w) {
       toast({ title: 'Blocked', description: 'Popup blocked — allow popups for this site to print PDF.', status: 'warning' });
       return;
     }
 
-    // show a small placeholder while we fetch (prevents about:blank)
+    // small placeholder while we fetch (prevents about:blank)
     try {
       w.document.open();
       w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing report...</title></head><body><p>Preparing report... please wait.</p></body></html>');
       w.document.close();
     } catch (e) {
-      // sometimes cross-origin policies might block writes; still proceed and attempt later
+      // ignore
     }
 
     try {
@@ -663,6 +690,7 @@ export default function SADDeclaration() {
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
 
+      // A4 sized report and include logo + company name
       const html = `
       <!doctype html>
       <html>
@@ -670,41 +698,60 @@ export default function SADDeclaration() {
           <meta charset="utf-8" />
           <title>SAD ${s.sad_no} Report</title>
           <style>
-            body { font-family: Arial, sans-serif; padding: 24px; color: #111; }
-            h1 { font-size: 20px; margin-bottom: 8px; }
-            .meta { margin-bottom: 16px; }
+            @page { size: A4; margin: 20mm; }
+            html, body { margin: 0; padding: 0; font-family: Arial, sans-serif; -webkit-print-color-adjust: exact; }
+            .page { width: 170mm; margin: 0 auto; padding: 8mm 12mm; color: #111; }
+            header { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #ddd; padding-bottom: 8px; margin-bottom: 12px; }
+            header img { height: 56px; object-fit: contain; }
+            header .company { font-size: 16px; font-weight: 700; }
+            h1 { font-size: 18px; margin: 12px 0; }
+            .meta { margin-bottom: 12px; }
             .meta p { margin: 4px 0; }
-            table { width: 100%; border-collapse: collapse; margin-top: 12px; }
-            th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
-            th { background: #f4f4f4; }
-            .small { font-size: 12px; color: #555; }
+            table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+            th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; font-size: 12px; }
+            th { background: #f4f4f4; font-weight: 600; }
+            .small { font-size: 11px; color: #555; }
             .badge { display:inline-block; padding:4px 8px; border-radius:4px; background:#eee; font-size:12px; margin-left:8px; }
+            footer { margin-top: 16px; font-size: 11px; color: #666; border-top: 1px solid #eee; padding-top: 8px; }
           </style>
         </head>
         <body>
-          <h1>SAD ${s.sad_no} — Report</h1>
-          <div class="meta">
-            <p><strong>Regime:</strong> ${s.regime || '—'}</p>
-            <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
-            <p><strong>Recorded weight:</strong> ${recorded.toLocaleString()} kg ${s.dischargeCompleted ? '<span class="badge">Discharge Completed</span>' : ''}</p>
-            <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Updated: ${s.updated_at || '—'}</p>
-            <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
+          <div class="page">
+            <header>
+              <img src="${logo}" alt="logo" />
+              <div>
+                <div class="company">${COMPANY_NAME}</div>
+                <div class="small">SAD Report — ${s.sad_no}</div>
+              </div>
+            </header>
+
+            <h1>SAD ${s.sad_no} — Report</h1>
+            <div class="meta">
+              <p><strong>Regime:</strong> ${s.regime || '—'}</p>
+              <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
+              <p><strong>Recorded weight:</strong> ${recorded.toLocaleString()} kg ${s.dischargeCompleted ? '<span class="badge">Discharge Completed</span>' : ''}</p>
+              <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Updated: ${s.updated_at || '—'}</p>
+              <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
+            </div>
+
+            <h2>Tickets</h2>
+            ${tickets.length ? `
+              <table>
+                <thead><tr><th>Ticket</th><th>Truck</th><th style="text-align:right">Net (kg)</th><th>Date</th></tr></thead>
+                <tbody>
+                  ${tickets.map(t => `<tr>
+                    <td>${t.ticket_no || ''}</td>
+                    <td>${t.gnsw_truck_no || ''}</td>
+                    <td style="text-align:right">${Number(t.net ?? t.weight ?? 0).toLocaleString()}</td>
+                    <td>${t.date ? new Date(t.date).toLocaleString() : '—'}</td>
+                  </tr>`).join('')}
+                </tbody>
+              </table>
+            ` : '<p class="small">No tickets recorded.</p>'}
+
+            <footer>Generated by ${COMPANY_NAME} — ${new Date().toLocaleString()}</footer>
           </div>
 
-          <h2>Tickets</h2>
-          ${tickets.length ? `
-            <table>
-              <thead><tr><th>Ticket</th><th>Truck</th><th style="text-align:right">Net (kg)</th><th>Date</th></tr></thead>
-              <tbody>
-                ${tickets.map(t => `<tr>
-                  <td>${t.ticket_no || ''}</td>
-                  <td>${t.gnsw_truck_no || ''}</td>
-                  <td style="text-align:right">${Number(t.net ?? t.weight ?? 0).toLocaleString()}</td>
-                  <td>${t.date ? new Date(t.date).toLocaleString() : '—'}</td>
-                </tr>`).join('')}
-              </tbody>
-            </table>
-          ` : '<p class="small">No tickets recorded.</p>'}
           <script>
             // auto print when opened (user can choose Save as PDF)
             setTimeout(() => { window.print(); }, 300);
@@ -713,13 +760,11 @@ export default function SADDeclaration() {
       </html>
       `;
 
-      // write final html to the already-opened window
       try {
         w.document.open();
         w.document.write(html);
         w.document.close();
       } catch (e) {
-        // If the write fails (very rare), simply alert and close popup gracefully
         console.error('Could not write PDF window', e);
         toast({ title: 'Report failed', description: 'Could not open report window content.', status: 'error' });
         try { w.close(); } catch (e2) {}
@@ -772,14 +817,15 @@ export default function SADDeclaration() {
     return { mean, std, flagged };
   }, [sads]);
 
-  // Derived dashboard stats
+  // Derived dashboard stats — UPDATED to show status counts
   const dashboardStats = useMemo(() => {
     const totalSADs = sads.length;
-    const totalDeclared = sads.reduce((a, b) => a + Number(b.declared_weight || 0), 0);
-    const totalRecorded = sads.reduce((a, b) => a + Number(b.total_recorded_weight || 0), 0);
-    const completed = sads.filter(s => s.status === 'Completed').length;
-    const activeDiscreps = anomalyResults.flagged.length;
-    return { totalSADs, totalDeclared, totalRecorded, completed, activeDiscreps };
+    const totalCompleted = sads.filter(s => s.status === 'Completed').length;
+    const totalInProgress = sads.filter(s => s.status === 'In Progress').length;
+    const totalOnHold = sads.filter(s => s.status === 'On Hold').length;
+    // keep 'completed' for percent calculation
+    const completed = totalCompleted;
+    return { totalSADs, totalCompleted, totalInProgress, totalOnHold, completed };
   }, [sads, anomalyResults]);
 
   // Pagination & filtering pipeline
@@ -894,21 +940,21 @@ export default function SADDeclaration() {
         </Stat>
 
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
-          <StatLabel>Declared (kg)</StatLabel>
-          <StatNumber>{dashboardStats.totalDeclared.toLocaleString()}</StatNumber>
-          <StatHelpText>Sum declared weight</StatHelpText>
+          <StatLabel>Total Completed</StatLabel>
+          <StatNumber>{dashboardStats.totalCompleted}</StatNumber>
+          <StatHelpText>All SADs marked Completed</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
-          <StatLabel>Recorded (kg)</StatLabel>
-          <StatNumber>{dashboardStats.totalRecorded.toLocaleString()}</StatNumber>
-          <StatHelpText>Sum recorded weight</StatHelpText>
+          <StatLabel>Total In Progress</StatLabel>
+          <StatNumber>{dashboardStats.totalInProgress}</StatNumber>
+          <StatHelpText>Currently in progress</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
-          <StatLabel>Active discrepancies</StatLabel>
-          <StatNumber>{dashboardStats.activeDiscreps}</StatNumber>
-          <StatHelpText>{((dashboardStats.activeDiscreps / Math.max(1, dashboardStats.totalSADs)) * 100).toFixed(1)}% of SADs</StatHelpText>
+          <StatLabel>Total On Hold</StatLabel>
+          <StatNumber>{dashboardStats.totalOnHold}</StatNumber>
+          <StatHelpText>Currently on hold</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
