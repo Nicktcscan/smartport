@@ -83,10 +83,9 @@ export default function SADDeclaration() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
-  // inline editing
-  const [editingSadId, setEditingSadId] = useState(null);
-  // keep editing values as raw strings to avoid cursor-jump/focus loss
-  const [editData, setEditData] = useState({});
+  // edit modal instead of inline editing
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editModalData, setEditModalData] = useState({});
 
   // activity timeline (local)
   const [activity, setActivity] = useState([]);
@@ -95,13 +94,27 @@ export default function SADDeclaration() {
   const subRef = useRef(null);
   const ticketsSubRef = useRef(null);
 
+  // voice
+  const recognitionRef = useRef(null);
+  const [listening, setListening] = useState(false);
+
   // track previously announced "discharge completed" SADs so we only toast once per session
   const prevDischargeRef = useRef(new Set());
+
+  // pending refresh flag when fetchSADs call happens while editing - apply after editing if set
+  const pendingRefreshRef = useRef(false);
 
   // ---------------------
   // fetchSADs (with correct recorded totals)
   // ---------------------
   const fetchSADs = async (filter = null) => {
+    // If user is actively editing in modal, avoid applying a refresh to prevent focus loss.
+    if (editModalOpen) {
+      // mark that a refresh is pending and return early
+      pendingRefreshRef.current = true;
+      return;
+    }
+
     setLoading(true);
     try {
       // first fetch SAD declarations
@@ -313,7 +326,8 @@ export default function SADDeclaration() {
   };
 
   // create SAD record
-  const handleCreateSAD = async () => {
+  const handleCreateSAD = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
     if (!sadNo || !declaredWeight) {
       toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
       return;
@@ -371,35 +385,45 @@ export default function SADDeclaration() {
     }
   };
 
-  // update SAD status or other fields (inline edit -> persist)
-  const startEdit = (sad) => {
-    setEditingSadId(sad.sad_no);
-    setEditData({
+  // open edit modal for a SAD
+  const openEditModal = (sad) => {
+    setEditModalData({
+      sad_no: sad.sad_no,
       regime: sad.regime ?? '',
-      declared_weight: String(sad.declared_weight ?? ''), // keep as string while editing
+      declared_weight: String(sad.declared_weight ?? ''),
       status: sad.status ?? 'In Progress',
     });
+    // clear any pending refresh mark (we are intentionally editing)
+    pendingRefreshRef.current = false;
+    setEditModalOpen(true);
   };
 
-  const cancelEdit = () => {
-    setEditingSadId(null);
-    setEditData({});
+  // close edit modal (apply pending refresh if queued)
+  const closeEditModal = () => {
+    setEditModalOpen(false);
+    setEditModalData({});
+    if (pendingRefreshRef.current) {
+      pendingRefreshRef.current = false;
+      fetchSADs();
+    }
   };
 
-  const saveEdit = async (sad_no) => {
+  // save edit from modal
+  const saveEditModal = async () => {
+    const sad_no = editModalData.sad_no;
+    if (!sad_no) return;
     const before = (sadsRef.current || []).find(s => s.sad_no === sad_no) || {};
     const after = {
       ...before,
-      regime: editData.regime ?? before.regime,
-      declared_weight: Number(editData.declared_weight ?? before.declared_weight ?? 0),
-      status: editData.status ?? before.status,
+      regime: editModalData.regime ?? before.regime,
+      declared_weight: Number(editModalData.declared_weight ?? before.declared_weight ?? 0),
+      status: editModalData.status ?? before.status,
       updated_at: new Date().toISOString()
     };
 
     // optimistic UI
     setSads(prev => prev.map(s => s.sad_no === sad_no ? { ...s, ...after } : s));
-    setEditingSadId(null);
-    setEditData({});
+    setEditModalOpen(false);
 
     try {
       const payload = {
@@ -428,10 +452,15 @@ export default function SADDeclaration() {
       toast({ title: 'Saved', description: `SAD ${sad_no} updated`, status: 'success' });
       fetchSADs();
     } catch (err) {
-      console.error('saveEdit', err);
+      console.error('saveEditModal', err);
       toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
       // roll back UI
       fetchSADs();
+    } finally {
+      if (pendingRefreshRef.current) {
+        pendingRefreshRef.current = false;
+        fetchSADs();
+      }
     }
   };
 
@@ -518,8 +547,6 @@ export default function SADDeclaration() {
   };
 
   // try to set a DB flag to prevent new tickets (best-effort)
-  // NOTE: this requires a column such as `closed_to_tickets boolean` in the sad_declarations table.
-  // If the column doesn't exist the update will fail and we'll show a helpful toast instructing the admin to add server-side enforcement.
   const lockSADForNewTickets = async (sad_no) => {
     try {
       const { error } = await supabase.from('sad_declarations').update({ closed_to_tickets: true, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
@@ -565,7 +592,10 @@ export default function SADDeclaration() {
 
   // NL search
   const runNlQuery = async () => {
-    if (!nlQuery) return fetchSADs();
+    if (!nlQuery) {
+      fetchSADs();
+      return;
+    }
     setNlLoading(true);
     try {
       const q = nlQuery.toLowerCase();
@@ -615,7 +645,25 @@ export default function SADDeclaration() {
   };
 
   // Generate printable report (user prints -> Save as PDF)
+  // IMPORTANT: open the popup synchronously to avoid blockers, then write content after fetching.
   const generatePdfReport = async (s) => {
+    // open window synchronously on click to satisfy popup blocker rules
+    const w = window.open('', '_blank', 'noopener,noreferrer');
+    if (!w) {
+      toast({ title: 'Blocked', description: 'Popup blocked — allow popups for this site to print PDF.', status: 'warning' });
+      return;
+    }
+
+    // show a small placeholder while we fetch (prevents about:blank)
+    try {
+      w.document.open();
+      w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing report...</title></head><body><p>Preparing report... please wait.</p></body></html>');
+      w.document.close();
+    } catch (err) {
+      // in restrictive browsers writing to new window may fail
+      console.warn('Could not write placeholder to popup', err);
+    }
+
     try {
       // fetch tickets to include in report
       const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', s.sad_no).order('date', { ascending: false });
@@ -657,7 +705,7 @@ export default function SADDeclaration() {
           <h2>Tickets</h2>
           ${tickets.length ? `
             <table>
-              <thead><tr><th>Ticket</th><th>Truck</th><th>Net (kg)</th><th>Date</th></tr></thead>
+              <thead><tr><th>Ticket</th><th>Truck</th><th style="text-align:right">Net (kg)</th><th>Date</th></tr></thead>
               <tbody>
                 ${tickets.map(t => `<tr>
                   <td>${t.ticket_no || ''}</td>
@@ -676,16 +724,22 @@ export default function SADDeclaration() {
       </html>
       `;
 
-      const w = window.open('', '_blank', 'noopener,noreferrer');
-      if (!w) {
-        toast({ title: 'Blocked', description: 'Popup blocked — allow popups for this site to print PDF.', status: 'warning' });
-        return;
+      // write final html to the already-opened window
+      try {
+        w.document.open();
+        w.document.write(html);
+        w.document.close();
+      } catch (err) {
+        console.warn('Could not write final report to popup', err);
       }
-      w.document.open();
-      w.document.write(html);
-      w.document.close();
     } catch (err) {
       console.error('generatePdfReport', err);
+      try {
+        // show an error message in the report window if possible
+        w.document.open();
+        w.document.write('<!doctype html><html><body><p>Failed to generate report. See console for details.</p></body></html>');
+        w.document.close();
+      } catch (e) {}
       toast({ title: 'Report failed', description: err?.message || 'Could not generate report', status: 'error' });
     }
   };
@@ -829,7 +883,7 @@ export default function SADDeclaration() {
     if (!count) return <Text color="gray.500">—</Text>;
     return (
       <HStack>
-        <Button size="xs" onClick={() => openDocsModal(s)}>
+        <Button size="xs" type="button" onClick={() => openDocsModal(s)}>
           View docs ({count})
         </Button>
       </HStack>
@@ -879,8 +933,8 @@ export default function SADDeclaration() {
         </Stat>
       </StatGroup>
 
-      {/* Create / controls */}
-      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+      {/* Create / controls - wrapped in a form to prevent enter from submitting/reloading */}
+      <Box as="form" onSubmit={(e) => { e.preventDefault(); handleCreateSAD(); }} bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
           <FormControl>
@@ -908,12 +962,12 @@ export default function SADDeclaration() {
         </SimpleGrid>
 
         <HStack mt={3}>
-          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading}>Register SAD</Button>
-          <Button onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
+          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button">Register SAD</Button>
+          <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
 
           <Box ml="auto" display="flex" gap={2}>
-            <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV}>Export filtered CSV</Button>
-            <Button size="sm" variant="ghost" onClick={handleManualBackupToStorage}>Backup to storage</Button>
+            <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV} type="button">Export filtered CSV</Button>
+            <Button size="sm" variant="ghost" onClick={handleManualBackupToStorage} type="button">Backup to storage</Button>
           </Box>
         </HStack>
       </Box>
@@ -922,7 +976,8 @@ export default function SADDeclaration() {
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Flex gap={3} align="center" wrap="wrap">
           <Input placeholder="Search (SAD, Regime, docs...)" value={nlQuery} onChange={(e) => setNlQuery(e.target.value)} maxW="360px" />
-          <Button size="sm" onClick={runNlQuery} isLoading={nlLoading}>Search</Button>
+          <Button size="sm" onClick={runNlQuery} isLoading={nlLoading} type="button">Search</Button>
+          <Button size="sm" variant="ghost" onClick={() => { setNlQuery(''); fetchSADs(); }} type="button">Reset</Button>
 
           <Select placeholder="Filter by status" size="sm" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} maxW="160px">
             <option value="">All</option>
@@ -991,36 +1046,11 @@ export default function SADDeclaration() {
                       </Td>
 
                       <Td>
-                        {editingSadId === s.sad_no ? (
-                          <Select size="sm" value={editData.regime ?? ''} onChange={(e) => setEditData(d => ({ ...d, regime: e.target.value }))}>
-                            <option value="">Select regime</option>
-                            {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                          </Select>
-                        ) : (
-                          <Text>{s.regime || '—'}</Text>
-                        )}
+                        <Text>{s.regime || '—'}</Text>
                       </Td>
 
                       <Td isNumeric>
-                        {editingSadId === s.sad_no ? (
-                          // keep input value as string to avoid cursor jump
-                          <Input
-                            size="sm"
-                            type="number"
-                            value={editData.declared_weight ?? ''}
-                            onChange={(e) => setEditData(d => ({ ...d, declared_weight: e.target.value }))}
-                            onKeyDown={(e) => {
-                              // prevent Enter from triggering any unintended form submit/refresh
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                // optionally commit save on Enter by uncommenting below
-                                // saveEdit(s.sad_no);
-                              }
-                            }}
-                          />
-                        ) : (
-                          <Text>{Number(s.declared_weight || 0).toLocaleString()}</Text>
-                        )}
+                        <Text>{Number(s.declared_weight || 0).toLocaleString()}</Text>
                       </Td>
 
                       <Td isNumeric>
@@ -1028,29 +1058,21 @@ export default function SADDeclaration() {
                       </Td>
 
                       <Td>
-                        {editingSadId === s.sad_no ? (
-                          <Select size="sm" value={editData.status ?? s.status} onChange={(e) => setEditData(d => ({ ...d, status: e.target.value }))}>
-                            {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
-                          </Select>
-                        ) : (
-                          <VStack align="start" spacing={1}>
-                            <HStack>
-                              <Box width="10px" height="10px" borderRadius="full" bg={indicator} />
-                              <Text>{s.status}</Text>
-                              {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
-                              {/* If discharge completed but status not Completed, show a gentle badge */}
-                              {s.dischargeCompleted && s.status !== 'Completed' && <Badge colorScheme="green">Discharge Completed</Badge>}
+                        <VStack align="start" spacing={1}>
+                          <HStack>
+                            <Box width="10px" height="10px" borderRadius="full" bg={indicator} />
+                            <Text>{s.status}</Text>
+                            {anomaly && <Badge colorScheme="red">Anomaly</Badge>}
+                            {s.dischargeCompleted && s.status !== 'Completed' && <Badge colorScheme="green">Discharge Completed</Badge>}
+                          </HStack>
+                          {s.dischargeCompleted && s.status !== 'Completed' && (
+                            <HStack spacing={2}>
+                              <Text fontSize="xs" color="gray.600">Declared met — please mark as Completed</Text>
+                              <Button size="xs" type="button" onClick={() => updateSadStatus(s.sad_no, 'Completed')}>Mark Completed</Button>
+                              <Button size="xs" type="button" variant="outline" onClick={() => lockSADForNewTickets(s.sad_no)}>Lock to new tickets</Button>
                             </HStack>
-                            {/* Suggestion row: only visible when discharge met but status not completed */}
-                            {s.dischargeCompleted && s.status !== 'Completed' && (
-                              <HStack spacing={2}>
-                                <Text fontSize="xs" color="gray.600">Declared met — please mark as Completed</Text>
-                                <Button size="xs" onClick={() => updateSadStatus(s.sad_no, 'Completed')}>Mark Completed</Button>
-                                <Button size="xs" variant="outline" onClick={() => lockSADForNewTickets(s.sad_no)}>Lock to new tickets</Button>
-                              </HStack>
-                            )}
-                          </VStack>
-                        )}
+                          )}
+                        </VStack>
                       </Td>
 
                       <Td>
@@ -1063,28 +1085,21 @@ export default function SADDeclaration() {
 
                       <Td>
                         <HStack>
-                          {editingSadId === s.sad_no ? (
-                            <>
-                              <Button size="xs" colorScheme="green" onClick={() => saveEdit(s.sad_no)}>Save</Button>
-                              <Button size="xs" onClick={cancelEdit}>Cancel</Button>
-                            </>
-                          ) : (
-                            <Menu>
-                              <MenuButton as={IconButton} aria-label="Actions" icon={<FaEllipsisV />} size="sm" />
-                              <MenuList>
-                                <MenuItem icon={<FaEdit />} onClick={() => startEdit(s)}>Edit</MenuItem>
-                                <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
-                                <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
-                                <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
-                                <MenuDivider />
-                                <MenuItem icon={<FaTrashAlt />} onClick={() => {
-                                  if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) {
-                                    archiveSad(s.sad_no);
-                                  }
-                                }}>Archive SAD</MenuItem>
-                              </MenuList>
-                            </Menu>
-                          )}
+                          <Menu>
+                            <MenuButton as={IconButton} aria-label="Actions" icon={<FaEllipsisV />} size="sm" />
+                            <MenuList>
+                              <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>
+                              <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
+                              <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
+                              <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
+                              <MenuDivider />
+                              <MenuItem icon={<FaTrashAlt />} onClick={() => {
+                                if (window.confirm(`Archive SAD ${s.sad_no}? This marks it as Archived.`)) {
+                                  archiveSad(s.sad_no);
+                                }
+                              }}>Archive SAD</MenuItem>
+                            </MenuList>
+                          </Menu>
                         </HStack>
                       </Td>
                     </RowMotion>
@@ -1113,9 +1128,9 @@ export default function SADDeclaration() {
                         Discharge Completed — declared total met ({Number(selectedSad.total_recorded_weight || 0).toLocaleString()} / {Number(selectedSad.declared_weight || 0).toLocaleString()})
                       </Text>
                       <HStack>
-                        {selectedSad.status !== 'Completed' && <Button size="sm" onClick={() => updateSadStatus(selectedSad.sad_no, 'Completed')}>Mark Completed</Button>}
-                        <Button size="sm" variant="outline" onClick={() => lockSADForNewTickets(selectedSad.sad_no)}>Lock to new tickets</Button>
-                        <Button size="sm" onClick={() => generatePdfReport(selectedSad)}>Print / Save PDF</Button>
+                        {selectedSad.status !== 'Completed' && <Button size="sm" onClick={() => updateSadStatus(selectedSad.sad_no, 'Completed')} type="button">Mark Completed</Button>}
+                        <Button size="sm" variant="outline" onClick={() => lockSADForNewTickets(selectedSad.sad_no)} type="button">Lock to new tickets</Button>
+                        <Button size="sm" onClick={() => generatePdfReport(selectedSad)} type="button">Print / Save PDF</Button>
                       </HStack>
                     </HStack>
                   </Box>
@@ -1147,7 +1162,48 @@ export default function SADDeclaration() {
             )}
           </ModalBody>
           <ModalFooter>
-            <Button onClick={() => setIsModalOpen(false)}>Close</Button>
+            <Button onClick={() => setIsModalOpen(false)} type="button">Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Edit modal (replaces inline editing) */}
+      <Modal isOpen={editModalOpen} onClose={closeEditModal} size="md" isCentered>
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Edit SAD {editModalData?.sad_no}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <SimpleGrid columns={1} spacing={3}>
+              <FormControl>
+                <FormLabel>SAD Number</FormLabel>
+                <Input value={editModalData.sad_no || ''} isReadOnly />
+              </FormControl>
+
+              <FormControl>
+                <FormLabel>Regime</FormLabel>
+                <Select value={editModalData.regime ?? ''} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
+                  <option value="">Select regime</option>
+                  {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </Select>
+              </FormControl>
+
+              <FormControl>
+                <FormLabel>Declared weight (kg)</FormLabel>
+                <Input type="number" value={editModalData.declared_weight ?? ''} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: e.target.value }))} />
+              </FormControl>
+
+              <FormControl>
+                <FormLabel>Status</FormLabel>
+                <Select value={editModalData.status ?? 'In Progress'} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))}>
+                  {SAD_STATUS.map(s => <option key={s} value={s}>{s}</option>)}
+                </Select>
+              </FormControl>
+            </SimpleGrid>
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={saveEditModal} colorScheme="green" mr={3} type="button">Save</Button>
+            <Button onClick={closeEditModal} type="button">Cancel</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1179,7 +1235,7 @@ export default function SADDeclaration() {
                       </Td>
                       <Td>
                         <HStack>
-                          <Button size="xs" onClick={() => openDocViewer(d)}>View</Button>
+                          <Button size="xs" onClick={() => openDocViewer(d)} type="button">View</Button>
                           <IconButton
                             size="xs"
                             aria-label="Download"
@@ -1198,7 +1254,7 @@ export default function SADDeclaration() {
             )}
           </ModalBody>
           <ModalFooter>
-            <Button onClick={() => setDocsModal({ open: false, docs: [], sad_no: null })}>Close</Button>
+            <Button onClick={() => setDocsModal({ open: false, docs: [], sad_no: null })} type="button">Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
@@ -1225,7 +1281,7 @@ export default function SADDeclaration() {
             ) : <Text>No doc</Text>}
           </ModalBody>
           <ModalFooter>
-            <Button onClick={() => setDocViewer({ open: false, doc: null })}>Close</Button>
+            <Button onClick={() => setDocViewer({ open: false, doc: null })} type="button">Close</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
