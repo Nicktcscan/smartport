@@ -12,10 +12,8 @@ import {
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
-import logo from '../assets/logo.png'; // make sure this path is correct and file exists
+import logo from '../assets/logo.png'; // ensure this exists
 
-// IMPORTANT: Status will NOT be auto-changed when declared weight is met.
-// Status changes must be performed manually via the Edit modal and Save.
 const COMPANY_NAME = 'NICK TC-SCAN (GAMBIA) LTD';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
@@ -190,7 +188,7 @@ export default function SADDeclaration() {
         }
       }
 
-      // compute dischargeCompleted flag and set to state (DO NOT change status)
+      // compute dischargeCompleted flag and set to state (note: we DO NOT change status automatically)
       const enhanced = normalized.map((s) => {
         const declared = Number(s.declared_weight || 0);
         const recorded = Number(s.total_recorded_weight || 0);
@@ -198,7 +196,7 @@ export default function SADDeclaration() {
         return { ...s, total_recorded_weight: recorded, dischargeCompleted };
       });
 
-      // detect newly completed (toast once per SAD per session) — only notify, DO NOT change status
+      // detect newly completed (toast once per SAD per session) — still only notification, no DB change
       const newlyCompleted = enhanced.filter((s) => s.dischargeCompleted && !prevDischargeRef.current.has(s.sad_no));
       for (const s of newlyCompleted) {
         prevDischargeRef.current.add(s.sad_no);
@@ -275,11 +273,10 @@ export default function SADDeclaration() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // helper: activity push (local-only)
+  // helper: activity push (local-only, persisted to localStorage)
   const pushActivity = (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
     setActivity(prev => [ev, ...prev].slice(0, 200));
-    // Previously we attempted to persist activity to the DB; now we persist only to localStorage.
   };
 
   // Open document in viewer modal
@@ -399,13 +396,24 @@ export default function SADDeclaration() {
     }
   };
 
-  // Open edit modal
+  // Open edit modal (normal use)
   const startEdit = (sad) => {
     setEditModalSad(sad);
     setEditForm({
       regime: sad.regime ?? '',
       declared_weight: String(sad.declared_weight ?? ''),
       status: sad.status ?? 'In Progress',
+    });
+    setEditModalOpen(true);
+  };
+
+  // Open edit modal with a preselected status (still requires Save to persist)
+  const openEditWithStatus = (sad, status) => {
+    setEditModalSad(sad);
+    setEditForm({
+      regime: sad.regime ?? '',
+      declared_weight: String(sad.declared_weight ?? ''),
+      status: status ?? sad.status ?? 'In Progress',
     });
     setEditModalOpen(true);
   };
@@ -423,7 +431,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // Save edit from modal (explicit confirmation)
+  // Save edit from modal (with confirmation)
   const saveEdit = async () => {
     if (!editModalSad) {
       toast({ title: 'No SAD selected', status: 'warning' });
@@ -456,7 +464,7 @@ export default function SADDeclaration() {
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
       if (error) throw error;
 
-      // optionally log to change logs table if present
+      // attempt to write change log (optional)
       try {
         await supabase.from('sad_change_logs').insert([{
           sad_no,
@@ -485,7 +493,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // update SAD status (manual quick select)
+  // updateSadStatus left available for admin actions but NOT called automatically anywhere.
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
@@ -510,19 +518,16 @@ export default function SADDeclaration() {
       pushActivity(`Recalculated total for ${sad_no}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
-
-      // Suggestion only — DO NOT automatically change status.
       const row = (await supabase.from('sad_declarations').select('declared_weight').eq('sad_no', sad_no)).data?.[0];
       if (row) {
         const declared = Number(row.declared_weight || 0);
         const diff = Math.abs(declared - total);
         if (declared > 0 && (diff / declared) < 0.01) {
-          // only suggest, do not update the status automatically
           toast({
             title: 'Discharge Completed (suggestion)',
-            description: `SAD ${sad_no} has met its declared weight — consider marking status as Completed.`,
+            description: `SAD ${sad_no} has met its declared weight — open Edit and save to mark as Completed.`,
             status: 'info',
-            duration: 6000,
+            duration: 7000,
             isClosable: true,
           });
         }
@@ -1102,8 +1107,8 @@ export default function SADDeclaration() {
                           </HStack>
                           {s.dischargeCompleted && s.status !== 'Completed' && (
                             <HStack spacing={2}>
-                              <Text fontSize="xs" color="gray.600">Declared met — please mark as Completed</Text>
-                              <Button size="xs" type="button" onClick={() => updateSadStatus(s.sad_no, 'Completed')}>Mark Completed</Button>
+                              <Text fontSize="xs" color="gray.600">Declared met — open Edit to mark as Completed</Text>
+                              <Button size="xs" type="button" onClick={() => openEditWithStatus(s, 'Completed')}>Open Edit</Button>
                               <Button size="xs" type="button" variant="outline" onClick={() => lockSADForNewTickets(s.sad_no)}>Lock to new tickets</Button>
                             </HStack>
                           )}
@@ -1162,7 +1167,8 @@ export default function SADDeclaration() {
                         Discharge Completed — declared total met ({Number(selectedSad.total_recorded_weight || 0).toLocaleString()} / {Number(selectedSad.declared_weight || 0).toLocaleString()})
                       </Text>
                       <HStack>
-                        {selectedSad.status !== 'Completed' && <Button size="sm" onClick={() => updateSadStatus(selectedSad.sad_no, 'Completed')} type="button">Mark Completed</Button>}
+                        {/* Open edit modal instead of auto-changing status */}
+                        {selectedSad.status !== 'Completed' && <Button size="sm" onClick={() => openEditWithStatus(selectedSad, 'Completed')} type="button">Open Edit</Button>}
                         <Button size="sm" variant="outline" onClick={() => lockSADForNewTickets(selectedSad.sad_no)} type="button">Lock to new tickets</Button>
                         <Button size="sm" onClick={() => generatePdfReport(selectedSad)} type="button">Print / Save PDF</Button>
                       </HStack>
