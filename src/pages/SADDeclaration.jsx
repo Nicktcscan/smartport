@@ -12,8 +12,10 @@ import {
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
-import logo from '../assets/logo.png'; // ensure this file exists
+import logo from '../assets/logo.png'; // make sure this path is correct and file exists
 
+// IMPORTANT: Status will NOT be auto-changed when declared weight is met.
+// Status changes must be performed manually via the Edit modal and Save.
 const COMPANY_NAME = 'NICK TC-SCAN (GAMBIA) LTD';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
@@ -188,7 +190,7 @@ export default function SADDeclaration() {
         }
       }
 
-      // compute dischargeCompleted flag and set to state
+      // compute dischargeCompleted flag and set to state (DO NOT change status)
       const enhanced = normalized.map((s) => {
         const declared = Number(s.declared_weight || 0);
         const recorded = Number(s.total_recorded_weight || 0);
@@ -196,7 +198,7 @@ export default function SADDeclaration() {
         return { ...s, total_recorded_weight: recorded, dischargeCompleted };
       });
 
-      // detect newly completed (toast once per SAD per session)
+      // detect newly completed (toast once per SAD per session) — only notify, DO NOT change status
       const newlyCompleted = enhanced.filter((s) => s.dischargeCompleted && !prevDischargeRef.current.has(s.sad_no));
       for (const s of newlyCompleted) {
         prevDischargeRef.current.add(s.sad_no);
@@ -277,7 +279,7 @@ export default function SADDeclaration() {
   const pushActivity = (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
     setActivity(prev => [ev, ...prev].slice(0, 200));
-    // Remote writes removed — activity persisted to localStorage only.
+    // Previously we attempted to persist activity to the DB; now we persist only to localStorage.
   };
 
   // Open document in viewer modal
@@ -421,7 +423,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // Save edit from modal
+  // Save edit from modal (explicit confirmation)
   const saveEdit = async () => {
     if (!editModalSad) {
       toast({ title: 'No SAD selected', status: 'warning' });
@@ -454,7 +456,7 @@ export default function SADDeclaration() {
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
       if (error) throw error;
 
-      // log to change logs table if desired (fail silently)
+      // optionally log to change logs table if present
       try {
         await supabase.from('sad_change_logs').insert([{
           sad_no,
@@ -508,11 +510,14 @@ export default function SADDeclaration() {
       pushActivity(`Recalculated total for ${sad_no}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
+
+      // Suggestion only — DO NOT automatically change status.
       const row = (await supabase.from('sad_declarations').select('declared_weight').eq('sad_no', sad_no)).data?.[0];
       if (row) {
         const declared = Number(row.declared_weight || 0);
         const diff = Math.abs(declared - total);
         if (declared > 0 && (diff / declared) < 0.01) {
+          // only suggest, do not update the status automatically
           toast({
             title: 'Discharge Completed (suggestion)',
             description: `SAD ${sad_no} has met its declared weight — consider marking status as Completed.`,
@@ -823,7 +828,6 @@ export default function SADDeclaration() {
     const totalCompleted = sads.filter(s => s.status === 'Completed').length;
     const totalInProgress = sads.filter(s => s.status === 'In Progress').length;
     const totalOnHold = sads.filter(s => s.status === 'On Hold').length;
-    // keep 'completed' for percent calculation
     const completed = totalCompleted;
     return { totalSADs, totalCompleted, totalInProgress, totalOnHold, completed };
   }, [sads, anomalyResults]);
