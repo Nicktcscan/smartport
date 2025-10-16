@@ -880,7 +880,7 @@ export default function SADDeclaration() {
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Pending</StatLabel>
           <StatNumber>{dashboardStats.pending}</StatNumber>
-          <StatHelpText>Number of pending (In Progress) SADs</StatHelpText>
+          <StatHelpText>Number of In-Progress SADs</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
