@@ -18,7 +18,8 @@ import logoUrl from '../assets/logo.png';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
-const REGIME_OPTIONS = ['Import', 'Export'];
+// lowercase regime options to match your DB regime_check; UI displays the same values
+const REGIME_OPTIONS = ['import', 'export', 'warehousing'];
 
 // helpers to format/parse numbers with thousand separators
 const formatNumber = (v) => {
@@ -31,9 +32,7 @@ const formatNumber = (v) => {
 const parseNumberString = (s) => {
   if (s === null || s === undefined) return '';
   const cleaned = String(s).replace(/[^\d.-]/g, '');
-  // prevent leading zeros issues but keep as string
   if (cleaned === '') return '';
-  // keep as plain numeric-string (no commas)
   return cleaned;
 };
 
@@ -147,6 +146,7 @@ export default function SADDeclaration() {
         docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
         total_recorded_weight: Number(r.total_recorded_weight ?? 0),
         ticket_count: 0,
+        manual_update: r.manual_update ?? false,
       }));
 
       // fetch tickets totals & counts to show accurate discharged weights and transaction counts
@@ -347,6 +347,7 @@ export default function SADDeclaration() {
         declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
         status: 'In Progress', // default status
+        manual_update: false, // new SADs are not manual updates
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -427,12 +428,17 @@ export default function SADDeclaration() {
     closeEditModal();
 
     try {
+      // Determine whether this should be considered a manual update:
+      // mark manual_update true if status changed or if user explicitly edited values (we consider any explicit save as manual).
+      const isStatusChanged = String(before.status || '') !== String(after.status || '');
       const payload = {
         regime: after.regime ?? null,
         declared_weight: Number(after.declared_weight ?? 0),
         status: after.status ?? null,
         updated_at: new Date().toISOString(),
+        manual_update: true, // treat explicit edit/save as manual action
       };
+
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
       if (error) throw error;
 
@@ -462,7 +468,12 @@ export default function SADDeclaration() {
   // update SAD status (manual quick select) - kept for quick actions in UI
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
-      const { error } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
+      const payload = {
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+        manual_update: true, // ensure DB knows this is a user-initiated change
+      };
+      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
       if (error) throw error;
       toast({ title: 'Status updated', description: `${sad_no} status set to ${newStatus}`, status: 'success' });
       await pushActivity(`Status of ${sad_no} set to ${newStatus}`);
@@ -486,7 +497,7 @@ export default function SADDeclaration() {
     if (!target) return;
     try {
       setLoading(true);
-      await updateSadStatus(target, 'Completed');
+      await updateSadStatus(target, 'Completed'); // updateSadStatus sets manual_update: true
     } catch (e) {
       // errors handled in updateSadStatus
     } finally {
