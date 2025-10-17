@@ -9,7 +9,7 @@ import {
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter
 } from '@chakra-ui/react';
 import {
-  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf
+  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck
 } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -20,15 +20,21 @@ const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 const REGIME_OPTIONS = ['Import', 'Export'];
 
-/** Utility: strip non-digits (we assume integer weights) */
-const digitsOnly = (s) => String(s ?? '').replace(/[^\d]/g, '');
-
-/** Utility: format digits with thousands separators */
-const formatWithCommas = (digits) => {
-  if (!digits && digits !== 0) return '';
-  const n = Number(digits || 0);
-  if (!Number.isFinite(n)) return '';
+// helpers to format/parse numbers with thousand separators
+const formatNumber = (v) => {
+  if (v === null || v === undefined || v === '') return '';
+  // if it's already a string formatted with commas, allow Number conversion
+  const n = Number(String(v).replace(/,/g, ''));
+  if (!Number.isFinite(n)) return v;
   return n.toLocaleString();
+};
+const parseNumberString = (s) => {
+  if (s === null || s === undefined) return '';
+  const cleaned = String(s).replace(/[^\d.-]/g, '');
+  // prevent leading zeros issues but keep as string
+  if (cleaned === '') return '';
+  // keep as plain numeric-string (no commas)
+  return cleaned;
 };
 
 function exportToCSV(rows = [], filename = 'export.csv') {
@@ -62,10 +68,10 @@ function exportToCSV(rows = [], filename = 'export.csv') {
 export default function SADDeclaration() {
   const toast = useToast();
 
-  // CREATE form => keep raw digits separate from formatted display
+  // form (create)
   const [sadNo, setSadNo] = useState('');
   const [regime, setRegime] = useState('');
-  const [declaredWeightRaw, setDeclaredWeightRaw] = useState(''); // digits-only string
+  const [declaredWeight, setDeclaredWeight] = useState(''); // raw numeric string (no commas)
   const [docs, setDocs] = useState([]);
 
   // list + realtime
@@ -83,7 +89,7 @@ export default function SADDeclaration() {
   // doc viewer
   const [docViewer, setDocViewer] = useState({ open: false, doc: null });
 
-  // docs list modal (new)
+  // docs list modal
   const [docsModal, setDocsModal] = useState({ open: false, docs: [], sad_no: null });
 
   // NL search + filters + sorting + pagination
@@ -98,10 +104,9 @@ export default function SADDeclaration() {
 
   // Edit modal (modal-based editing, status only changes when user saves)
   const [editModalOpen, setEditModalOpen] = useState(false);
-  // editModalData keeps raw digits for declared weight under declared_weight_raw
-  const [editModalData, setEditModalData] = useState(null); // { sad_no, regime, declared_weight_raw, status }
+  const [editModalData, setEditModalData] = useState(null); // { sad_no, regime, declared_weight (raw), status }
 
-  // Save confirmation dialog
+  // Save confirmation dialog (for edit modal)
   const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
   const confirmSaveCancelRef = useRef();
 
@@ -109,6 +114,11 @@ export default function SADDeclaration() {
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState(null);
   const archiveCancelRef = useRef();
+
+  // Complete confirmation dialog (for manual completion)
+  const [completeOpen, setCompleteOpen] = useState(false);
+  const [completeTarget, setCompleteTarget] = useState(null);
+  const completeCancelRef = useRef();
 
   // activity timeline (local)
   const [activity, setActivity] = useState([]);
@@ -118,7 +128,7 @@ export default function SADDeclaration() {
   const ticketsSubRef = useRef(null);
 
   // ---------------------
-  // fetchSADs (with correct recorded totals + transaction counts) - NO auto status change
+  // fetchSADs (with correct recorded totals & ticket counts) - NO auto status change
   // ---------------------
   const fetchSADs = async (filter = null) => {
     setLoading(true);
@@ -136,10 +146,10 @@ export default function SADDeclaration() {
         ...r,
         docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
         total_recorded_weight: Number(r.total_recorded_weight ?? 0),
-        transactions: 0, // will be filled below
+        ticket_count: 0,
       }));
 
-      // fetch tickets totals & counts to show accurate discharged weights and transaction count
+      // fetch tickets totals & counts to show accurate discharged weights and transaction counts
       const sadNos = normalized.map((s) => s.sad_no).filter(Boolean);
       if (sadNos.length) {
         const { data: tickets, error: tErr } = await supabase
@@ -158,10 +168,9 @@ export default function SADDeclaration() {
           for (let i = 0; i < normalized.length; i++) {
             const s = normalized[i];
             if (s.sad_no && totals[s.sad_no] != null) {
-              normalized[i] = { ...s, total_recorded_weight: totals[s.sad_no], transactions: counts[s.sad_no] || 0 };
-            } else {
-              // if no tickets, transactions remain 0
-              normalized[i] = { ...s, transactions: counts[s.sad_no] || 0 };
+              normalized[i] = { ...s, total_recorded_weight: totals[s.sad_no], ticket_count: counts[s.sad_no] || 0 };
+            } else if (s.sad_no && counts[s.sad_no]) {
+              normalized[i] = { ...s, ticket_count: counts[s.sad_no] || 0 };
             }
           }
         }
@@ -324,7 +333,7 @@ export default function SADDeclaration() {
   // create SAD record
   const handleCreateSAD = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!sadNo || !declaredWeightRaw) {
+    if (!sadNo || !declaredWeight) {
       toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
       return;
     }
@@ -335,7 +344,7 @@ export default function SADDeclaration() {
       const payload = {
         sad_no: sadNo,
         regime: regime || null,
-        declared_weight: Number(declaredWeightRaw),
+        declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
         status: 'In Progress', // default status
         created_at: new Date().toISOString(),
@@ -346,7 +355,7 @@ export default function SADDeclaration() {
       if (error) throw error;
       toast({ title: 'SAD registered', description: `SAD ${sadNo} created`, status: 'success' });
       await pushActivity(`Created SAD ${sadNo}`);
-      setSadNo(''); setRegime(''); setDeclaredWeightRaw(''); setDocs([]);
+      setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]);
       fetchSADs();
     } catch (err) {
       console.error('create SAD', err);
@@ -369,7 +378,7 @@ export default function SADDeclaration() {
 
       // ensure selectedSad shows correct total recorded (cumulative net)
       const computedTotal = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)) }));
+      setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)), ticket_count: (tickets || []).length }));
 
       await pushActivity(`Viewed SAD ${sad.sad_no} details`);
     } catch (err) {
@@ -386,8 +395,7 @@ export default function SADDeclaration() {
     setEditModalData({
       sad_no: sad.sad_no,
       regime: sad.regime ?? '',
-      // store raw digits for edit field
-      declared_weight_raw: String(Math.round(Number(sad.declared_weight || 0))),
+      declared_weight: String(sad.declared_weight ?? ''), // keep raw numeric string (no commas)
       status: sad.status ?? 'In Progress',
     });
     setEditModalOpen(true);
@@ -403,10 +411,12 @@ export default function SADDeclaration() {
     if (!editModalData || !editModalData.sad_no) return;
     const sad_no = editModalData.sad_no;
     const before = (sadsRef.current || []).find(s => s.sad_no === sad_no) || {};
+    const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
+
     const after = {
       ...before,
       regime: editModalData.regime ?? before.regime,
-      declared_weight: Number(editModalData.declared_weight_raw ?? before.declared_weight ?? 0),
+      declared_weight: declaredParsed,
       status: editModalData.status ?? before.status,
       updated_at: new Date().toISOString(),
     };
@@ -464,6 +474,26 @@ export default function SADDeclaration() {
     }
   };
 
+  // mark as completed (manual flow with confirmation)
+  const requestMarkCompleted = (sad_no) => {
+    setCompleteTarget(sad_no);
+    setCompleteOpen(true);
+  };
+  const confirmMarkCompleted = async () => {
+    const target = completeTarget;
+    setCompleteOpen(false);
+    setCompleteTarget(null);
+    if (!target) return;
+    try {
+      setLoading(true);
+      await updateSadStatus(target, 'Completed');
+    } catch (e) {
+      // errors handled in updateSadStatus
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // recalc totals (client fallback)
   const recalcTotalForSad = async (sad_no) => {
     try {
@@ -509,7 +539,6 @@ export default function SADDeclaration() {
         created_at: s.created_at,
         updated_at: s.updated_at,
         docs: (s.docs || []).map(d => d.name || d.path).join('; '),
-        transactions: s.transactions ?? 0,
       }];
       exportToCSV(rows, `sad_${s.sad_no}_export.csv`);
       toast({ title: 'Export started', description: `SAD ${s.sad_no} exported`, status: 'success' });
@@ -662,7 +691,6 @@ export default function SADDeclaration() {
             <p><strong>Regime:</strong> ${s.regime || '—'}</p>
             <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
             <p><strong>Discharged weight:</strong> ${recorded.toLocaleString()} kg</p>
-            <p><strong># Transactions:</strong> ${Number(s.transactions || 0).toLocaleString()}</p>
             <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Updated: ${s.updated_at || '—'}</p>
             <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
           </div>
@@ -733,7 +761,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // REGIME level aggregates
+  // REGIME level aggregates (kept)
   const regimeAggregates = useMemo(() => {
     const map = {};
     for (const s of sads) {
@@ -746,7 +774,7 @@ export default function SADDeclaration() {
     return map;
   }, [sads]);
 
-  // Discrepancy / anomaly detection across entire dataset (kept internal; not shown in table)
+  // Discrepancy / anomaly detection (kept for internal analysis, but not shown in table)
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
       const d = Number(s.declared_weight || 0);
@@ -773,7 +801,7 @@ export default function SADDeclaration() {
   // Derived dashboard stats - counts for Completed / Pending / On Hold
   const dashboardStats = useMemo(() => {
     const totalSADs = sads.length;
-    const totalDeclared = sads.reduce((a, b) => a + Number(b.declared_weight || 0), 0);
+    const totalDeclared = sads.reduce((a, b) => a + Number(b.declared_weight || 0), 0); // kept for reference if needed
     const totalRecorded = sads.reduce((a, b) => a + Number(b.total_recorded_weight || 0), 0);
     const completed = sads.filter(s => s.status === 'Completed').length;
     const pending = sads.filter(s => s.status === 'In Progress').length;
@@ -825,7 +853,6 @@ export default function SADDeclaration() {
       declared_weight: s.declared_weight,
       total_recorded_weight: s.total_recorded_weight,
       status: s.status,
-      transactions: s.transactions ?? 0,
       created_at: s.created_at,
       updated_at: s.updated_at,
     }));
@@ -842,7 +869,6 @@ export default function SADDeclaration() {
         declared_weight: s.declared_weight,
         total_recorded_weight: s.total_recorded_weight,
         status: s.status,
-        transactions: s.transactions ?? 0,
         created_at: s.created_at,
         updated_at: s.updated_at,
       }));
@@ -939,12 +965,9 @@ export default function SADDeclaration() {
             <FormLabel>Declared Weight (kg)</FormLabel>
             <Input
               type="text"
-              value={formatWithCommas(declaredWeightRaw)}
-              onChange={(e) => {
-                const raw = digitsOnly(e.target.value);
-                setDeclaredWeightRaw(raw);
-              }}
-              placeholder="e.g. 100,000"
+              value={formatNumber(declaredWeight)}
+              onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))}
+              placeholder="e.g. 100000"
             />
           </FormControl>
 
@@ -957,7 +980,7 @@ export default function SADDeclaration() {
 
         <HStack mt={3}>
           <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button">Register SAD</Button>
-          <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeightRaw(''); setDocs([]); }}>Reset</Button>
+          <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
 
           <Box ml="auto" display="flex" gap={2}>
             <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV} type="button">Export filtered CSV</Button>
@@ -1020,7 +1043,7 @@ export default function SADDeclaration() {
                 <Th>Regime</Th>
                 <Th isNumeric>Declared (kg)</Th>
                 <Th isNumeric>Discharged (kg)</Th>
-                <Th isNumeric># Transactions</Th>
+                <Th># Transactions</Th>
                 <Th>Status</Th>
                 <Th>Discrepancy</Th>
                 <Th>Docs</Th>
@@ -1032,6 +1055,7 @@ export default function SADDeclaration() {
                 {pagedSads.map((s) => {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
                   const color = statusColor(s.status);
+                  const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
 
                   return (
                     <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
@@ -1039,7 +1063,7 @@ export default function SADDeclaration() {
                       <Td><Text>{s.regime || '—'}</Text></Td>
                       <Td isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
                       <Td isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
-                      <Td isNumeric><Text>{Number(s.transactions || 0).toLocaleString()}</Text></Td>
+                      <Td isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
                       <Td>
                         <VStack align="start" spacing={1}>
                           <HStack>
@@ -1061,6 +1085,7 @@ export default function SADDeclaration() {
                             <MenuList>
                               <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>
                               <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
+                              {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
                               <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
                               <MenuDivider />
@@ -1089,7 +1114,7 @@ export default function SADDeclaration() {
               <>
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
-                <Text mb={2}># Transactions: <strong>{Number(selectedSad.transactions || 0).toLocaleString()}</strong></Text>
+                <Text mb={2}># Transactions: <strong>{Number(selectedSad.ticket_count || 0).toLocaleString()}</strong></Text>
                 <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
 
                 <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
@@ -1145,11 +1170,8 @@ export default function SADDeclaration() {
                   <FormLabel>Declared Weight (kg)</FormLabel>
                   <Input
                     type="text"
-                    value={formatWithCommas(editModalData.declared_weight_raw)}
-                    onChange={(e) => {
-                      const raw = digitsOnly(e.target.value);
-                      setEditModalData(d => ({ ...d, declared_weight_raw: raw }));
-                    }}
+                    value={formatNumber(editModalData.declared_weight)}
+                    onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: parseNumberString(e.target.value) }))}
                   />
                 </FormControl>
 
@@ -1204,7 +1226,23 @@ export default function SADDeclaration() {
         </AlertDialogOverlay>
       </AlertDialog>
 
-      {/* Docs modal (NEW) */}
+      {/* Complete confirmation AlertDialog */}
+      <AlertDialog isOpen={completeOpen} leastDestructiveRef={completeCancelRef} onClose={() => setCompleteOpen(false)}>
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Mark as Completed</AlertDialogHeader>
+            <AlertDialogBody>
+              Are you sure you want to mark SAD {completeTarget} as Completed? This action must be done manually (database trigger enforces manual update).
+            </AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={completeCancelRef} onClick={() => setCompleteOpen(false)} type="button">Cancel</Button>
+              <Button colorScheme="green" onClick={confirmMarkCompleted} ml={3} type="button">Yes, mark Completed</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
+
+      {/* Docs modal */}
       <Modal isOpen={docsModal.open} onClose={() => setDocsModal({ open: false, docs: [], sad_no: null })} size="lg" scrollBehavior="inside">
         <ModalOverlay />
         <ModalContent>
