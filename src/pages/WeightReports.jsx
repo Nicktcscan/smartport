@@ -693,11 +693,34 @@ export default function WeightReports() {
       const sortedOriginal = sortTicketsByDateDesc(dedupedTickets);
       setOriginalTickets(sortedOriginal);
 
+      // compute discharged weight (sum of nets) from deduped/sorted set
+      const totalNet = (sortedOriginal || []).reduce((sum, t) => {
+        const val = Number(t.data.net ?? t.data.net_weight ?? 0);
+        return sum + (Number.isFinite(val) ? val : 0);
+      }, 0);
+
+      // attempt to fetch the SAD declaration row for more accurate declared weight/status (optional)
+      let sadRow = null;
+      try {
+        const { data: sadData, error: sadError } = await supabase
+          .from('sad_declarations')
+          .select('sad_no, declared_weight, total_recorded_weight, status')
+          .ilike('sad_no', `${searchSAD.trim()}`)
+          .maybeSingle();
+        if (!sadError) sadRow = sadData || null;
+      } catch (e) {
+        console.debug('sad fetch failed', e);
+      }
+
       setReportMeta({
         dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.date ? new Date(sortedOriginal[0].data.date).toLocaleDateString() : '') : '',
         startTimeLabel: '',
         endTimeLabel: '',
         sad: `${searchSAD.trim()}`,
+        declaredWeight: sadRow ? Number(sadRow.declared_weight ?? 0) : null,
+        dischargedWeight: Number(totalNet || 0),
+        sadStatus: sadRow ? (sadRow.status ?? 'In Progress') : 'Unknown',
+        sadExists: !!sadRow,
       });
 
       // compute initial filtered based on current filters (none by default)
@@ -1207,7 +1230,9 @@ export default function WeightReports() {
     });
   };
 
-  // ---------- UI render ----------
+  // -----------------------
+  // UI render
+  // -----------------------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }}>
       {/* Header */}
@@ -1358,6 +1383,29 @@ export default function WeightReports() {
             <Text ml="auto" fontSize="sm" color="gray.600">Tip: Narrow by date/time, then export.</Text>
           </Flex>
         </Box>
+
+        {/* --- SAD stats cards (Declared, Discharged, Status) --- */}
+        {reportMeta?.sad && (
+          <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={4}>
+            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>Declared Weight</StatLabel>
+              <StatNumber>{reportMeta.declaredWeight != null ? formatNumber(String(reportMeta.declaredWeight)) : 'N/A'}</StatNumber>
+              <StatHelpText>From SAD Declaration</StatHelpText>
+            </Stat>
+
+            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>Discharged Weight</StatLabel>
+              <StatNumber>{reportMeta.dischargedWeight != null ? formatNumber(String(reportMeta.dischargedWeight)) : '0'}</StatNumber>
+              <StatHelpText>Sum of ticket nets (fetched)</StatHelpText>
+            </Stat>
+
+            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>SAD Status</StatLabel>
+              <StatNumber>{reportMeta.sadStatus || 'Unknown'}</StatNumber>
+              <StatHelpText>{reportMeta.sadExists ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
+            </Stat>
+          </SimpleGrid>
+        )}
 
         {/* Results */}
         {filteredTickets.length > 0 ? (
