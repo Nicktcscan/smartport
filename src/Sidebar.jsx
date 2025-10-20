@@ -2,6 +2,18 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
 import { MdLocalShipping } from 'react-icons/md';
+import {
+  FaTachometerAlt,
+  FaFileAlt,
+  FaUsers,
+  FaUpload,
+  FaEdit,
+  FaListAlt,
+  FaCheckCircle,
+  FaFileInvoice,
+  FaCog,
+  FaChartBar,
+} from 'react-icons/fa';
 
 import {
   Box,
@@ -13,63 +25,50 @@ import {
   Icon,
 } from '@chakra-ui/react';
 
-import {
-  HamburgerIcon,
-  CloseIcon,
-  ViewIcon,
-  AttachmentIcon,
-  InfoIcon,
-  QuestionIcon,
-  EditIcon,
-  Search2Icon,
-  CheckCircleIcon,
-} from '@chakra-ui/icons';
+import { HamburgerIcon, CloseIcon } from '@chakra-ui/icons';
 
 import { useAuth } from './context/AuthContext';
 
 // Admin menu
 const adminNavItems = [
-  { path: '/dashboard', label: 'Dashboard', icon: ViewIcon },
-  { path: '/sad-declarations', label: 'SAD Declaration', icon: AttachmentIcon },
-  { path: '/users', label: 'User Management', icon: AttachmentIcon },
-  { path: '/reports', label: 'Upload Ticket', icon: InfoIcon },
-  { path: '/manual-entry', label: 'Manual Entry', icon: EditIcon },
-  { path: '/weightreports', label: 'Ticket Records', icon: Search2Icon },
-  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
+  { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
+  { path: '/users', label: 'User Management', icon: FaUsers },
+  { path: '/reports', label: 'Upload Ticket', icon: FaUpload },
+  { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
+  { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
+  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: FaCheckCircle },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
-  { path: '/outgate/reports', label: 'Outgate Records', icon: InfoIcon },
-  // NEW: SAD Declaration route for admin
-  { path: '/settings', label: 'System Settings', icon: QuestionIcon },
+  { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
+  { path: '/settings', label: 'System Settings', icon: FaCog },
 ];
 
 // Weighbridge menu
 const weighbridgeNavItems = [
-  { path: '/dashboard', label: 'Dashboard', icon: ViewIcon },
-  { path: '/weighbridge', label: 'Upload Ticket', icon: AttachmentIcon },
-  { path: '/manual-entry', label: 'Manual Entry', icon: EditIcon },
-  { path: '/weightreports', label: 'Ticket Records', icon: Search2Icon },
+  { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/weighbridge', label: 'Upload Ticket', icon: FaUpload },
+  { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
+  { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
 ];
 
 // Outgate Officer menu
 const outgateNavItems = [
-  { path: '/outgate', label: 'Dashboard', icon: ViewIcon },
-  //{ path: '/outgate/search', label: 'Processed Tickets', icon: AttachmentIcon },
-  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
-  { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
+  { path: '/outgate', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: FaCheckCircle },
+  { path: '/outgate/reports', label: 'Reports', icon: FaFileInvoice },
 ];
 
 // Customs Officer menu
 const customsNavItems = [
-  { path: '/outgate', label: 'Dashboard', icon: ViewIcon },
-  //{ path: '/outgate/search', label: 'Processed Tickets', icon: AttachmentIcon },
-  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: CheckCircleIcon },
-  { path: '/outgate/reports', label: 'Reports', icon: InfoIcon },
+  { path: '/outgate', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: FaCheckCircle },
+  { path: '/outgate/reports', label: 'Reports', icon: FaFileInvoice },
 ];
 
 // Agent menu
 const agentNavItems = [
-  { path: '/agent', label: 'Reports', icon: ViewIcon },
+  { path: '/agent', label: 'Reports', icon: FaChartBar },
 ];
 
 function Sidebar({ isCollapsed, toggleCollapse }) {
@@ -91,7 +90,7 @@ function Sidebar({ isCollapsed, toggleCollapse }) {
     navItems = []; // fallback or generic user menu
   }
 
-  const activeBg = 'rgba(255, 255, 255, 0.2)';
+  const activeBg = 'rgba(255, 255, 255, 0.12)';
 
   return (
     <Box
@@ -99,8 +98,8 @@ function Sidebar({ isCollapsed, toggleCollapse }) {
       color="white"
       height="100vh"
       p={4}
-      width={isCollapsed ? '60px' : '288px'}
-      transition="width 0.3s"
+      width={isCollapsed ? '60px' : '260px'}
+      transition="width 0.2s"
       display="flex"
       flexDirection="column"
     >
@@ -112,7 +111,7 @@ function Sidebar({ isCollapsed, toggleCollapse }) {
           size="sm"
           onClick={toggleCollapse}
           bg="transparent"
-          _hover={{ bg: 'whiteAlpha.300' }}
+          _hover={{ bg: 'whiteAlpha.200' }}
           color="white"
         />
       </Box>
