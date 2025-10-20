@@ -202,7 +202,7 @@ function parseTicketDate(raw) {
   // Try to parse formats like '29-Sep-2025 20:30:00' or '29-Sep-25 8:30:00 PM'
   const m = s0.match(/(\d{1,2}-[A-Za-z]{3}-\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*([AP]M)?/i);
   if (m) {
-    let [, datePart, hh, mm, ss, ms, ampm] = m;
+    let [, datePart, hh, mm, ss, , ampm] = m;
     let secNum = parseInt(ss, 10);
     if (secNum > 59) secNum = 59;
     let yearPart = datePart.split('-')[2];
@@ -418,8 +418,8 @@ export default function WeightReports() {
 
   const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure();
   const cancelRef = useRef();
-  const [deleting, setDeleting] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting] = useState(false);
+  const [, setPendingDelete] = useState(null);
 
   const [auditLogs, setAuditLogs] = useState([]);
   const [loadingAudit, setLoadingAudit] = useState(false);
@@ -493,8 +493,6 @@ export default function WeightReports() {
     if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
     return hh * 60 + mm;
   };
-  const startOfDay = (d) => { const dt = new Date(d); dt.setHours(0, 0, 0, 0); return dt; };
-  const endOfDay = (d) => { const dt = new Date(d); dt.setHours(23, 59, 59, 999); return dt; };
 
   const toggleSort = (key) => {
     if (sortBy === key) {
@@ -1029,7 +1027,7 @@ export default function WeightReports() {
 
       let usedRpc = false;
       try {
-        const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_update_ticket', {
+        const { error: rpcErr } = await supabase.rpc('admin_update_ticket', {
           p_ticket_id: ticketIdValue,
           p_gross: payload.gross,
           p_tare: payload.tare,
@@ -1150,7 +1148,7 @@ export default function WeightReports() {
 
         let usedRpc = false;
         try {
-          const { data: rpcData, error: rpcErr } = await supabase.rpc('admin_delete_ticket', { p_ticket_id: ticketIdValue });
+          const { error: rpcErr } = await supabase.rpc('admin_delete_ticket', { p_ticket_id: ticketIdValue });
           if (!rpcErr) usedRpc = true;
         } catch (rpcErr) {
           console.debug('RPC delete failed', rpcErr);
@@ -1471,9 +1469,9 @@ export default function WeightReports() {
                           </Box>
                         </HStack>
 
-                        <HStack spacing={2} ml="auto">
+                          <HStack spacing={2} ml="auto">
                           <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
-                          <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(t)} isDisabled={!isAdmin}>Edit</Button>
+                          <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(t)} isDisabled={!isAdmin || !isTicketEditable(t)}>Edit</Button>
                           {t.data.fileUrl && (
                             <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>
                               Open PDF
@@ -1547,7 +1545,7 @@ export default function WeightReports() {
                           <Td>
                             <HStack spacing={2} flexWrap="wrap">
                               <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
-                              <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(ticket)} isDisabled={!isAdmin}>
+                              <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(ticket)} isDisabled={!isAdmin || !isTicketEditable(ticket)}>
                                 Edit
                               </Button>
                               {ticket.data.fileUrl && (
@@ -1653,7 +1651,7 @@ export default function WeightReports() {
                     <HStack>
                       <Icon as={FaTruck} />
                       <Text><b>Truck No:</b> {selectedTicket.data.gnswTruckNo || selectedTicket.data.truckOnWb || selectedTicket.data.anpr || selectedTicket.data.truckNo || 'N/A'}</Text>
-                      {isAdmin && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
 
                     {isEditing ? (
@@ -1697,13 +1695,13 @@ export default function WeightReports() {
                         <HStack>
                           <Icon as={FaUserTie} />
                           <Text><b>Operator:</b> {operatorName || selectedTicket.data.operator || 'N/A'}</Text>
-                          {isAdmin && <IconButton size="xs" aria-label="Edit operator" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                          {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit operator" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                         </HStack>
 
                         <HStack>
                           <Icon as={FaBox} />
                           <Text><b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}</Text>
-                          {isAdmin && <IconButton size="xs" aria-label="Edit consignee" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                          {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit consignee" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                         </HStack>
 
                         {(() => {
@@ -1717,17 +1715,17 @@ export default function WeightReports() {
                               <HStack>
                                 <Icon as={FaBalanceScale} />
                                 <Text><b>Gross Weight:</b> {computed.grossDisplay || '0'} kg</Text>
-                                {isAdmin && <IconButton size="xs" aria-label="Edit gross" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                                {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit gross" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                               </HStack>
                               <HStack>
                                 <Icon as={FaBalanceScale} />
                                 <Text><b>Tare Weight:</b> {computed.tareDisplay || '0'} kg</Text>
-                                {isAdmin && <IconButton size="xs" aria-label="Edit tare" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                                {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit tare" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                               </HStack>
                               <HStack>
                                 <Icon as={FaBalanceScale} />
                                 <Text><b>Net Weight:</b> {computed.netDisplay || '0'} kg</Text>
-                                {isAdmin && <IconButton size="xs" aria-label="Edit net" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                                {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit net" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                               </HStack>
                             </>
                           );
@@ -1738,19 +1736,19 @@ export default function WeightReports() {
                     <HStack>
                       <Icon as={FaBox} />
                       <Text><b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}</Text>
-                      {isAdmin && <IconButton size="xs" aria-label="Edit container" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit container" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}</Text>
-                      {isAdmin && <IconButton size="xs" aria-label="Edit pass number" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit pass number" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}</Text>
-                      {isAdmin && <IconButton size="xs" aria-label="Edit scale" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit scale" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}</Text>
-                      {isAdmin && <IconButton size="xs" aria-label="Edit anpr" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit anpr" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                     </HStack>
                     <HStack>
                       <Text><b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}</Text>
@@ -1774,7 +1772,7 @@ export default function WeightReports() {
                 {selectedTicket && !isEditing && (
                   <>
                     {isAdmin ? (
-                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={() => startEditing(selectedTicket)}>
+                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={() => startEditing(selectedTicket)} isDisabled={!isTicketEditable(selectedTicket)}>
                         Edit
                       </Button>
                     ) : (

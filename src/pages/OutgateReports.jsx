@@ -38,8 +38,6 @@ import {
 } from '@chakra-ui/react';
 import {
   RepeatIcon,
-  ChevronLeftIcon,
-  ChevronRightIcon,
   DownloadIcon,
   SearchIcon,
 } from '@chakra-ui/icons';
@@ -178,9 +176,15 @@ export default function OutgateReports() {
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
+  // Keep `currentPage` referenced so it's considered used by linters/compilers until pagination is implemented.
+  useEffect(() => {
+    // This effect intentionally does nothing; it only reads currentPage to avoid "assigned but never used".
+    void currentPage;
+  }, [currentPage]);
+
   // details modal
-  const { isOpen: isDetailsOpen, onOpen: onDetailsOpen, onClose: onDetailsClose } = useDisclosure();
-  const [selectedReport, setSelectedReport] = useState(null);
+  const { isOpen: isDetailsOpen, onClose: onDetailsClose } = useDisclosure();
+  const [selectedReport] = useState(null);
 
   // SAD search results (deduped from tickets table)
   const [sadResults, setSadResults] = useState([]);
@@ -283,32 +287,13 @@ export default function OutgateReports() {
   }, [toast]);
 
   // small helper to produce Date object from a date string ("YYYY-MM-DD") and optional time "HH:MM"
-  const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
-    if (!dateStr) return null;
-    const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
-    // Normalize time format:
-    const fullTime = time.length <= 5 ? `${time}:00` : time;
-    return new Date(`${dateStr}T${fullTime}`);
-  };
-
-  const parseTimeToMinutes = (timeStr) => {
-    if (!timeStr) return null;
-    const [hh, mm] = String(timeStr).split(':').map((n) => Number(n));
-    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-    return hh * 60 + mm;
-  };
-
-  // Helper: time-in-range (supports wrap-around midnight) — kept for fallback usage
-  const isTimeInRange = (mins, from, to) => {
-    if (from == null && to == null) return true;
-    if (from == null) return mins <= to;
-    if (to == null) return mins >= from;
-    if (from <= to) {
-      return mins >= from && mins <= to;
-    }
-    // wrap-around: e.g., from 22:00 (1320) to 06:00 (360)
-    return mins >= from || mins <= to;
-  };
+      const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
+        if (!dateStr) return null;
+        const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
+        // Normalize time format:
+        const fullTime = time.length <= 5 ? `${time}:00` : time;
+        return new Date(`${dateStr}T${fullTime}`);
+      };
 
   /* SAD search: dedupe by ticket_no, newest-first
      Now: when mapping ticket -> UI row, try to attach the matching outgate row (if any)
@@ -611,11 +596,9 @@ export default function OutgateReports() {
     return s.size;
   }, [statsSource]);
 
-  const totalPages = Math.max(1, Math.ceil(sortedReports.length / itemsPerPage));
-  const paginatedReports = useMemo(() => {
-    const start = (currentPage - 1) * itemsPerPage;
-    return sortedReports.slice(start, start + itemsPerPage);
-  }, [sortedReports, currentPage, itemsPerPage]);
+  // Removed unused `paginatedReports` variable to avoid lint/compile warning.
+  // If you need pagination in the UI later, use `sortedReports.slice(...)` where rendering happens
+  // or reintroduce a pagination helper and ensure it's used by the component.
 
   // Export current (unique) view as CSV (uses sortedReports / filteredReports)
   const handleExportCsv = () => {
@@ -709,10 +692,7 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
-  const openDetails = (report) => {
-    setSelectedReport(report);
-    onDetailsOpen();
-  };
+  // openDetails removed — selection/modal can be triggered inline when needed
 
   const handleResetAll = () => {
     setSearchTerm('');

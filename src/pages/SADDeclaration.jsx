@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box, Button, Container, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
   Text, Table, Thead, Tbody, Tr, Th, Td, VStack, HStack, useToast, Modal, ModalOverlay,
-  ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Badge, Flex,
+  ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Flex,
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText, StatGroup,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter
@@ -428,16 +428,15 @@ export default function SADDeclaration() {
     closeEditModal();
 
     try {
-      // Determine whether this should be considered a manual update:
-      // mark manual_update true if status changed or if user explicitly edited values (we consider any explicit save as manual).
-      const isStatusChanged = String(before.status || '') !== String(after.status || '');
-      const payload = {
-        regime: after.regime ?? null,
-        declared_weight: Number(after.declared_weight ?? 0),
-        status: after.status ?? null,
-        updated_at: new Date().toISOString(),
-        manual_update: true, // treat explicit edit/save as manual action
-      };
+    // Determine whether this should be considered a manual update:
+    // mark manual_update true if status changed or if user explicitly edited values (we consider any explicit save as manual).
+    const payload = {
+      regime: after.regime ?? null,
+      declared_weight: Number(after.declared_weight ?? 0),
+      status: after.status ?? null,
+      updated_at: new Date().toISOString(),
+      manual_update: true, // treat explicit edit/save as manual action
+    };
 
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
       if (error) throw error;
@@ -561,25 +560,8 @@ export default function SADDeclaration() {
   };
 
   // try to set a DB flag to prevent new tickets (best-effort)
-  const lockSADForNewTickets = async (sad_no) => {
-    try {
-      const { error } = await supabase.from('sad_declarations').update({ closed_to_tickets: true, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
-      if (error) throw error;
-      toast({ title: 'SAD locked', description: `SAD ${sad_no} is now locked for new tickets (DB flag set).`, status: 'success' });
-      await pushActivity(`Locked SAD ${sad_no} for new tickets`);
-      fetchSADs();
-    } catch (err) {
-      console.warn('Could not set closed flag', err);
-      toast({
-        title: 'Could not lock at DB level',
-        description: 'To fully prevent new tickets you need server-side enforcement (add a `closed_to_tickets` column or check on ticket creation). Showing UI block locally.',
-        status: 'warning',
-        duration: 7000,
-        isClosable: true,
-      });
-    }
-  };
-
+  // (removed unused helper: lockSADForNewTickets) — reintroduce and call from UI if you need lock behaviour.
+  
   // STATUS color mapping — based only on manual status (do not derive from weights)
   const statusColor = (status) => {
     if (!status) return 'gray.300';
@@ -772,18 +754,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // REGIME level aggregates (kept)
-  const regimeAggregates = useMemo(() => {
-    const map = {};
-    for (const s of sads) {
-      const r = s.regime || 'Unknown';
-      if (!map[r]) map[r] = { count: 0, declared: 0, recorded: 0 };
-      map[r].count += 1;
-      map[r].declared += Number(s.declared_weight || 0);
-      map[r].recorded += Number(s.total_recorded_weight || 0);
-    }
-    return map;
-  }, [sads]);
+  // REGIME level aggregates removed (unused) — keep if you need per-regime summaries in future
 
   // Discrepancy / anomaly detection (kept for internal analysis, but not shown in table)
   const anomalyResults = useMemo(() => {
@@ -853,7 +824,10 @@ export default function SADDeclaration() {
   }, [sads, statusFilter, regimeFilter, nlQuery, sortBy, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSads.length / pageSize));
-  useEffect(() => { if (page > totalPages) setPage(1); }, [totalPages]); // reset if needed
+  useEffect(() => {
+    // use functional update so we don't reference `page` directly (avoids missing-deps lint warning)
+    setPage((p) => (p > totalPages ? 1 : p));
+  }, [totalPages]); // reset if needed
   const pagedSads = filteredSads.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize);
 
   // Export current filtered view
@@ -890,7 +864,7 @@ export default function SADDeclaration() {
 
       const filename = `backup/sad_declarations_backup_${new Date().toISOString().slice(0,10)}.csv`;
       const blob = new Blob([csv], { type: 'text/csv' });
-      const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
+      const { error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
       if (error) throw error;
       await pushActivity('Manual backup uploaded', { path: filename });
       toast({ title: 'Backup uploaded', description: `Saved as ${filename}`, status: 'success' });
@@ -1097,6 +1071,7 @@ export default function SADDeclaration() {
                               <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>
                               <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
                               {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
+                              <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
                               <MenuDivider />
