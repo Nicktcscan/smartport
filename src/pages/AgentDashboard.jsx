@@ -244,6 +244,15 @@ export default function OutgateReports() {
     return filtered;
   };
 
+  // Helper: compute discharged net sum from an array of mapped rows
+  const computeTotalNetFromArray = (arr = []) => {
+    if (!Array.isArray(arr)) return 0;
+    return arr.reduce((sum, t) => {
+      const { net } = computeWeights({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+      return sum + (net || 0);
+    }, 0);
+  };
+
   // Generate SAD results by querying the outgate table (new behavior)
   const handleGenerateSad = async () => {
     if (!sadQuery.trim()) {
@@ -279,10 +288,28 @@ export default function OutgateReports() {
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
+      // reset range controls
       setSadDateFrom('');
       setSadDateTo('');
       setSadTimeFrom('');
       setSadTimeTo('');
+
+      // compute discharged weight from the mapped result (all rows found)
+      const totalNet = computeTotalNetFromArray(uniqueMapped);
+
+      // attempt to fetch the SAD declaration row for more accurate declared weight/status (optional)
+      let sadRow = null;
+      try {
+        const { data: sadData, error: sadError } = await supabase
+          .from('sad_declarations')
+          .select('sad_no, declared_weight, total_recorded_weight, status')
+          .ilike('sad_no', `${sadQuery.trim()}`)
+          .maybeSingle();
+        if (!sadError) sadRow = sadData || null;
+      } catch (e) {
+        console.debug('sad fetch failed', e);
+      }
+
       setSadMeta({
         sad: sadQuery.trim(),
         dateRangeText:
@@ -291,6 +318,10 @@ export default function OutgateReports() {
             : 'All',
         startTimeLabel: '',
         endTimeLabel: '',
+        declaredWeight: sadRow ? Number(sadRow.declared_weight ?? 0) : null,
+        dischargedWeight: Number(totalNet || 0),
+        sadStatus: sadRow ? (sadRow.status ?? 'In Progress') : 'Unknown',
+        sadExists: !!sadRow,
       });
 
       if ((uniqueMapped || []).length === 0) {
@@ -307,6 +338,7 @@ export default function OutgateReports() {
   const applySadRange = () => {
     const newFiltered = computeFilteredFromOriginal(sadOriginal);
     setSadTickets(newFiltered);
+    setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(newFiltered) }));
   };
 
   const resetSadRange = () => {
@@ -314,8 +346,9 @@ export default function OutgateReports() {
     setSadDateTo('');
     setSadTimeFrom('');
     setSadTimeTo('');
-    setSadTickets(computeFilteredFromOriginal(sadOriginal));
-    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
+    const newFiltered = computeFilteredFromOriginal(sadOriginal);
+    setSadTickets(newFiltered);
+    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '', dischargedWeight: computeTotalNetFromArray(newFiltered) }));
   };
 
   const filteredSadTickets = useMemo(() => {
@@ -441,7 +474,12 @@ export default function OutgateReports() {
           const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
           return db - da;
         });
-        return dedupeByTicket(next);
+        const deduped = dedupeByTicket(next);
+
+        // update discharged weight from the full original list
+        setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(deduped) }));
+
+        return deduped;
       });
 
       setSadTickets((prev) => {
@@ -490,7 +528,12 @@ export default function OutgateReports() {
           return db - da;
         });
 
-        return dedupeByTicket(next);
+        const deduped = dedupeByTicket(next);
+
+        // update discharged weight to reflect filtered list
+        setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(deduped) }));
+
+        return deduped;
       });
 
       setSadMeta((m) => ({
@@ -645,6 +688,29 @@ export default function OutgateReports() {
                 <Input type="time" value={sadTimeTo} onChange={(e) => setSadTimeTo(e.target.value)} />
               </Box>
             </SimpleGrid>
+
+            {/* SAD detail stats cards */}
+            {sadMeta?.sad && (
+              <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mt={3} mb={3}>
+                <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                  <StatLabel>Declared Weight</StatLabel>
+                  <StatNumber>{formatWeight(sadMeta.declaredWeight)}</StatNumber>
+                  <StatHelpText>From SAD Declaration</StatHelpText>
+                </Stat>
+
+                <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                  <StatLabel>Discharged Weight</StatLabel>
+                  <StatNumber>{formatWeight(sadMeta.dischargedWeight != null ? sadMeta.dischargedWeight : computeTotalNetFromArray(sadOriginal))}</StatNumber>
+                  <StatHelpText>Sum of nets (current results)</StatHelpText>
+                </Stat>
+
+                <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                  <StatLabel>SAD Status</StatLabel>
+                  <StatNumber>{sadMeta.sadStatus || 'Unknown'}</StatNumber>
+                  <StatHelpText>{sadMeta.sadExists ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
+                </Stat>
+              </SimpleGrid>
+            )}
 
             <Flex mt={3} gap={2} align="center">
               <Button size="sm" colorScheme="blue" onClick={applySadRange}>Apply Range</Button>

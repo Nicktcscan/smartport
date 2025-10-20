@@ -191,6 +191,9 @@ export default function OutgateReports() {
   const [ticketStatusMap, setTicketStatusMap] = useState({}); // ticket_no -> status
   const [totalTransactions, setTotalTransactions] = useState(0); // unique ticket_no count across system
 
+  // SAD declaration metadata (declared weight / status)
+  const [sadDeclaration, setSadDeclaration] = useState({ declaredWeight: null, status: 'Unknown', exists: false });
+
   useEffect(() => {
     let mounted = true;
 
@@ -320,22 +323,53 @@ export default function OutgateReports() {
     const q = (searchTerm || '').trim();
     if (!q) {
       setSadResults([]);
+      // clear declaration when search cleared
+      setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
       return;
     }
 
+    // Fetch SAD declaration whenever a search term exists (so the SAD stats card can show declared weight/status)
+    const fetchSadDeclaration = async () => {
+      try {
+        const { data: sadRow, error } = await supabase
+          .from('sad_declarations')
+          .select('sad_no,declared_weight,status,total_recorded_weight')
+          .ilike('sad_no', `${q}`)
+          .maybeSingle();
+        if (!error && sadRow) {
+          setSadDeclaration({
+            declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
+            status: sadRow.status ?? 'Unknown',
+            exists: true,
+            total_recorded_weight: sadRow.total_recorded_weight ?? null,
+          });
+        } else {
+          setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
+        }
+      } catch (err) {
+        console.debug('Failed to fetch SAD declaration', err);
+        setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
+      }
+    };
+
+    // Debounced ticket search
     sadDebounceRef.current = setTimeout(async () => {
       setSadLoading(true);
+
       try {
+        // fetch tickets for matching SAD
         const { data: ticketsData, error } = await supabase
           .from('tickets')
           .select('*')
           .ilike('sad_no', `%${q}%`)
-          .order('date', { ascending: false }); // newest first by ticket date
+          .order('date', { ascending: false }); // newest-first by ticket date
 
         if (error) {
           console.warn('SAD lookup error', error);
           setSadResults([]);
           setSadLoading(false);
+          // still try to fetch declaration
+          await fetchSadDeclaration();
           return;
         }
 
@@ -403,9 +437,14 @@ export default function OutgateReports() {
         });
 
         setSadResults(mapped);
+
+        // fetch SAD declaration too
+        await fetchSadDeclaration();
       } catch (err) {
         console.error('SAD search failed', err);
         setSadResults([]);
+        // still try to fetch declaration
+        await fetchSadDeclaration();
       } finally {
         setSadLoading(false);
       }
@@ -517,8 +556,6 @@ export default function OutgateReports() {
     if (!sadResults || sadResults.length === 0) return [];
 
     // Build start/end datetimes same as above (we only filter using the same startDateTime/endDateTime)
-    // However, per your request: timeFrom only applies if dateFrom present; timeTo only applies if dateTo present.
-    // We already captured startDateTime/endDateTime earlier and will reuse them.
     const s = startDateTime;
     const e = endDateTime;
 
@@ -718,10 +755,11 @@ export default function OutgateReports() {
           <StatHelpText>unique ticket numbers</StatHelpText>
         </Stat>
 
+        {/* Replaced "Filtered Rows" with "Unique Tickets in View" */}
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Filtered Rows</StatLabel>
-          <StatNumber>{statsTotals.rowsCount}</StatNumber>
-          <StatHelpText>{searchTerm ? 'Rows from SAD search (filtered)' : 'Rows after filters'}</StatHelpText>
+          <StatLabel>Unique Tickets in View</StatLabel>
+          <StatNumber>{statsUniqueTickets}</StatNumber>
+          <StatHelpText>{searchTerm ? 'Tickets from SAD search' : 'Unique tickets after filters'}</StatHelpText>
         </Stat>
 
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
@@ -730,6 +768,29 @@ export default function OutgateReports() {
           <StatHelpText>From current filtered results</StatHelpText>
         </Stat>
       </SimpleGrid>
+
+      {/* SAD detail stats cards (shown when a SAD search is active) */}
+      { (searchTerm && (sadResults.length > 0 || sadDeclaration.exists)) && (
+        <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mb={6}>
+          <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+            <StatLabel>Declared Weight</StatLabel>
+            <StatNumber>{formatWeight(sadDeclaration.declaredWeight)}</StatNumber>
+            <StatHelpText>{sadDeclaration.exists ? 'From SAD declaration' : 'No declaration found'}</StatHelpText>
+          </Stat>
+
+          <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+            <StatLabel>Discharged Weight</StatLabel>
+            <StatNumber>{formatWeight(sadTotalsMemo.cumulativeNet)} kg</StatNumber>
+            <StatHelpText>Sum of nets (respecting date/time filters)</StatHelpText>
+          </Stat>
+
+          <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+            <StatLabel>SAD Status</StatLabel>
+            <StatNumber>{sadDeclaration.status || (sadResults.length ? 'In Progress' : 'Unknown')}</StatNumber>
+            <StatHelpText>{sadDeclaration.exists ? 'Declaration row found' : (sadResults.length ? 'No declaration - tickets found' : 'No data')}</StatHelpText>
+          </Stat>
+        </SimpleGrid>
+      )}
 
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
