@@ -14,7 +14,6 @@ import {
   useToast,
   Divider,
   useColorModeValue,
-  useBreakpointValue,
   Spinner,
   VStack,
   Badge,
@@ -36,7 +35,7 @@ import { motion, useAnimation } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../context/AuthContext';
-import { FiRefreshCw, FiDownload } from 'react-icons/fi';
+import { FiRefreshCw, FiDownload, FiTruck, FiFileText, FiUsers } from 'react-icons/fi';
 import { Line, Pie } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -67,32 +66,36 @@ const MotionStatNumber = motion(StatNumber);
 const shadows = { md: 'rgba(0,0,0,0.08) 0px 4px 12px', lg: 'rgba(0,0,0,0.12) 0px 10px 24px' };
 const DEFAULT_CHART_DAYS = 7;
 
-function friendlyKeyLabel(key) {
-  if (key === 'ticketsProcessed') return 'Tickets Processed';
-  if (key === 'trucksExited') return 'Trucks Exited';
-  return key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
+/* Small debounce hook (in-file) */
+function useDebounce(value, delay = 250) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
 }
+
 
 export default function AdminPanel() {
   const toast = useToast();
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
 
-  // theme / UI tokens (hooks at top-level)
+  // theme / UI tokens
   const statBg = useColorModeValue('white', 'gray.700');
   const activityItemBg = useColorModeValue('gray.50', 'gray.800');
   const activityBadgeBg = useColorModeValue('gray.100', 'gray.700');
   const userCardBg = useColorModeValue('white', 'gray.800');
 
-  // data/state
+  // state
   const [users, setUsers] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [outgates, setOutgates] = useState([]);
-  const [recentActivity, setRecentActivity] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [loadingData, setLoadingData] = useState(true);
 
-  // analytics (note new keys)
+  // analytics
   const [analytics, setAnalytics] = useState({
     gateOpsToday: 0,
     ticketsProcessed: 0,
@@ -101,16 +104,15 @@ export default function AdminPanel() {
     unreadNotifications: 0,
   });
 
-  const statsColumns = useBreakpointValue({ base: 1, sm: 2, md: 3, lg: 5 }) || 4;
-
   // UI controls
   const [chartDays, setChartDays] = useState(DEFAULT_CHART_DAYS);
   const [activityFilter, setActivityFilter] = useState('all');
   const [activityLimit, setActivityLimit] = useState(8);
   const [activitySearch, setActivitySearch] = useState('');
+  const debouncedActivitySearch = useDebounce(activitySearch, 250);
   const activityRef = useRef(null);
 
-  // trucksExited animation controller + prev ref
+  // trucksExited animation controller
   const trucksAnim = useAnimation();
   const prevTrucksExitedRef = useRef(analytics.trucksExited);
 
@@ -137,11 +139,15 @@ export default function AdminPanel() {
     return s === 'pending' || s === 'exited';
   };
 
+  /* Build activity list (memoized below) -- limit rows and normalize */
   const buildActivityFromState = useCallback((ticketsArr = [], outgatesArr = [], usersArr = []) => {
-    const activity = [];
+    const items = [];
 
-    (ticketsArr || []).slice(0, 40).forEach((row) => {
-      activity.push({
+    // Only take recent N entries from each source to avoid huge arrays
+    const take = (arr, n = 60) => (arr || []).slice(0, n);
+
+    take(ticketsArr, 80).forEach((row) => {
+      items.push({
         id: `ticket-${row.ticket_id ?? row.ticket_no ?? Math.random()}`,
         type: 'weighbridge',
         time: row.submitted_at || row.date || new Date().toISOString(),
@@ -150,8 +156,8 @@ export default function AdminPanel() {
       });
     });
 
-    (outgatesArr || []).slice(0, 40).forEach((row) => {
-      activity.push({
+    take(outgatesArr, 80).forEach((row) => {
+      items.push({
         id: `out-${row.id ?? Math.random()}`,
         type: 'outgate',
         time: row.created_at || new Date().toISOString(),
@@ -160,8 +166,8 @@ export default function AdminPanel() {
       });
     });
 
-    (usersArr || []).slice(0, 40).forEach((u) => {
-      activity.push({
+    take(usersArr, 80).forEach((u) => {
+      items.push({
         id: `user-${u.id}`,
         type: 'users',
         time: u.updated_at || new Date().toISOString(),
@@ -170,160 +176,125 @@ export default function AdminPanel() {
       });
     });
 
-    activity.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
-    return activity;
+    items.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
+    return items;
   }, []);
 
-  // ---------- simple resolvers to avoid mixing || and ?? ----------
+  // ---------- payload resolvers ----------
   const resolveEventType = (payload) => {
     if (!payload) return null;
-    if (payload.eventType) return payload.eventType;
-    if (payload.event) return payload.event;
-    if (payload.type) return payload.type;
-    if (payload.payload && payload.payload.type) return payload.payload.type;
-    return null;
+    return payload.eventType || payload.event || payload.type || (payload.payload && payload.payload.type) || null;
   };
 
   const resolveNewRecord = (payload) => {
     if (!payload) return null;
-    if (payload.new) return payload.new;
-    if (payload.record) return payload.record;
-    if (payload.payload && payload.payload.new) return payload.payload.new;
-    return null;
+    return payload.new || payload.record || (payload.payload && payload.payload.new) || null;
   };
 
   const resolveOldRecord = (payload) => {
     if (!payload) return null;
-    if (payload.old) return payload.old;
-    if (payload.oldRecord) return payload.oldRecord;
-    if (payload.payload && payload.payload.old) return payload.payload.old;
-    return null;
+    return payload.old || payload.oldRecord || (payload.payload && payload.payload.old) || null;
   };
 
-  // ---------- initial fetch (one-time) ----------
+  // ---------- analytics recompute (single source of truth) ----------
+  const recomputeAnalytics = useCallback((ticketsArr = [], outgatesArr = []) => {
+    // ticketsProcessed => count unique ticket numbers (fallback to ticket_id)
+    const ticketIdSet = new Set();
+    (ticketsArr || []).forEach((t) => {
+      const tn = (t.ticket_no ?? t.ticketNo ?? '').toString().trim();
+      if (tn) ticketIdSet.add(tn);
+      else if (t.ticket_id) ticketIdSet.add(`__id_${String(t.ticket_id)}`);
+      else ticketIdSet.add(`__row_${Math.random()}`);
+    });
+    const ticketsProcessed = ticketIdSet.size;
+
+    // trucksExited: unique tickets that either have status 'exited' in tickets table or appear in outgate records
+    const exitedSet = new Set();
+    (ticketsArr || []).forEach((t) => {
+      const st = (t.status ?? '').toString().toLowerCase();
+      if (st === 'exited') {
+        const tn = (t.ticket_no ?? t.ticketNo ?? '').toString().trim();
+        if (tn) exitedSet.add(tn);
+        else if (t.ticket_id) exitedSet.add(`__id_${String(t.ticket_id)}`);
+      }
+    });
+    (outgatesArr || []).forEach((o) => {
+      const on = (o.ticket_no ?? o.ticketNo ?? '').toString().trim();
+      if (on) exitedSet.add(on);
+      else if (o.ticket_id) exitedSet.add(`__id_${String(o.ticket_id)}`);
+    });
+    const trucksExited = exitedSet.size;
+
+    const gateOpsToday = (ticketsArr || []).filter((r) =>
+      isToday(r.date || r.submitted_at) && statusCountsAsGateOp(r.status)
+    ).length;
+
+    const reportsGenerated = (ticketsArr || []).filter((r) => !!r.file_url).length;
+
+    // animate trucksExited if increasing
+    if (trucksExited > (prevTrucksExitedRef.current ?? 0)) {
+      trucksAnim.start({ scale: [1, 1.08, 1], transition: { duration: 0.6 } });
+    }
+    prevTrucksExitedRef.current = trucksExited;
+
+    setAnalytics((prev) => ({
+      gateOpsToday,
+      ticketsProcessed,
+      trucksExited,
+      reportsGenerated,
+      unreadNotifications: prev.unreadNotifications ?? 0,
+    }));
+  }, [trucksAnim]);
+
+  // ---------- initial fetch ----------
   const fetchData = useCallback(async () => {
     setLoadingData(true);
     setLoadingUsers(true);
     try {
-      // users
       const { data: usersData, error: usersError } = await supabase
         .from('users')
         .select('id, username, email, role, updated_at');
       if (usersError) throw usersError;
       setUsers(usersData || []);
 
-      // tickets
       const { data: ticketsData, error: ticketsError } = await supabase
         .from('tickets')
         .select('ticket_id, ticket_no, gnsw_truck_no, date, submitted_at, sad_no, gross, tare, net, file_url, driver, status, operation')
         .order('submitted_at', { ascending: false })
-        .limit(1000);
+        .limit(5000);
       if (ticketsError) throw ticketsError;
       setTickets(ticketsData || []);
 
-      // outgate
       const { data: outData, error: outError } = await supabase
         .from('outgate')
         .select('id, ticket_id, ticket_no, vehicle_number, driver, sad_no, gross, tare, net, created_at')
         .order('created_at', { ascending: false })
-        .limit(1000);
+        .limit(5000);
       if (outError) throw outError;
       setOutgates(outData || []);
 
-      // analytics: gateOpsToday counts tickets for today with status Pending or Exited
-      const gateOpsToday = (ticketsData || []).filter((r) =>
-        isToday(r.date || r.submitted_at) && statusCountsAsGateOp(r.status)
-      ).length;
-
-      const ticketsProcessed = (ticketsData || []).length;
-      const trucksExited = (ticketsData || []).filter((r) => String(r.status || '').toLowerCase() === 'exited').length;
-      const reportsGenerated = (ticketsData || []).filter((r) => !!r.file_url).length;
-
-      setAnalytics({
-        gateOpsToday,
-        ticketsProcessed,
-        trucksExited,
-        reportsGenerated,
-        unreadNotifications: 0,
-      });
-
-      // build recent activity
-      const activity = buildActivityFromState(ticketsData || [], outData || [], usersData || []);
-      setRecentActivity(activity);
+      // recompute analytics & recent activity
+      recomputeAnalytics(ticketsData || [], outData || []);
+      // Recent activity built from arrays (memoized below)
     } catch (err) {
       console.error('Admin panel fetch error', err);
       toast({ title: 'Error fetching dashboard data', description: err?.message || 'Unexpected error', status: 'error', duration: 6000, isClosable: true });
+      setUsers([]);
+      setTickets([]);
+      setOutgates([]);
+      setAnalytics((prev) => ({ ...prev, ticketsProcessed: 0, trucksExited: 0, gateOpsToday: 0, reportsGenerated: 0 }));
     } finally {
       setLoadingData(false);
       setLoadingUsers(false);
     }
-  }, [buildActivityFromState, toast]);
+  }, [recomputeAnalytics, toast]);
 
   useEffect(() => {
     if (user && user.role === 'admin') fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchData, user]);
 
-  // ---------- delta updates helper ----------
-  const adjustAnalyticsDeltaForTicketChange = useCallback((eventType, newRec, oldRec) => {
-    setAnalytics((prev) => {
-      let {
-        gateOpsToday: prevGate,
-        ticketsProcessed: prevTickets,
-        trucksExited: prevTrucks,
-        reportsGenerated: prevReports,
-        unreadNotifications: prevUnread,
-      } = prev;
-
-      const newStatus = newRec ? String(newRec.status || '').toLowerCase() : null;
-      const oldStatus = oldRec ? String(oldRec.status || '').toLowerCase() : null;
-
-      const newIsGateOp = newRec ? isToday(newRec.date || newRec.submitted_at) && statusCountsAsGateOp(newRec.status) : false;
-      const oldIsGateOp = oldRec ? isToday(oldRec.date || oldRec.submitted_at) && statusCountsAsGateOp(oldRec.status) : false;
-
-      const newHasFile = !!(newRec && newRec.file_url);
-      const oldHasFile = !!(oldRec && oldRec.file_url);
-
-      if (eventType === 'INSERT') {
-        prevTickets = prevTickets + 1;
-        if (newHasFile) prevReports = prevReports + 1;
-        if (newIsGateOp) prevGate = prevGate + 1;
-        if (newStatus === 'exited') prevTrucks = prevTrucks + 1;
-      } else if (eventType === 'UPDATE') {
-        // reportsGenerated delta
-        if (!oldHasFile && newHasFile) prevReports += 1;
-        if (oldHasFile && !newHasFile) prevReports = Math.max(0, prevReports - 1);
-
-        // gateOpsToday delta
-        if (!oldIsGateOp && newIsGateOp) prevGate += 1;
-        if (oldIsGateOp && !newIsGateOp) prevGate = Math.max(0, prevGate - 1);
-
-        // trucksExited delta
-        if (oldStatus !== 'exited' && newStatus === 'exited') prevTrucks += 1;
-        if (oldStatus === 'exited' && newStatus !== 'exited') prevTrucks = Math.max(0, prevTrucks - 1);
-      } else if (eventType === 'DELETE') {
-        if (oldHasFile) prevReports = Math.max(0, prevReports - 1);
-        if (oldIsGateOp) prevGate = Math.max(0, prevGate - 1);
-        prevTickets = Math.max(0, prevTickets - 1);
-        if (oldStatus === 'exited') prevTrucks = Math.max(0, prevTrucks - 1);
-      }
-
-      // Animate trucksExited if changed upward
-      if (prevTrucks > (prevTrucksExitedRef.current ?? 0)) {
-        trucksAnim.start({ scale: [1, 1.08, 1], transition: { duration: 0.6 } });
-      }
-      prevTrucksExitedRef.current = prevTrucks;
-
-      return {
-        gateOpsToday: prevGate,
-        ticketsProcessed: prevTickets,
-        trucksExited: prevTrucks,
-        reportsGenerated: prevReports,
-        unreadNotifications: prevUnread,
-      };
-    });
-  }, [trucksAnim]);
-
-  // ---------- realtime subscriptions (Supabase v2 channels) ----------
+  // ---------- realtime subscriptions ----------
   useEffect(() => {
     if (!user || user.role !== 'admin') return;
 
@@ -338,7 +309,6 @@ export default function AdminPanel() {
           const newRec = resolveNewRecord(payload);
           const oldRec = resolveOldRecord(payload);
 
-          // Apply to local tickets array
           setTickets((prev) => {
             const copy = [...prev];
             if (eventType === 'INSERT') {
@@ -357,43 +327,6 @@ export default function AdminPanel() {
             }
             return copy;
           });
-
-          // Delta adjust analytics
-          try {
-            adjustAnalyticsDeltaForTicketChange(eventType, newRec, oldRec);
-          } catch (e) {
-            console.warn('analytics delta error', e);
-          }
-
-          // Exit toast (ticket status change to 'exited')
-          try {
-            const newStatus = newRec ? String(newRec.status || '').toLowerCase() : null;
-            const oldStatus = oldRec ? String(oldRec.status || '').toLowerCase() : null;
-            if ((eventType === 'INSERT' && newStatus === 'exited') || (eventType === 'UPDATE' && oldStatus !== 'exited' && newStatus === 'exited')) {
-              const link = `/outgate/tickets/${newRec?.ticket_id ?? newRec?.ticket_no ?? ''}`;
-              toast({
-                duration: 8000,
-                isClosable: true,
-                position: 'top-right',
-                render: ({ onClose }) => (
-                  <Box color="white" bg="teal.500" p={3} borderRadius="md" boxShadow="md">
-                    <HStack justify="space-between">
-                      <Box>
-                        <Text fontWeight="bold">Truck Exit</Text>
-                        <Text fontSize="sm">Truck {newRec?.gnsw_truck_no ?? newRec?.ticket_no ?? ''} has exited.</Text>
-                      </Box>
-                      <HStack>
-                        <Button size="sm" colorScheme="whiteAlpha" onClick={() => { onClose(); navigate(link); }}>Open</Button>
-                        <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
-                      </HStack>
-                    </HStack>
-                  </Box>
-                ),
-              });
-            }
-          } catch (e) {
-            console.warn('toast on exit error', e);
-          }
         }
       )
       .subscribe();
@@ -428,7 +361,7 @@ export default function AdminPanel() {
             return copy;
           });
 
-          // If outgate inserted, show toast linking to outgate
+          // show quick toast for an insert
           try {
             if (eventType === 'INSERT' && newRec) {
               const link = `/outgate/tickets/${newRec.ticket_id ?? newRec.ticket_no ?? ''}`;
@@ -460,16 +393,19 @@ export default function AdminPanel() {
       .subscribe();
 
     return () => {
-      try { ticketsChannel.unsubscribe(); } catch (e) { /* ignore */ }
-      try { outChannel.unsubscribe(); } catch (e) { /* ignore */ }
+      try { ticketsChannel.unsubscribe(); } catch (_) { /* ignore */ }
+      try { outChannel.unsubscribe(); } catch (_) { /* ignore */ }
     };
-  }, [user, adjustAnalyticsDeltaForTicketChange, toast, navigate]);
+  }, [user, toast, navigate]);
 
-  // When tickets/outgates/users arrays change, rebuild recentActivity list (we compute merged list)
+  // Whenever tickets or outgates arrays change, recompute analytics & recent activity (memoized)
   useEffect(() => {
-    const activity = buildActivityFromState(tickets, outgates, users);
-    setRecentActivity(activity);
-  }, [tickets, outgates, users, buildActivityFromState]);
+    recomputeAnalytics(tickets, outgates);
+    // recentActivity rebuilt via memo (below)
+  }, [tickets, outgates, recomputeAnalytics]);
+
+  // Recent activity memoized
+  const recentActivity = useMemo(() => buildActivityFromState(tickets, outgates, users), [tickets, outgates, users, buildActivityFromState]);
 
   // CSV export for activity
   const exportActivityCsv = () => {
@@ -526,19 +462,19 @@ export default function AdminPanel() {
     return { labels, datasets: [{ data, backgroundColor: labels.map((_, idx) => `hsl(${(idx * 60) % 360} 70% 60%)`) }] };
   }, [users]);
 
-  // activity filter + search applied
+  // displayed activity with filter + debounced search
   const displayedActivity = useMemo(() => {
     const arr = recentActivity.filter((a) => (activityFilter === 'all' ? true : a.type === activityFilter));
-    const q = (activitySearch || '').trim().toLowerCase();
+    const q = (debouncedActivitySearch || '').trim().toLowerCase();
     if (!q) return arr.slice(0, activityLimit);
     const filtered = arr.filter((it) => {
       const hay = (it.title + ' ' + JSON.stringify(it.meta || {})).toLowerCase();
       return hay.includes(q);
     });
     return filtered.slice(0, activityLimit);
-  }, [recentActivity, activityFilter, activityLimit, activitySearch]);
+  }, [recentActivity, activityFilter, activityLimit, debouncedActivitySearch]);
 
-  // ActivityItem component w/ popover & navigation
+  // ActivityItem
   const ActivityItem = ({ item }) => {
     const badgeColor = item.type === 'weighbridge' ? 'teal' : item.type === 'outgate' ? 'purple' : 'blue';
     const openDetail = () => {
@@ -555,6 +491,8 @@ export default function AdminPanel() {
       }
     };
 
+    const Icon = item.type === 'weighbridge' ? FiFileText : item.type === 'outgate' ? FiTruck : FiUsers;
+
     return (
       <Popover>
         <PopoverTrigger>
@@ -567,10 +505,13 @@ export default function AdminPanel() {
             animate={{ opacity: 1, y: 0 }}
             whileHover={{ y: -3 }}
             cursor="pointer"
+            role="group"
+            aria-label={`${item.type} activity`}
           >
             <HStack justify="space-between" align="start">
               <VStack align="start" spacing={0}>
                 <HStack>
+                  <Box as={Icon} boxSize={4} color="gray.500" />
                   <Text fontSize="sm" fontWeight="semibold">{item.title}</Text>
                   {(item.type === 'weighbridge' || item.type === 'outgate') && (
                     <Button size="xs" onClick={(e) => { e.stopPropagation(); openDetail(); }} variant="ghost" colorScheme="blue">View</Button>
@@ -586,7 +527,7 @@ export default function AdminPanel() {
                 )}
               </VStack>
 
-              <Badge colorScheme={badgeColor} bg={activityBadgeBg} px={2} py={1} borderRadius="md">{item.type}</Badge>
+              <Badge colorScheme={badgeColor} bg={activityBadgeBg} px={2} py={1} borderRadius="md" textTransform="capitalize">{item.type}</Badge>
             </HStack>
           </MotionBox>
         </PopoverTrigger>
@@ -620,6 +561,7 @@ export default function AdminPanel() {
   const handleShowLessActivity = () => setActivityLimit((p) => Math.max(4, p - 8));
   const refreshData = async () => { await fetchData(); toast({ title: 'Data refreshed', status: 'success', duration: 1500 }); };
 
+  // Loading skeleton UI while fetching
   if (authLoading || loadingData || loadingUsers) {
     return (
       <Box textAlign="center" mt="20">
@@ -633,47 +575,34 @@ export default function AdminPanel() {
     <Box mt={8} px={{ base: '4', md: '10' }} pb={8}>
       <Heading mb={6} textAlign="center" fontWeight="extrabold">Admin Panel</Heading>
 
-      {/* Top Stats */}
-      <SimpleGrid columns={statsColumns} spacing={6} mb={6}>
-        {Object.entries(analytics).map(([key, value]) => {
-          const isTrucksExited = key === 'trucksExited';
-          return (
-            <MotionBox
-              key={key}
-              p={5}
-              boxShadow={shadows.md}
-              borderRadius="lg"
-              bg={isTrucksExited ? 'linear-gradient(90deg, rgba(16,185,129,0.04), rgba(16,185,129,0.01))' : statBg}
-              border={isTrucksExited ? '1px solid' : undefined}
-              borderColor={isTrucksExited ? 'teal.300' : undefined}
-              whileHover={{ scale: 1.03, boxShadow: shadows.lg }}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-            >
-              <Stat>
-                <StatLabel fontWeight="bold" fontSize="sm" color="gray.600">{friendlyKeyLabel(key)}</StatLabel>
-                {isTrucksExited ? (
-                  <MotionStatNumber
-                    fontSize="2xl"
-                    animate={trucksAnim}
-                    transition={{ type: 'spring', stiffness: 300, damping: 20 }}
-                  >
-                    {value ?? 0}
-                  </MotionStatNumber>
-                ) : (
-                  <StatNumber fontSize="2xl">{value ?? 0}</StatNumber>
-                )}
-                <StatHelpText fontSize="xs" color="gray.500">
-                  {key === 'gateOpsToday' && 'Entries & exits today (Pending + Exited)'}
-                  {key === 'ticketsProcessed' && 'All tickets processed'}
-                  {key === 'trucksExited' && 'Tickets marked Exited'}
-                  {key === 'reportsGenerated' && 'Tickets with attachments'}
-                  {key === 'unreadNotifications' && 'Pending alerts'}
-                </StatHelpText>
-              </Stat>
-            </MotionBox>
-          );
-        })}
+      {/* Top Stats — use responsive minChildWidth for better scaling */}
+      <SimpleGrid minChildWidth="220px" spacing={6} mb={6}>
+        <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel fontWeight="bold">Gate Ops (Today)</StatLabel>
+          <StatNumber>{analytics.gateOpsToday ?? 0}</StatNumber>
+          <StatHelpText>Entries & exits today (Pending + Exited)</StatHelpText>
+        </Stat>
+
+        <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel fontWeight="bold">Tickets Processed</StatLabel>
+          <StatNumber>{analytics.ticketsProcessed ?? 0}</StatNumber>
+          <StatHelpText>Unique tickets processed (tickets table)</StatHelpText>
+        </Stat>
+
+        <Stat bg="linear-gradient(90deg, rgba(16,185,129,0.04), rgba(16,185,129,0.01))" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="teal.300">
+          <StatLabel fontWeight="bold">Trucks Exited</StatLabel>
+          <MotionStatNumber fontSize="2xl" animate={trucksAnim} transition={{ type: 'spring', stiffness: 300, damping: 20 }}>
+            {analytics.trucksExited ?? 0}
+          </MotionStatNumber>
+          <StatHelpText>Unique tickets with exit recorded (tickets or outgate)</StatHelpText>
+        </Stat>
+
+        <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel fontWeight="bold">Reports Generated</StatLabel>
+          <StatNumber>{analytics.reportsGenerated ?? 0}</StatNumber>
+          <StatHelpText>Tickets with attachments</StatHelpText>
+        </Stat>
+
       </SimpleGrid>
 
       <Divider mb={6} />
@@ -742,7 +671,7 @@ export default function AdminPanel() {
               <option value="outgate">Outgate</option>
               <option value="users">Users</option>
             </Select>
-            <Input size="sm" placeholder="Search activity (ticket/truck/driver/SAD)" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} />
+            <Input size="sm" placeholder="Search activity (ticket/truck/driver/SAD)" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} aria-label="Search activity" />
           </VStack>
         </Box>
       </SimpleGrid>
@@ -778,7 +707,7 @@ export default function AdminPanel() {
                 <Text fontSize="sm" fontWeight="semibold">{u.username}</Text>
                 <Text fontSize="xs" color="gray.500">{u.role}</Text>
               </VStack>
-              <Badge ml="auto">{u.role}</Badge>
+              <Badge ml="auto" colorScheme="gray">{u.role}</Badge>
             </HStack>
           ))}
         </SimpleGrid>
