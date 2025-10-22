@@ -44,6 +44,7 @@ import {
 import { FaFilePdf } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import logoUrl from '../assets/logo.png';
+import { useAuth } from '../context/AuthContext';
 
 const ITEMS_PER_PAGE = 5;
 
@@ -134,8 +135,6 @@ function openPrintableWindow(html, title = 'Report') {
 }
 
 /* Deduplicate outgate rows by ticket number.
-   - If ticket_no exists, keep only one row per ticket_no (choose newest outgateDateTime).
-   - If ticket_no is absent (manual rows), keep them (keyed by manual:id) — they are not deduplicated by ticket_no.
 */
 function dedupeReportsByTicketNo(rows = []) {
   const map = new Map();
@@ -149,22 +148,18 @@ function dedupeReportsByTicketNo(rows = []) {
       if (!existing) map.set(tn, r);
       else {
         const existingTime = existing.outgateDateTime ? new Date(existing.outgateDateTime).getTime() : 0;
-        if (rTime >= existingTime) map.set(tn, r); // keep newest
+        if (rTime >= existingTime) map.set(tn, r);
       }
     } else {
-      // keep manual rows as-is; they don't have ticketNo to dedupe by
       manualRows.push(r);
     }
   }
 
-  // return combined: first ticket-based unique rows, then manual rows
   return [...Array.from(map.values()), ...manualRows];
 }
 
-/* -----------------------
-   Component
------------------------ */
 export default function OutgateReports() {
+  const { user } = useAuth();
   const [reports, setReports] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [dateFrom, setDateFrom] = useState('');
@@ -176,9 +171,7 @@ export default function OutgateReports() {
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
-  // Keep `currentPage` referenced so it's considered used by linters/compilers until pagination is implemented.
   useEffect(() => {
-    // This effect intentionally does nothing; it only reads currentPage to avoid "assigned but never used".
     void currentPage;
   }, [currentPage]);
 
@@ -186,16 +179,14 @@ export default function OutgateReports() {
   const { isOpen: isDetailsOpen, onClose: onDetailsClose } = useDisclosure();
   const [selectedReport] = useState(null);
 
-  // SAD search results (deduped from tickets table)
+  // SAD search results
   const [sadResults, setSadResults] = useState([]);
   const [sadLoading, setSadLoading] = useState(false);
   const sadDebounceRef = useRef(null);
 
-  // tickets mapping and total transactions (deduplicated)
-  const [ticketStatusMap, setTicketStatusMap] = useState({}); // ticket_no -> status
-  const [totalTransactions, setTotalTransactions] = useState(0); // unique ticket_no count across system
+  const [ticketStatusMap, setTicketStatusMap] = useState({});
+  const [totalTransactions, setTotalTransactions] = useState(0);
 
-  // SAD declaration metadata (declared weight / status)
   const [sadDeclaration, setSadDeclaration] = useState({ declaredWeight: null, status: 'Unknown', exists: false });
 
   useEffect(() => {
@@ -205,7 +196,6 @@ export default function OutgateReports() {
       try {
         setLoading(true);
 
-        // fetch outgate rows (includes created_at)
         const { data: outData, error: outErr } = await supabase
           .from('outgate')
           .select('*')
@@ -220,7 +210,6 @@ export default function OutgateReports() {
             ticketId: og.ticket_id,
             ticketNo: og.ticket_no || og.ticketNo || null,
             vehicleNumber: og.vehicle_number || og.vehicleNo || '',
-            // IMPORTANT: use created_at as the timestamp for filters
             outgateDateTime: og.created_at || og.outgate_at || null,
             driverName: og.driver || og.driverName || null,
             destination: og.consignee || og.destination || null,
@@ -239,7 +228,6 @@ export default function OutgateReports() {
         if (!mounted) return;
         setReports(mapped);
 
-        // fetch tickets statuses (Pending/Exited) to create map of ticket_no -> status
         const { data: ticketsData, error: ticketsErr } = await supabase
           .from('tickets')
           .select('ticket_no,status');
@@ -256,7 +244,6 @@ export default function OutgateReports() {
             map[tn] = t.status ?? map[tn] ?? 'Pending';
           });
 
-          // also include ticket_nos present in outgate that may not exist in tickets table
           for (const r of mapped) {
             if (r.ticketNo && !map[r.ticketNo]) map[r.ticketNo] = r.rawRow?.status ?? 'Exited';
           }
@@ -286,19 +273,13 @@ export default function OutgateReports() {
     };
   }, [toast]);
 
-  // small helper to produce Date object from a date string ("YYYY-MM-DD") and optional time "HH:MM"
-      const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
-        if (!dateStr) return null;
-        const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
-        // Normalize time format:
-        const fullTime = time.length <= 5 ? `${time}:00` : time;
-        return new Date(`${dateStr}T${fullTime}`);
-      };
+  const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
+    if (!dateStr) return null;
+    const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
+    const fullTime = time.length <= 5 ? `${time}:00` : time;
+    return new Date(`${dateStr}T${fullTime}`);
+  };
 
-  /* SAD search: dedupe by ticket_no, newest-first
-     Now: when mapping ticket -> UI row, try to attach the matching outgate row (if any)
-     and use that outgate.created_at as the timestamp for filtering (so SAD views use outgate timestamps).
-  */
   useEffect(() => {
     if (sadDebounceRef.current) {
       clearTimeout(sadDebounceRef.current);
@@ -308,12 +289,10 @@ export default function OutgateReports() {
     const q = (searchTerm || '').trim();
     if (!q) {
       setSadResults([]);
-      // clear declaration when search cleared
       setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
       return;
     }
 
-    // Fetch SAD declaration whenever a search term exists (so the SAD stats card can show declared weight/status)
     const fetchSadDeclaration = async () => {
       try {
         const { data: sadRow, error } = await supabase
@@ -337,28 +316,24 @@ export default function OutgateReports() {
       }
     };
 
-    // Debounced ticket search
     sadDebounceRef.current = setTimeout(async () => {
       setSadLoading(true);
 
       try {
-        // fetch tickets for matching SAD
         const { data: ticketsData, error } = await supabase
           .from('tickets')
           .select('*')
           .ilike('sad_no', `%${q}%`)
-          .order('date', { ascending: false }); // newest-first by ticket date
+          .order('date', { ascending: false });
 
         if (error) {
           console.warn('SAD lookup error', error);
           setSadResults([]);
           setSadLoading(false);
-          // still try to fetch declaration
           await fetchSadDeclaration();
           return;
         }
 
-        // Deduplicate by ticket_no: keep newest (by ticket date/submitted_at)
         const dedupeMap = new Map();
         (ticketsData || []).forEach((t) => {
           const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
@@ -374,13 +349,9 @@ export default function OutgateReports() {
 
         const deduped = Array.from(dedupeMap.values());
 
-        // Map to UI-friendly shape:
-        // - For each ticket, try to find the latest outgate report that matches the ticket_no (from `reports` state).
-        // - Use outgateDateTime for date/time filtering and display when present.
         const mapped = deduped
           .map((t) => {
             const ticketNo = t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null);
-            // find matching outgate rows for this ticketNo (if any) — pick newest
             const matchingOutgates = reports.filter((r) => r.ticketNo && String(r.ticketNo) === String(ticketNo));
             let chosenOutgate = null;
             if (matchingOutgates.length > 0) {
@@ -401,9 +372,7 @@ export default function OutgateReports() {
               ticketId: t.ticket_id ?? t.id ?? ticketNo ?? `${Math.random()}`,
               ticketNo,
               sadNo: t.sad_no ?? t.sadNo ?? null,
-              // prefer the outgate timestamp when available (so filters use outgate.created_at)
               date: chosenOutgate ? chosenOutgate.outgateDateTime : (t.date ?? t.submitted_at ?? t.created_at ?? null),
-              // also keep a reference to any found outgate row
               outgateRef: chosenOutgate ?? null,
               truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
               gross: computed.gross,
@@ -414,7 +383,6 @@ export default function OutgateReports() {
             };
           });
 
-        // keep newest-first by the chosen date (outgate or ticket date)
         mapped.sort((a, b) => {
           const aT = a.date ? new Date(a.date).getTime() : 0;
           const bT = b.date ? new Date(b.date).getTime() : 0;
@@ -423,12 +391,10 @@ export default function OutgateReports() {
 
         setSadResults(mapped);
 
-        // fetch SAD declaration too
         await fetchSadDeclaration();
       } catch (err) {
         console.error('SAD search failed', err);
         setSadResults([]);
-        // still try to fetch declaration
         await fetchSadDeclaration();
       } finally {
         setSadLoading(false);
@@ -438,30 +404,19 @@ export default function OutgateReports() {
     return () => {
       if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
     };
-    // include `reports` so we can attach outgate timestamps when mapping SAD -> outgate
   }, [searchTerm, reports]);
 
-  /* -----------------------
-     Apply filters to deduplicated outgate reports
-     - dedupe full reports by ticket_no earlier with dedupeReportsByTicketNo
-     - Then filter by search/date/time (based on outgate.created_at)
-  ----------------------- */
   const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
 
-  // Build explicit start/end Date objects from the user inputs.
-  // Time From only applied if Date From is provided; Time To only applied if Date To is provided.
   const { startDateTime, endDateTime } = useMemo(() => {
     let start = null;
     let end = null;
 
     if (dateFrom) {
-      // If dateFrom provided, attach timeFrom if present, else start of day
       start = makeDateTime(dateFrom, timeFrom ? `${timeFrom}:00` : '00:00:00', true);
     }
 
     if (dateTo) {
-      // If dateTo provided, attach timeTo if present, else end of day
-      // NOTE: timeTo only used if dateTo provided (per your request).
       end = makeDateTime(dateTo, timeTo ? `${timeTo}:00` : '23:59:59.999', false);
     }
 
@@ -472,7 +427,6 @@ export default function OutgateReports() {
     const term = (searchTerm || '').trim().toLowerCase();
 
     return dedupedReports.filter((r) => {
-      // search term matches (vehicle, ticket, driver, sad, container, destination)
       if (term) {
         const hay = [
           r.vehicleNumber,
@@ -485,13 +439,10 @@ export default function OutgateReports() {
         if (!hay.includes(term)) return false;
       }
 
-      // date/time range: we use outgateDateTime (which was set from created_at)
       if (startDateTime || endDateTime) {
         if (!r.outgateDateTime) return false;
         const d = new Date(r.outgateDateTime);
         if (Number.isNaN(d.getTime())) return false;
-
-        // startDateTime/endDateTime are full Date objects. If only start provided, we only check >= start.
         if (startDateTime && d < startDateTime) return false;
         if (endDateTime && d > endDateTime) return false;
       }
@@ -500,7 +451,6 @@ export default function OutgateReports() {
     });
   }, [dedupedReports, searchTerm, startDateTime, endDateTime]);
 
-  // newest-first sort (for export / pagination if needed)
   const sortedReports = useMemo(() => {
     const arr = filteredReports.slice();
     arr.sort((a, b) => {
@@ -511,8 +461,6 @@ export default function OutgateReports() {
     return arr;
   }, [filteredReports]);
 
-  // Ensure dedupe-by-ticketNo once more for totals (guard - filteredReports should already be deduped,
-  // but this makes intention explicit and ensures no ticket counted twice).
   const uniqueFilteredReports = useMemo(() => {
     const map = new Map();
     const manual = [];
@@ -521,7 +469,6 @@ export default function OutgateReports() {
       if (tn) {
         if (!map.has(tn)) map.set(tn, r);
         else {
-          // keep newest (by outgateDateTime)
           const existing = map.get(tn);
           const a = existing.outgateDateTime ? new Date(existing.outgateDateTime).getTime() : 0;
           const b = r.outgateDateTime ? new Date(r.outgateDateTime).getTime() : 0;
@@ -534,13 +481,8 @@ export default function OutgateReports() {
     return [...map.values(), ...manual];
   }, [filteredReports]);
 
-  // ------ SAD: apply date/time filters to SAD results (so SAD totals respect filters)
-  // We filter `sadResults` using the mapped `date` property; that property prefers the outgate.created_at timestamp
-  // if an outgate exists for the ticket (so SAD totals reflect outgate timestamps)
   const sadFilteredResults = useMemo(() => {
     if (!sadResults || sadResults.length === 0) return [];
-
-    // Build start/end datetimes same as above (we only filter using the same startDateTime/endDateTime)
     const s = startDateTime;
     const e = endDateTime;
 
@@ -548,15 +490,12 @@ export default function OutgateReports() {
       if (!t.date) return false;
       const d = new Date(t.date);
       if (Number.isNaN(d.getTime())) return false;
-
       if (s && d < s) return false;
       if (e && d > e) return false;
-
       return true;
     });
   }, [sadResults, startDateTime, endDateTime]);
 
-  // sad totals used by SAD section
   const sadTotalsMemo = useMemo(() => {
     if (!sadFilteredResults || sadFilteredResults.length === 0) return { transactions: 0, cumulativeNet: 0 };
     let cumulativeNet = 0;
@@ -567,9 +506,6 @@ export default function OutgateReports() {
     return { transactions: sadFilteredResults.length, cumulativeNet };
   }, [sadFilteredResults]);
 
-  // Choose which source to show top 'Filtered Rows' & 'Cumulative Net (view)' from:
-  // - If a SAD search is active, base those cards on the SAD filtered results (so they match the SAD table).
-  // - Otherwise, base those cards on the deduped outgate filtered results.
   const statsSource = useMemo(() => {
     return searchTerm ? sadFilteredResults : uniqueFilteredReports;
   }, [searchTerm, sadFilteredResults, uniqueFilteredReports]);
@@ -577,7 +513,6 @@ export default function OutgateReports() {
   const statsTotals = useMemo(() => {
     let cumulativeNet = 0;
     for (const r of statsSource) {
-      // for SAD rows, use r.net/gross etc; for outgate rows the same fields exist
       const w = computeWeights(r);
       cumulativeNet += (w.net || 0);
     }
@@ -587,7 +522,6 @@ export default function OutgateReports() {
     };
   }, [statsSource]);
 
-  // small helper to count unique tickets in the current statsSource (should be deduped by ticket)
   const statsUniqueTickets = useMemo(() => {
     const s = new Set();
     for (const r of statsSource) {
@@ -596,12 +530,35 @@ export default function OutgateReports() {
     return s.size;
   }, [statsSource]);
 
-  // Removed unused `paginatedReports` variable to avoid lint/compile warning.
-  // If you need pagination in the UI later, use `sortedReports.slice(...)` where rendering happens
-  // or reintroduce a pagination helper and ensure it's used by the component.
+  // --- NEW: Log report generation to reports_generated table ---
+  const logReportGeneration = async (reportType, fileUrl = null) => {
+    try {
+      const generatedBy = user?.id ?? user?.email ?? null;
+      const payload = {
+        report_type: reportType,
+        generated_by: generatedBy,
+        generated_at: new Date().toISOString(),
+        file_url: fileUrl,
+      };
+      const { data, error } = await supabase.from('reports_generated').insert([payload]).select().single();
+      if (error) {
+        // non-fatal, but notify admin
+        toast({ title: 'Report log failed', description: error.message || String(error), status: 'warning', duration: 4000 });
+        return null;
+      }
+      // optimistically update local list so UI (and activity feed) show it immediately
+      setReports((prev) => [data, ...(prev || [])]);
+      toast({ title: 'Report logged', status: 'success', duration: 1800 });
+      return data;
+    } catch (err) {
+      console.error('logReportGeneration', err);
+      toast({ title: 'Failed to log report', description: err.message || String(err), status: 'error', duration: 4000 });
+      return null;
+    }
+  };
 
-  // Export current (unique) view as CSV (uses sortedReports / filteredReports)
-  const handleExportCsv = () => {
+  // Export current unique/filtered view as CSV and log the generation
+  const handleExportCsv = async () => {
     const rows = sortedReports.map(r => {
       return {
         'Ticket No': r.ticketNo ?? '',
@@ -622,9 +579,12 @@ export default function OutgateReports() {
     }
     exportToCSV(rows, 'outgate-reports.csv');
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
+
+    // Log generation
+    await logReportGeneration('Outgate CSV', null);
   };
 
-  const handlePrintSad = () => {
+  const handlePrintSad = async () => {
     if (!sadFilteredResults || sadFilteredResults.length === 0) {
       toast({ title: 'No SAD results', status: 'info', duration: 2000 });
       return;
@@ -670,10 +630,14 @@ export default function OutgateReports() {
       </table>
     `;
 
+    // Open printable window (trigger print)
     openPrintableWindow(html, `SAD-${searchTerm}`);
+
+    // Log generation (we don't have a persisted file URL in this flow)
+    await logReportGeneration('SAD PDF', null);
   };
 
-  const handleExportSadCsv = () => {
+  const handleExportSadCsv = async () => {
     if (!sadFilteredResults || sadFilteredResults.length === 0) {
       toast({ title: 'No rows to export', status: 'info', duration: 2000 });
       return;
@@ -690,9 +654,10 @@ export default function OutgateReports() {
     }));
     exportToCSV(rows, `SAD-${searchTerm || 'report'}.csv`);
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
-  };
 
-  // openDetails removed — selection/modal can be triggered inline when needed
+    // Log generation
+    await logReportGeneration('SAD CSV', null);
+  };
 
   const handleResetAll = () => {
     setSearchTerm('');
@@ -735,7 +700,6 @@ export default function OutgateReports() {
           <StatHelpText>unique ticket numbers</StatHelpText>
         </Stat>
 
-        {/* Replaced "Filtered Rows" with "Unique Tickets in View" */}
         <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Unique Tickets in View</StatLabel>
           <StatNumber>{statsUniqueTickets}</StatNumber>
@@ -749,7 +713,6 @@ export default function OutgateReports() {
         </Stat>
       </SimpleGrid>
 
-      {/* SAD detail stats cards (shown when a SAD search is active) */}
       { (searchTerm && (sadResults.length > 0 || sadDeclaration.exists)) && (
         <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mb={6}>
           <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
@@ -802,7 +765,7 @@ export default function OutgateReports() {
               <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
             <Text fontSize="xs" color="gray.500" mt={1}>
-              Time From is applied to Date From; Time To is applied to Date To. Use different dates for cross-midnight ranges (e.g. 27/09 20:30 → 28/09 08:00).
+              Time From is applied to Date From; Time To is applied to Date To. Use different dates for cross-midnight ranges.
             </Text>
           </Box>
 
@@ -817,7 +780,6 @@ export default function OutgateReports() {
         </SimpleGrid>
       </Box>
 
-      {/* SAD results (only shown when SAD search is active) */}
       {sadLoading ? (
         <Flex justify="center" mb={4}><Spinner /></Flex>
       ) : (sadFilteredResults && sadFilteredResults.length > 0) ? (
@@ -874,7 +836,6 @@ export default function OutgateReports() {
         </Box>
       ) : null}
 
-      {/* When no search & no SAD results, show friendly message */}
       {!searchTerm && !sadFilteredResults?.length && !loading && (
         <Box bg="white" p={6} borderRadius="md" boxShadow="sm" textAlign="center" color="gray.600">
           <Text>No table to display. Type a SAD number (or other search) to see filtered transactions.</Text>
@@ -885,7 +846,6 @@ export default function OutgateReports() {
         <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
       )}
 
-      {/* Details modal (kept for any future per-row details) */}
       <Modal isOpen={isDetailsOpen} onClose={onDetailsClose} size="4xl" scrollBehavior="inside">
         <ModalOverlay />
         <ModalContent maxW="90vw">

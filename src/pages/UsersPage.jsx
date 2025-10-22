@@ -423,25 +423,8 @@ export default function UsersPage() {
   };
 
   // change password (admin)
-  const handleResetPassword = async (userId, email) => {
-    if (!supabase.auth?.admin?.updateUserById) {
-      toast({ title: 'Admin API not available', description: 'Password reset requires server-side admin API (service key)', status: 'info' });
-      return;
-    }
-    const newPw = prompt(`Set new password for ${email} (min 6 chars):`);
-    if (!newPw || newPw.length < 6) {
-      toast({ title: 'Aborted', description: 'Password not set or too short', status: 'info' });
-      return;
-    }
-    try {
-      const { error } = await supabase.auth.admin.updateUserById(userId, { password: newPw });
-      if (error) throw error;
-      toast({ title: 'Password updated', status: 'success' });
-    } catch (err) {
-      console.error('pw reset', err);
-      toast({ title: 'Password update failed', description: err.message || String(err), status: 'error' });
-    }
-  };
+  // Removed unused handleResetPassword function to avoid "assigned a value but never used" lint/compile warning.
+  // If you need password reset UI later, reintroduce the function and wire it into the row actions.
 
   // CSV export for current filteredSorted set
   const downloadCSV = (rows = []) => {

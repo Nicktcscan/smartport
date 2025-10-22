@@ -30,6 +30,20 @@ import {
   PopoverHeader,
   PopoverCloseButton,
   Input,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalBody,
+  ModalFooter,
+  ModalCloseButton,
+  Table,
+  Thead,
+  Tbody,
+  Tr,
+  Th,
+  Td,
+  useDisclosure,
 } from '@chakra-ui/react';
 import { motion, useAnimation } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
@@ -66,34 +80,35 @@ const MotionStatNumber = motion(StatNumber);
 const shadows = { md: 'rgba(0,0,0,0.08) 0px 4px 12px', lg: 'rgba(0,0,0,0.12) 0px 10px 24px' };
 const DEFAULT_CHART_DAYS = 7;
 
-/* Small debounce hook (in-file) */
+/* small debounce hook */
 function useDebounce(value, delay = 250) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
-    const id = setTimeout(() => setDebounced(value), delay);
-    return () => clearTimeout(id);
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
   }, [value, delay]);
   return debounced;
 }
-
 
 export default function AdminPanel() {
   const toast = useToast();
   const navigate = useNavigate();
   const { user, loading: authLoading } = useAuth();
 
-  // theme / UI tokens
+  // theme
   const statBg = useColorModeValue('white', 'gray.700');
   const activityItemBg = useColorModeValue('gray.50', 'gray.800');
   const activityBadgeBg = useColorModeValue('gray.100', 'gray.700');
   const userCardBg = useColorModeValue('white', 'gray.800');
 
-  // state
+  // data
   const [users, setUsers] = useState([]);
   const [tickets, setTickets] = useState([]);
   const [outgates, setOutgates] = useState([]);
+  const [reports, setReports] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
   const [loadingData, setLoadingData] = useState(true);
+  const [loadingReports, setLoadingReports] = useState(true);
 
   // analytics
   const [analytics, setAnalytics] = useState({
@@ -110,11 +125,21 @@ export default function AdminPanel() {
   const [activityLimit, setActivityLimit] = useState(8);
   const [activitySearch, setActivitySearch] = useState('');
   const debouncedActivitySearch = useDebounce(activitySearch, 250);
+
+  // reports modal/popover
+  const { isOpen: isReportsOpen, onOpen: onReportsOpen, onClose: onReportsClose } = useDisclosure();
+  const [reportSearch, setReportSearch] = useState('');
+  const [reportSortDir, setReportSortDir] = useState('desc');
+  const [reportLoadingExport, setReportLoadingExport] = useState(false);
+  const debouncedReportSearch = useDebounce(reportSearch, 200);
+
   const activityRef = useRef(null);
 
-  // trucksExited animation controller
+  // animations & prev refs for pulse
   const trucksAnim = useAnimation();
-  const prevTrucksExitedRef = useRef(analytics.trucksExited);
+  const reportsAnim = useAnimation();
+  const prevTrucksExitedRef = useRef(0);
+  const prevReportsRef = useRef(0);
 
   // redirect non-admins
   useEffect(() => {
@@ -124,7 +149,7 @@ export default function AdminPanel() {
     }
   }, [authLoading, user, navigate]);
 
-  // ---------- helpers ----------
+  // helpers
   const isToday = (dateLike) => {
     if (!dateLike) return false;
     const d = new Date(dateLike);
@@ -139,12 +164,10 @@ export default function AdminPanel() {
     return s === 'pending' || s === 'exited';
   };
 
-  /* Build activity list (memoized below) -- limit rows and normalize */
-  const buildActivityFromState = useCallback((ticketsArr = [], outgatesArr = [], usersArr = []) => {
+  // Build recent activity (includes reports)
+  const buildActivityFromState = useCallback((ticketsArr = [], outgatesArr = [], usersArr = [], reportsArr = []) => {
     const items = [];
-
-    // Only take recent N entries from each source to avoid huge arrays
-    const take = (arr, n = 60) => (arr || []).slice(0, n);
+    const take = (arr, n = 80) => (arr || []).slice(0, n);
 
     take(ticketsArr, 80).forEach((row) => {
       items.push({
@@ -176,29 +199,40 @@ export default function AdminPanel() {
       });
     });
 
+    // include recent reports (up to 40)
+    if (reportsArr && reportsArr.length) {
+      (reportsArr || []).slice(0, 40).forEach((r) => {
+        items.push({
+          id: `report-${r.id}`,
+          type: 'report',
+          time: r.generated_at || r.created_at || new Date().toISOString(),
+          title: `${r.report_type || 'Report'} generated`,
+          meta: { report_id: r.id, generated_by: r.generated_by, file_url: r.file_url, report_type: r.report_type },
+        });
+      });
+    }
+
     items.sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
     return items;
   }, []);
 
-  // ---------- payload resolvers ----------
+  // payload resolvers for realtime
   const resolveEventType = (payload) => {
     if (!payload) return null;
     return payload.eventType || payload.event || payload.type || (payload.payload && payload.payload.type) || null;
   };
-
   const resolveNewRecord = (payload) => {
     if (!payload) return null;
     return payload.new || payload.record || (payload.payload && payload.payload.new) || null;
   };
-
   const resolveOldRecord = (payload) => {
     if (!payload) return null;
     return payload.old || payload.oldRecord || (payload.payload && payload.payload.old) || null;
   };
 
-  // ---------- analytics recompute (single source of truth) ----------
-  const recomputeAnalytics = useCallback((ticketsArr = [], outgatesArr = []) => {
-    // ticketsProcessed => count unique ticket numbers (fallback to ticket_id)
+  // recompute analytics single-source (tickets/outgates/reports)
+  const recomputeAnalytics = useCallback((ticketsArr = [], outgatesArr = [], reportsArr = []) => {
+    // ticketsProcessed: unique ticket_no or ticket_id
     const ticketIdSet = new Set();
     (ticketsArr || []).forEach((t) => {
       const tn = (t.ticket_no ?? t.ticketNo ?? '').toString().trim();
@@ -208,7 +242,7 @@ export default function AdminPanel() {
     });
     const ticketsProcessed = ticketIdSet.size;
 
-    // trucksExited: unique tickets that either have status 'exited' in tickets table or appear in outgate records
+    // trucksExited: status 'exited' OR present in outgates
     const exitedSet = new Set();
     (ticketsArr || []).forEach((t) => {
       const st = (t.status ?? '').toString().toLowerCase();
@@ -229,13 +263,19 @@ export default function AdminPanel() {
       isToday(r.date || r.submitted_at) && statusCountsAsGateOp(r.status)
     ).length;
 
-    const reportsGenerated = (ticketsArr || []).filter((r) => !!r.file_url).length;
+    // reportsGenerated derived from reportsArr length (single source)
+    const reportsGenerated = (reportsArr || []).length;
 
-    // animate trucksExited if increasing
+    // animations for increases
     if (trucksExited > (prevTrucksExitedRef.current ?? 0)) {
       trucksAnim.start({ scale: [1, 1.08, 1], transition: { duration: 0.6 } });
     }
     prevTrucksExitedRef.current = trucksExited;
+
+    if (reportsGenerated > (prevReportsRef.current ?? 0)) {
+      reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } });
+    }
+    prevReportsRef.current = reportsGenerated;
 
     setAnalytics((prev) => ({
       gateOpsToday,
@@ -244,48 +284,46 @@ export default function AdminPanel() {
       reportsGenerated,
       unreadNotifications: prev.unreadNotifications ?? 0,
     }));
-  }, [trucksAnim]);
+  }, [reportsAnim, trucksAnim]);
 
-  // ---------- initial fetch ----------
+  // initial fetch (parallel)
   const fetchData = useCallback(async () => {
     setLoadingData(true);
     setLoadingUsers(true);
+    setLoadingReports(true);
     try {
-      const { data: usersData, error: usersError } = await supabase
-        .from('users')
-        .select('id, username, email, role, updated_at');
-      if (usersError) throw usersError;
-      setUsers(usersData || []);
+      // fetch in parallel to reduce time
+      const [usersRes, ticketsRes, outRes, reportsRes] = await Promise.all([
+        supabase.from('users').select('id, username, email, role, updated_at'),
+        supabase.from('tickets').select('ticket_id, ticket_no, gnsw_truck_no, date, submitted_at, sad_no, gross, tare, net, file_url, driver, status, operation').order('submitted_at', { ascending: false }).limit(2000),
+        supabase.from('outgate').select('id, ticket_id, ticket_no, vehicle_number, driver, sad_no, gross, tare, net, created_at').order('created_at', { ascending: false }).limit(2000),
+        supabase.from('reports_generated').select('id, report_type, generated_by, generated_at, file_url').order('generated_at', { ascending: false }).limit(2000),
+      ]);
 
-      const { data: ticketsData, error: ticketsError } = await supabase
-        .from('tickets')
-        .select('ticket_id, ticket_no, gnsw_truck_no, date, submitted_at, sad_no, gross, tare, net, file_url, driver, status, operation')
-        .order('submitted_at', { ascending: false })
-        .limit(5000);
-      if (ticketsError) throw ticketsError;
-      setTickets(ticketsData || []);
+      if (usersRes.error) throw usersRes.error;
+      if (ticketsRes.error) throw ticketsRes.error;
+      if (outRes.error) throw outRes.error;
+      if (reportsRes.error) throw reportsRes.error;
 
-      const { data: outData, error: outError } = await supabase
-        .from('outgate')
-        .select('id, ticket_id, ticket_no, vehicle_number, driver, sad_no, gross, tare, net, created_at')
-        .order('created_at', { ascending: false })
-        .limit(5000);
-      if (outError) throw outError;
-      setOutgates(outData || []);
+      setUsers(usersRes.data || []);
+      setTickets(ticketsRes.data || []);
+      setOutgates(outRes.data || []);
+      setReports(reportsRes.data || []);
 
-      // recompute analytics & recent activity
-      recomputeAnalytics(ticketsData || [], outData || []);
-      // Recent activity built from arrays (memoized below)
+      // recompute analytics
+      recomputeAnalytics(ticketsRes.data || [], outRes.data || [], reportsRes.data || []);
     } catch (err) {
       console.error('Admin panel fetch error', err);
       toast({ title: 'Error fetching dashboard data', description: err?.message || 'Unexpected error', status: 'error', duration: 6000, isClosable: true });
       setUsers([]);
       setTickets([]);
       setOutgates([]);
+      setReports([]);
       setAnalytics((prev) => ({ ...prev, ticketsProcessed: 0, trucksExited: 0, gateOpsToday: 0, reportsGenerated: 0 }));
     } finally {
       setLoadingData(false);
       setLoadingUsers(false);
+      setLoadingReports(false);
     }
   }, [recomputeAnalytics, toast]);
 
@@ -294,140 +332,184 @@ export default function AdminPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchData, user]);
 
-  // ---------- realtime subscriptions ----------
+  // realtime subscriptions: update arrays & analytics
   useEffect(() => {
     if (!user || user.role !== 'admin') return;
 
-    // tickets channel
     const ticketsChannel = supabase
       .channel('public:tickets')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'tickets' },
-        (payload) => {
-          const eventType = resolveEventType(payload) || null;
-          const newRec = resolveNewRecord(payload);
-          const oldRec = resolveOldRecord(payload);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, (payload) => {
+        const evt = resolveEventType(payload);
+        const newRec = resolveNewRecord(payload);
+        const oldRec = resolveOldRecord(payload);
 
-          setTickets((prev) => {
-            const copy = [...prev];
-            if (eventType === 'INSERT') {
-              if (newRec) copy.unshift(newRec);
-            } else if (eventType === 'UPDATE') {
-              if (newRec) {
-                const idx = copy.findIndex((r) => String(r.ticket_id) === String(newRec.ticket_id) || String(r.ticket_no) === String(newRec.ticket_no));
-                if (idx !== -1) copy[idx] = { ...copy[idx], ...newRec };
-                else copy.unshift(newRec);
-              }
-            } else if (eventType === 'DELETE') {
-              if (oldRec) {
-                const idToRemove = oldRec.ticket_id ?? oldRec.ticket_no;
-                if (idToRemove) return copy.filter((r) => String(r.ticket_id ?? r.ticket_no) !== String(idToRemove));
-              }
+        setTickets((prev) => {
+          const copy = [...prev];
+          if (evt === 'INSERT') {
+            if (newRec) copy.unshift(newRec);
+          } else if (evt === 'UPDATE') {
+            if (newRec) {
+              const idx = copy.findIndex((r) => String(r.ticket_id) === String(newRec.ticket_id) || String(r.ticket_no) === String(newRec.ticket_no));
+              if (idx !== -1) copy[idx] = { ...copy[idx], ...newRec };
+              else copy.unshift(newRec);
             }
-            return copy;
-          });
-        }
-      )
+          } else if (evt === 'DELETE') {
+            if (oldRec) {
+              const idToRemove = oldRec.ticket_id ?? oldRec.ticket_no;
+              if (idToRemove) return copy.filter((r) => String(r.ticket_id ?? r.ticket_no) !== String(idToRemove));
+            }
+          }
+          return copy;
+        });
+      })
       .subscribe();
 
-    // outgate channel
     const outChannel = supabase
       .channel('public:outgate')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'outgate' },
-        (payload) => {
-          const eventType = resolveEventType(payload) || null;
-          const newRec = resolveNewRecord(payload);
-          const oldRec = resolveOldRecord(payload);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, (payload) => {
+        const evt = resolveEventType(payload);
+        const newRec = resolveNewRecord(payload);
+        const oldRec = resolveOldRecord(payload);
 
-          setOutgates((prev) => {
-            const copy = [...prev];
-            if (eventType === 'INSERT') {
-              if (newRec) copy.unshift(newRec);
-            } else if (eventType === 'UPDATE') {
-              if (newRec) {
-                const idx = copy.findIndex((r) => String(r.id) === String(newRec.id));
-                if (idx !== -1) copy[idx] = { ...copy[idx], ...newRec };
-                else copy.unshift(newRec);
-              }
-            } else if (eventType === 'DELETE') {
-              if (oldRec) {
-                const idToRemove = oldRec.id;
-                if (idToRemove) return copy.filter((r) => String(r.id) !== String(idToRemove));
-              }
+        setOutgates((prev) => {
+          const copy = [...prev];
+          if (evt === 'INSERT') {
+            if (newRec) copy.unshift(newRec);
+          } else if (evt === 'UPDATE') {
+            if (newRec) {
+              const idx = copy.findIndex((r) => String(r.id) === String(newRec.id));
+              if (idx !== -1) copy[idx] = { ...copy[idx], ...newRec };
+              else copy.unshift(newRec);
             }
-            return copy;
-          });
-
-          // show quick toast for an insert
-          try {
-            if (eventType === 'INSERT' && newRec) {
-              const link = `/outgate/tickets/${newRec.ticket_id ?? newRec.ticket_no ?? ''}`;
-              toast({
-                duration: 8000,
-                isClosable: true,
-                position: 'top-right',
-                render: ({ onClose }) => (
-                  <Box color="white" bg="purple.500" p={3} borderRadius="md" boxShadow="md">
-                    <HStack justify="space-between">
-                      <Box>
-                        <Text fontWeight="bold">Exit Confirmed</Text>
-                        <Text fontSize="sm">Exit recorded for {newRec.vehicle_number ?? newRec.ticket_no ?? ''}.</Text>
-                      </Box>
-                      <HStack>
-                        <Button size="sm" colorScheme="whiteAlpha" onClick={() => { onClose(); navigate(link); }}>Open</Button>
-                        <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
-                      </HStack>
-                    </HStack>
-                  </Box>
-                ),
-              });
+          } else if (evt === 'DELETE') {
+            if (oldRec) {
+              const idToRemove = oldRec.id;
+              if (idToRemove) return copy.filter((r) => String(r.id) !== String(idToRemove));
             }
-          } catch (e) {
-            console.warn('outgate toast error', e);
           }
+          return copy;
+        });
+
+        // quick toast for inserted outgate (optional)
+        try {
+          if (evt === 'INSERT' && newRec) {
+            const link = `/outgate/tickets/${newRec.ticket_id ?? newRec.ticket_no ?? ''}`;
+            toast({
+              duration: 7000,
+              isClosable: true,
+              position: 'top-right',
+              render: ({ onClose }) => (
+                <Box color="white" bg="purple.500" p={3} borderRadius="md" boxShadow="md">
+                  <HStack justify="space-between">
+                    <Box>
+                      <Text fontWeight="bold">Exit Confirmed</Text>
+                      <Text fontSize="sm">Exit recorded for {newRec.vehicle_number ?? newRec.ticket_no ?? ''}.</Text>
+                    </Box>
+                    <HStack>
+                      <Button size="sm" colorScheme="whiteAlpha" onClick={() => { onClose(); navigate(link); }}>Open</Button>
+                      <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+                    </HStack>
+                  </HStack>
+                </Box>
+              ),
+            });
+          }
+        } catch (e) {
+          console.warn('outgate toast error', e);
         }
-      )
+      })
+      .subscribe();
+
+    // reports channel
+    const reportsChannel = supabase
+      .channel('public:reports_generated')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'reports_generated' }, (payload) => {
+        const evt = resolveEventType(payload);
+        const newRec = resolveNewRecord(payload);
+        const oldRec = resolveOldRecord(payload);
+
+        setReports((prev) => {
+          const copy = [...prev];
+          if (evt === 'INSERT') {
+            if (newRec) copy.unshift(newRec);
+          } else if (evt === 'UPDATE') {
+            if (newRec) {
+              const idx = copy.findIndex((r) => String(r.id) === String(newRec.id));
+              if (idx !== -1) copy[idx] = { ...copy[idx], ...newRec };
+              else copy.unshift(newRec);
+            }
+          } else if (evt === 'DELETE') {
+            if (oldRec) {
+              const idToRemove = oldRec.id;
+              if (idToRemove) return copy.filter((r) => String(r.id) !== String(idToRemove));
+            }
+          }
+          return copy;
+        });
+
+        // toast & animate on new report
+        try {
+          if (evt === 'INSERT' && newRec) {
+            // animate reports stat card
+            reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } });
+
+            const actorLabel = (newRec.generated_by && ((users.find(u => String(u.id) === String(newRec.generated_by))?.username) || newRec.generated_by)) || 'Unknown';
+
+            toast({
+              duration: 7000,
+              isClosable: true,
+              position: 'top-right',
+              render: ({ onClose }) => (
+                <Box color="white" bg="teal.500" p={3} borderRadius="md" boxShadow="md">
+                  <HStack justify="space-between">
+                    <Box>
+                      <Text fontWeight="bold">New Report</Text>
+                      <Text fontSize="sm">{newRec.report_type} generated by {actorLabel}</Text>
+                    </Box>
+                    <HStack>
+                      <Button size="sm" colorScheme="whiteAlpha" onClick={() => { onClose(); onReportsOpen(); }}>Open</Button>
+                      <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+                    </HStack>
+                  </HStack>
+                </Box>
+              ),
+            });
+          }
+        } catch (e) {
+          console.warn('reports toast error', e);
+        }
+      })
       .subscribe();
 
     return () => {
       try { ticketsChannel.unsubscribe(); } catch (_) { /* ignore */ }
       try { outChannel.unsubscribe(); } catch (_) { /* ignore */ }
+      try { reportsChannel.unsubscribe(); } catch (_) { /* ignore */ }
     };
-  }, [user, toast, navigate]);
+  }, [user, navigate, toast, users, reportsAnim, onReportsOpen]);
 
-  // Whenever tickets or outgates arrays change, recompute analytics & recent activity (memoized)
+  // Whenever underlying arrays change, recompute analytics
   useEffect(() => {
-    recomputeAnalytics(tickets, outgates);
-    // recentActivity rebuilt via memo (below)
-  }, [tickets, outgates, recomputeAnalytics]);
+    recomputeAnalytics(tickets, outgates, reports);
+    // rebuild recentActivity is memo below
+  }, [tickets, outgates, reports, recomputeAnalytics]);
 
-  // Recent activity memoized
-  const recentActivity = useMemo(() => buildActivityFromState(tickets, outgates, users), [tickets, outgates, users, buildActivityFromState]);
+  // recent activity (memoized and includes reports)
+  const recentActivity = useMemo(() => buildActivityFromState(tickets, outgates, users, reports), [tickets, outgates, users, reports, buildActivityFromState]);
 
-  // CSV export for activity
-  const exportActivityCsv = () => {
-    const rows = (recentActivity || []).slice(0, activityLimit).map((r) => ({
-      time: r.time,
-      type: r.type,
-      title: r.title,
-      meta: JSON.stringify(r.meta || {}),
-    }));
-    if (!rows.length) {
-      toast({ title: 'No activity to export', status: 'info', duration: 1800 });
-      return;
-    }
-    const keys = Object.keys(rows[0]);
-    const csv = [keys.join(','), ...rows.map((r) => keys.map((k) => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = `activity-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); a.remove(); URL.revokeObjectURL(url);
-    toast({ title: 'Activity exported', status: 'success', duration: 1500 });
-  };
+  // displayed activity with filter + search
+  const displayedActivity = useMemo(() => {
+    const arr = recentActivity.filter((a) => (activityFilter === 'all' ? true : a.type === activityFilter));
+    const q = (debouncedActivitySearch || '').trim().toLowerCase();
+    if (!q) return arr.slice(0, activityLimit);
+    const filtered = arr.filter((it) => {
+      const hay = (it.title + ' ' + JSON.stringify(it.meta || {})).toLowerCase();
+      return hay.includes(q);
+    });
+    return filtered.slice(0, activityLimit);
+  }, [recentActivity, activityFilter, activityLimit, debouncedActivitySearch]);
 
-  // chart data
+  // chart line data
   const chartLineData = useMemo(() => {
     const days = [];
     const counts = [];
@@ -454,6 +536,7 @@ export default function AdminPanel() {
     return { labels, datasets: [{ label: 'Tickets', data: counts, tension: 0.3, fill: false, borderWidth: 2 }] };
   }, [tickets, chartDays]);
 
+  // pie chart for users
   const chartPieData = useMemo(() => {
     const counts = {};
     (users || []).forEach((u) => { const r = u.role || 'unknown'; counts[r] = (counts[r] || 0) + 1; });
@@ -462,21 +545,9 @@ export default function AdminPanel() {
     return { labels, datasets: [{ data, backgroundColor: labels.map((_, idx) => `hsl(${(idx * 60) % 360} 70% 60%)`) }] };
   }, [users]);
 
-  // displayed activity with filter + debounced search
-  const displayedActivity = useMemo(() => {
-    const arr = recentActivity.filter((a) => (activityFilter === 'all' ? true : a.type === activityFilter));
-    const q = (debouncedActivitySearch || '').trim().toLowerCase();
-    if (!q) return arr.slice(0, activityLimit);
-    const filtered = arr.filter((it) => {
-      const hay = (it.title + ' ' + JSON.stringify(it.meta || {})).toLowerCase();
-      return hay.includes(q);
-    });
-    return filtered.slice(0, activityLimit);
-  }, [recentActivity, activityFilter, activityLimit, debouncedActivitySearch]);
-
-  // ActivityItem
+  // ActivityItem component (keeps popovers contained)
   const ActivityItem = ({ item }) => {
-    const badgeColor = item.type === 'weighbridge' ? 'teal' : item.type === 'outgate' ? 'purple' : 'blue';
+    const badgeColor = item.type === 'weighbridge' ? 'teal' : item.type === 'outgate' ? 'purple' : item.type === 'report' ? 'orange' : 'blue';
     const openDetail = () => {
       if (item.type === 'weighbridge') {
         const ticketId = item.meta?.ticket_id ?? String(item.id || '').replace(/^ticket-/, '');
@@ -488,10 +559,12 @@ export default function AdminPanel() {
         else if (outId) navigate(`/outgate/tickets/${outId}`);
       } else if (item.type === 'users') {
         navigate('/users');
+      } else if (item.type === 'report') {
+        onReportsOpen();
       }
     };
 
-    const Icon = item.type === 'weighbridge' ? FiFileText : item.type === 'outgate' ? FiTruck : FiUsers;
+    const Icon = item.type === 'weighbridge' ? FiFileText : item.type === 'outgate' ? FiTruck : item.type === 'report' ? FiFileText : FiUsers;
 
     return (
       <Popover>
@@ -534,8 +607,8 @@ export default function AdminPanel() {
 
         <PopoverContent>
           <PopoverArrow />
-          <PopoverHeader fontWeight="bold">{item.title}</PopoverHeader>
           <PopoverCloseButton />
+          <PopoverHeader fontWeight="bold">{item.title}</PopoverHeader>
           <PopoverBody>
             <Text fontSize="sm" color="gray.600" mb={2}><b>When:</b> {new Date(item.time).toLocaleString()}</Text>
             {item.meta && (
@@ -561,8 +634,65 @@ export default function AdminPanel() {
   const handleShowLessActivity = () => setActivityLimit((p) => Math.max(4, p - 8));
   const refreshData = async () => { await fetchData(); toast({ title: 'Data refreshed', status: 'success', duration: 1500 }); };
 
+  // Reports filtering / export
+  const filteredSortedReports = useMemo(() => {
+    const q = (debouncedReportSearch || '').trim().toLowerCase();
+    let arr = (reports || []).slice();
+    if (q) {
+      arr = arr.filter((r) => {
+        const actor = String(r.generated_by ?? '').toLowerCase();
+        const type = String(r.report_type ?? '').toLowerCase();
+        const file = String(r.file_url ?? '').toLowerCase();
+        return actor.includes(q) || type.includes(q) || file.includes(q);
+      });
+    }
+    arr.sort((a, b) => {
+      const da = new Date(a.generated_at || a.created_at || 0).getTime();
+      const db = new Date(b.generated_at || b.created_at || 0).getTime();
+      return reportSortDir === 'asc' ? da - db : db - da;
+    });
+    return arr;
+  }, [reports, debouncedReportSearch, reportSortDir]);
+
+  const exportReportsCsv = async () => {
+    setReportLoadingExport(true);
+    try {
+      const rows = filteredSortedReports.map((r) => ({
+        id: r.id,
+        report_type: r.report_type,
+        generated_by: r.generated_by,
+        generated_at: r.generated_at ? new Date(r.generated_at).toISOString() : '',
+        file_url: r.file_url || '',
+      }));
+      if (!rows.length) {
+        toast({ title: 'No reports to export', status: 'info' });
+        setReportLoadingExport(false);
+        return;
+      }
+      const keys = Object.keys(rows[0]);
+      const csv = [keys.join(','), ...rows.map((r) => keys.map((k) => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `reports-${new Date().toISOString().slice(0,10)}.csv`; a.click(); a.remove(); URL.revokeObjectURL(url);
+      toast({ title: 'Reports exported', status: 'success' });
+    } catch (err) {
+      console.error('export reports', err);
+      toast({ title: 'Export failed', description: err.message || String(err), status: 'error' });
+    } finally {
+      setReportLoadingExport(false);
+    }
+  };
+
+  // resolve generated_by to nice label
+  const resolveActorLabel = (generated_by) => {
+    if (!generated_by) return 'Unknown';
+    const byUser = users.find(u => String(u.id) === String(generated_by) || String(u.email) === String(generated_by) || String(u.username) === String(generated_by));
+    if (byUser) return `${byUser.username || byUser.email}`;
+    return String(generated_by);
+  };
+
   // Loading skeleton UI while fetching
-  if (authLoading || loadingData || loadingUsers) {
+  if (authLoading || loadingData || loadingUsers || loadingReports) {
     return (
       <Box textAlign="center" mt="20">
         <Spinner size="xl" />
@@ -575,18 +705,18 @@ export default function AdminPanel() {
     <Box mt={8} px={{ base: '4', md: '10' }} pb={8}>
       <Heading mb={6} textAlign="center" fontWeight="extrabold">Admin Panel</Heading>
 
-      {/* Top Stats — use responsive minChildWidth for better scaling */}
+      {/* Top Stats */}
       <SimpleGrid minChildWidth="220px" spacing={6} mb={6}>
         <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
           <StatLabel fontWeight="bold">Gate Ops (Today)</StatLabel>
           <StatNumber>{analytics.gateOpsToday ?? 0}</StatNumber>
-          <StatHelpText>Entries & exits today (Pending + Exited)</StatHelpText>
+          <StatHelpText>Entries & exits today</StatHelpText>
         </Stat>
 
         <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
           <StatLabel fontWeight="bold">Tickets Processed</StatLabel>
           <StatNumber>{analytics.ticketsProcessed ?? 0}</StatNumber>
-          <StatHelpText>Unique tickets processed (tickets table)</StatHelpText>
+          <StatHelpText>Unique tickets processed</StatHelpText>
         </Stat>
 
         <Stat bg="linear-gradient(90deg, rgba(16,185,129,0.04), rgba(16,185,129,0.01))" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="teal.300">
@@ -594,15 +724,57 @@ export default function AdminPanel() {
           <MotionStatNumber fontSize="2xl" animate={trucksAnim} transition={{ type: 'spring', stiffness: 300, damping: 20 }}>
             {analytics.trucksExited ?? 0}
           </MotionStatNumber>
-          <StatHelpText>Unique tickets with exit recorded (tickets or outgate)</StatHelpText>
+          <StatHelpText>Unique tickets with exit recorded</StatHelpText>
         </Stat>
 
-        <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel fontWeight="bold">Reports Generated</StatLabel>
-          <StatNumber>{analytics.reportsGenerated ?? 0}</StatNumber>
-          <StatHelpText>Tickets with attachments</StatHelpText>
-        </Stat>
+        {/* Reports: Popover preview + Modal for full table */}
+        <Popover placement="bottom-start">
+          <PopoverTrigger>
+            <MotionBox
+              as="button"
+              textAlign="left"
+              p={4}
+              borderRadius="md"
+              boxShadow="sm"
+              bg={statBg}
+              border="1px solid"
+              borderColor="transparent"
+              whileHover={{ scale: 1.02 }}
+              animate={reportsAnim}
+              _hover={{ borderColor: 'gray.200' }}
+            >
+              <Stat>
+                <StatLabel fontWeight="bold">Reports Generated</StatLabel>
+                <StatNumber>{analytics.reportsGenerated ?? 0}</StatNumber>
+                <StatHelpText>Reports from Weight & Outgate modules (click to view)</StatHelpText>
+              </Stat>
+            </MotionBox>
+          </PopoverTrigger>
 
+          <PopoverContent width="420px" boxShadow="lg" _focus={{ boxShadow: 'lg' }}>
+            <PopoverArrow />
+            <PopoverCloseButton />
+            <PopoverHeader fontWeight="bold">Recent Reports</PopoverHeader>
+            <PopoverBody>
+              {reports && reports.length ? (
+                <VStack spacing={2} align="stretch">
+                  {reports.slice(0, 6).map((r) => (
+                    <HStack key={r.id} justify="space-between">
+                      <Box>
+                        <Text fontSize="sm" fontWeight="semibold">{r.report_type ?? 'Report'}</Text>
+                        <Text fontSize="xs" color="gray.500">{resolveActorLabel(r.generated_by)} — {r.generated_at ? new Date(r.generated_at).toLocaleString() : '—'}</Text>
+                      </Box>
+                      <Button size="xs" variant="ghost" onClick={() => { onReportsOpen(); }}>View all</Button>
+                    </HStack>
+                  ))}
+                  {reports.length > 6 && <Button size="sm" onClick={() => onReportsOpen()}>View all reports ({reports.length})</Button>}
+                </VStack>
+              ) : (
+                <Text>No reports yet.</Text>
+              )}
+            </PopoverBody>
+          </PopoverContent>
+        </Popover>
       </SimpleGrid>
 
       <Divider mb={6} />
@@ -660,7 +832,17 @@ export default function AdminPanel() {
           <VStack spacing={3} align="stretch">
             <Button colorScheme="blue" onClick={refreshData}>Refresh Data</Button>
             <Button colorScheme="purple" onClick={() => toast({ title: 'Report generation triggered', status: 'success', duration: 1500 })}>Generate System Report</Button>
-            <Button variant="ghost" onClick={exportActivityCsv}>Export Activity</Button>
+            <Button variant="ghost" onClick={() => {
+              // reuse activity export
+              const rows = (recentActivity || []).slice(0, activityLimit).map((r) => ({ time: r.time, type: r.type, title: r.title, meta: JSON.stringify(r.meta || {}) }));
+              if (!rows.length) return toast({ title: 'No activity to export', status: 'info' });
+              const keys = Object.keys(rows[0]);
+              const csv = [keys.join(','), ...rows.map((r) => keys.map((k) => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
+              const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a'); a.href = url; a.download = `activity-${new Date().toISOString().slice(0,10)}.csv`; a.click(); a.remove(); URL.revokeObjectURL(url);
+              toast({ title: 'Activity exported', status: 'success' });
+            }}>Export Activity</Button>
 
             <Divider />
 
@@ -670,6 +852,7 @@ export default function AdminPanel() {
               <option value="weighbridge">Weighbridge</option>
               <option value="outgate">Outgate</option>
               <option value="users">Users</option>
+              <option value="report">Reports</option>
             </Select>
             <Input size="sm" placeholder="Search activity (ticket/truck/driver/SAD)" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} aria-label="Search activity" />
           </VStack>
@@ -693,7 +876,7 @@ export default function AdminPanel() {
 
       <Divider mb={6} />
 
-      {/* Recent users summary */}
+      {/* Users summary */}
       <Box bg={statBg} borderRadius="md" p={4} boxShadow="sm">
         <HStack justify="space-between" mb={3}>
           <Heading size="md">Users ({users.length})</Heading>
@@ -712,6 +895,57 @@ export default function AdminPanel() {
           ))}
         </SimpleGrid>
       </Box>
+
+      {/* Reports Modal (full) */}
+      <Modal isOpen={isReportsOpen} onClose={onReportsClose} size="6xl" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Reports Generated ({reports.length})</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <HStack mb={3} spacing={3} align="center">
+              <Input placeholder="Search by type or user or file" value={reportSearch} onChange={(e) => setReportSearch(e.target.value)} />
+              <Select value={reportSortDir} onChange={(e) => setReportSortDir(e.target.value)} maxW="160px">
+                <option value="desc">Newest first</option>
+                <option value="asc">Oldest first</option>
+              </Select>
+              <Button size="sm" leftIcon={<FiDownload />} onClick={exportReportsCsv} isLoading={reportLoadingExport}>Download CSV</Button>
+            </HStack>
+
+            <Box overflowX="auto">
+              <Table size="sm" variant="striped">
+                <Thead>
+                  <Tr>
+                    <Th>Type</Th>
+                    <Th>Generated By</Th>
+                    <Th>File</Th>
+                    <Th>Generated At</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {filteredSortedReports.length === 0 ? (
+                    <Tr><Td colSpan={4} textAlign="center">No reports</Td></Tr>
+                  ) : filteredSortedReports.map((r) => (
+                    <Tr key={r.id}>
+                      <Td textTransform="capitalize">{r.report_type ?? '—'}</Td>
+                      <Td>{resolveActorLabel(r.generated_by)}</Td>
+                      <Td>
+                        {r.file_url ? (
+                          <Button size="xs" variant="link" onClick={() => window.open(r.file_url, '_blank')}>Open file</Button>
+                        ) : '—'}
+                      </Td>
+                      <Td>{r.generated_at ? new Date(r.generated_at).toLocaleString() : '—'}</Td>
+                    </Tr>
+                  ))}
+                </Tbody>
+              </Table>
+            </Box>
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={onReportsClose}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
     </Box>
   );
 }

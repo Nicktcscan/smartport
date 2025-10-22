@@ -1,5 +1,5 @@
 // src/pages/OutgateDashboard.jsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Box,
   Heading,
@@ -55,7 +55,7 @@ function OutgateDashboard() {
   });
   const toast = useToast();
 
-  const fetchTicketsAndStats = async () => {
+  const fetchTicketsAndStats = useCallback(async () => {
     setLoading(true);
     try {
       // Pending tickets (operation = 'Pending')
@@ -96,11 +96,11 @@ function OutgateDashboard() {
       });
     }
     setLoading(false);
-  };
+  }, [toast]);
 
   useEffect(() => {
     fetchTicketsAndStats();
-  }, []);
+  }, [fetchTicketsAndStats]);
 
   // Prepare data for charts
   const barChartData = [
