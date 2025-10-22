@@ -35,21 +35,33 @@ import {
   StatNumber,
   StatHelpText,
   Tooltip,
+  Menu,
+  MenuButton,
+  MenuList,
+  MenuItem,
+  MenuDivider,
+  VStack,
+  Image,
 } from '@chakra-ui/react';
 import {
   RepeatIcon,
   DownloadIcon,
   SearchIcon,
 } from '@chakra-ui/icons';
-import { FaFilePdf } from 'react-icons/fa';
+import { FaFilePdf, FaEllipsisV, FaEye, FaFileAlt } from 'react-icons/fa';
+import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
 import logoUrl from '../assets/logo.png';
 import { useAuth } from '../context/AuthContext';
 
+/* -----------------------
+   Styling helpers + constants
+----------------------- */
+const MotionBox = motion(Box);
 const ITEMS_PER_PAGE = 5;
 
 /* -----------------------
-   Helpers
+   Utilities (unchanged / improved)
 ----------------------- */
 function parseNumber(val) {
   if (val === null || val === undefined || val === '') return null;
@@ -158,6 +170,9 @@ function dedupeReportsByTicketNo(rows = []) {
   return [...Array.from(map.values()), ...manualRows];
 }
 
+/* -----------------------
+   Main component
+----------------------- */
 export default function OutgateReports() {
   const { user } = useAuth();
   const [reports, setReports] = useState([]);
@@ -171,13 +186,11 @@ export default function OutgateReports() {
   const [loading, setLoading] = useState(true);
   const toast = useToast();
 
-  useEffect(() => {
-    void currentPage;
-  }, [currentPage]);
-
-  // details modal
-  const { isOpen: isDetailsOpen, onClose: onDetailsClose } = useDisclosure();
-  const [selectedReport] = useState(null);
+  // details modal & docs modal
+  const { isOpen: isDetailsOpen, onOpen: onDetailsOpen, onClose: onDetailsClose } = useDisclosure();
+  const { isOpen: isDocsOpen, onOpen: onDocsOpen, onClose: onDocsClose } = useDisclosure();
+  const [selectedReport, setSelectedReport] = useState(null);
+  const [docsForView, setDocsForView] = useState([]);
 
   // SAD search results
   const [sadResults, setSadResults] = useState([]);
@@ -187,7 +200,16 @@ export default function OutgateReports() {
   const [ticketStatusMap, setTicketStatusMap] = useState({});
   const [totalTransactions, setTotalTransactions] = useState(0);
 
-  const [sadDeclaration, setSadDeclaration] = useState({ declaredWeight: null, status: 'Unknown', exists: false });
+  const [sadDeclaration, setSadDeclaration] = useState({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+
+  // orb modal (generate report)
+  const { isOpen: isOrbOpen, onOpen: onOrbOpen, onClose: onOrbClose } = useDisclosure();
+  const [orbGenerating, setOrbGenerating] = useState(false);
+  const orbStartRef = useRef(null);
+
+  // voice recognition
+  const recognitionRef = useRef(null);
+  const [listening, setListening] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -289,7 +311,7 @@ export default function OutgateReports() {
     const q = (searchTerm || '').trim();
     if (!q) {
       setSadResults([]);
-      setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
+      setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
       return;
     }
 
@@ -297,7 +319,7 @@ export default function OutgateReports() {
       try {
         const { data: sadRow, error } = await supabase
           .from('sad_declarations')
-          .select('sad_no,declared_weight,status,total_recorded_weight')
+          .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
           .ilike('sad_no', `${q}`)
           .maybeSingle();
         if (!error && sadRow) {
@@ -306,13 +328,15 @@ export default function OutgateReports() {
             status: sadRow.status ?? 'Unknown',
             exists: true,
             total_recorded_weight: sadRow.total_recorded_weight ?? null,
+            created_at: sadRow.created_at ?? null,
+            // created_by not present on your schema; avoid referencing it
           });
         } else {
-          setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
+          setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
         }
       } catch (err) {
         console.debug('Failed to fetch SAD declaration', err);
-        setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false });
+        setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
       }
     };
 
@@ -531,7 +555,7 @@ export default function OutgateReports() {
   }, [statsSource]);
 
   // --- NEW: Log report generation to reports_generated table ---
-  const logReportGeneration = async (reportType, fileUrl = null) => {
+  const logReportGeneration = async (reportType, fileUrl = null, sadNo = null) => {
     try {
       const generatedBy = user?.id ?? user?.email ?? null;
       const payload = {
@@ -539,15 +563,14 @@ export default function OutgateReports() {
         generated_by: generatedBy,
         generated_at: new Date().toISOString(),
         file_url: fileUrl,
+        sad_no: sadNo ?? null,
+        report_name: `Outgate ${reportType} ${new Date().toISOString()}`,
       };
       const { data, error } = await supabase.from('reports_generated').insert([payload]).select().single();
       if (error) {
-        // non-fatal, but notify admin
         toast({ title: 'Report log failed', description: error.message || String(error), status: 'warning', duration: 4000 });
         return null;
       }
-      // optimistically update local list so UI (and activity feed) show it immediately
-      setReports((prev) => [data, ...(prev || [])]);
       toast({ title: 'Report logged', status: 'success', duration: 1800 });
       return data;
     } catch (err) {
@@ -634,7 +657,7 @@ export default function OutgateReports() {
     openPrintableWindow(html, `SAD-${searchTerm}`);
 
     // Log generation (we don't have a persisted file URL in this flow)
-    await logReportGeneration('SAD PDF', null);
+    await logReportGeneration('SAD PDF', null, searchTerm);
   };
 
   const handleExportSadCsv = async () => {
@@ -656,7 +679,7 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
 
     // Log generation
-    await logReportGeneration('SAD CSV', null);
+    await logReportGeneration('SAD CSV', null, searchTerm);
   };
 
   const handleResetAll = () => {
@@ -669,65 +692,251 @@ export default function OutgateReports() {
     toast({ title: 'Filters reset', status: 'info', duration: 1500 });
   };
 
+  // ------------------------
+  // Confetti helper (loads CDN script if needed)
+  // ------------------------
+  const runConfetti = async () => {
+    try {
+      if (typeof window.confetti === 'function') {
+        window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
+        return;
+      }
+      // load script
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      if (typeof window.confetti === 'function') {
+        window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
+      }
+    } catch (e) {
+      // ignore
+      console.warn('Confetti load failed', e);
+    }
+  };
+
+  // ------------------------
+  // Voice commands
+  // ------------------------
+  const startVoice = () => {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      toast({ title: 'Voice not supported', description: 'This browser does not support SpeechRecognition', status: 'warning' });
+      return;
+    }
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recog = new Speech();
+    recog.lang = 'en-US';
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+
+    recog.onresult = (ev) => {
+      const text = (ev.results[0][0].transcript || '').toLowerCase();
+      toast({ title: 'Heard', description: text, status: 'info', duration: 2500 });
+      // simple commands
+      if (text.includes('export csv')) {
+        handleExportCsv();
+      } else if (text.includes('reset filters') || text.includes('reset')) {
+        handleResetAll();
+      } else if (text.includes('print sad') || text.includes('print report')) {
+        handlePrintSad();
+      } else if (text.includes('export sad csv')) {
+        handleExportSadCsv();
+      } else {
+        toast({ title: 'Command not recognized', description: text, status: 'warning' });
+      }
+    };
+
+    recog.onend = () => {
+      setListening(false);
+    };
+
+    recog.onerror = (e) => {
+      console.warn('speech error', e);
+      setListening(false);
+      toast({ title: 'Voice error', description: e?.error || 'Speech recognition error', status: 'error' });
+    };
+
+    recognitionRef.current = recog;
+    recog.start();
+    setListening(true);
+    toast({ title: 'Listening', description: 'Say a command: "Export CSV", "Reset filters", "Print SAD"', status: 'info' });
+  };
+
+  const stopVoice = () => {
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    } catch (e) {
+      // ignore
+    }
+    setListening(false);
+  };
+
+  // ------------------------
+  // Orb & generate-report flow
+  // ------------------------
+  const handleGenerateFromOrb = async ({ type = 'Outgate CSV', includeSad = false } = {}) => {
+    try {
+      setOrbGenerating(true);
+      // simulate generation / perhaps call server-side rendering here
+      await new Promise((r) => setTimeout(r, 800));
+      await runConfetti();
+      toast({ title: `Generated ${type}`, status: 'success' });
+      await logReportGeneration(type, null, includeSad ? searchTerm : null);
+    } catch (e) {
+      toast({ title: 'Failed to generate', description: e?.message || String(e), status: 'error' });
+    } finally {
+      setOrbGenerating(false);
+      onOrbClose();
+    }
+  };
+
+  // View details + docs actions
+  const openDetailsFor = (r) => {
+    setSelectedReport(r);
+    onDetailsOpen();
+  };
+  const openDocsFor = (r) => {
+    const files = [];
+    // prefer the outgate fileUrl, otherwise the rawRow may contain doc references
+    if (r.fileUrl) files.push({ name: 'attachment', url: r.fileUrl });
+    // also include raw row docs if any (supporting multiple shapes)
+    if (r.rawRow && Array.isArray(r.rawRow.docs)) {
+      for (const d of r.rawRow.docs) {
+        if (d && (d.url || d.path)) files.push({ name: d.name || d.path || 'doc', url: d.url || d.path });
+      }
+    }
+    setDocsForView(files);
+    onDocsOpen();
+  };
+
+  // small responsive helper: show "card" UI for each report on small screens
+  const ReportCard = ({ r }) => {
+    const { gross, tare, net } = computeWeights(r);
+    return (
+      <MotionBox
+        whileHover={{ y: -6 }}
+        p={3}
+        borderRadius="12px"
+        border="1px solid"
+        borderColor="rgba(2,6,23,0.06)"
+        bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96))"
+        boxShadow="0 8px 24px rgba(2,6,23,0.04)"
+      >
+        <Flex justify="space-between" align="center">
+          <Box>
+            <Text fontWeight="bold">{r.ticketNo ?? r.ticketId ?? '—'}</Text>
+            <Text fontSize="sm" color="gray.500">{r.vehicleNumber || 'No vehicle'}</Text>
+            <Text fontSize="xs" color="gray.500">{r.sadNo ? `SAD ${r.sadNo}` : 'No SAD'}</Text>
+          </Box>
+          <VStack align="end">
+            <Text fontSize="sm">{r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '—'}</Text>
+            <HStack>
+              <Button size="sm" onClick={() => openDetailsFor(r)}>View</Button>
+              <Menu>
+                <MenuButton as={IconButton} icon={<FaEllipsisV />} size="sm" />
+                <MenuList>
+                  <MenuItem icon={<FaEye />} onClick={() => openDetailsFor(r)}>View Details</MenuItem>
+                  <MenuItem icon={<FaFileAlt />} onClick={() => openDocsFor(r)}>View Docs</MenuItem>
+                </MenuList>
+              </Menu>
+            </HStack>
+          </VStack>
+        </Flex>
+
+        <Divider my={2} />
+
+        <Flex justify="space-between" fontSize="sm">
+          <Box>
+            <Text fontSize="xs" color="gray.500">Truck</Text>
+            <Text>{r.vehicleNumber || r.truck || '—'}</Text>
+          </Box>
+          <Box textAlign="right">
+            <Text fontSize="xs" color="gray.500">Net</Text>
+            <Text fontWeight="bold">{net != null ? formatWeight(net) : '—'}</Text>
+          </Box>
+        </Flex>
+      </MotionBox>
+    );
+  };
+
+  // ------------------------
+  // Render
+  // ------------------------
   return (
-    <Box p={{ base: 4, md: 8 }}>
+    <Box p={{ base: 4, md: 8 }} style={{ fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial' }}>
+      {/* Header */}
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Stack spacing={1}>
-          <Text fontSize="2xl" fontWeight="bold">Outgate Reports</Text>
-          <Text color="gray.500">Unique-ticket view.</Text>
+          <Text fontSize="2xl" fontWeight="bold" color="#071126">Outgate Reports</Text>
+          <Text color="gray.500">Unique-ticket view — polished UI.</Text>
         </Stack>
 
         <HStack spacing={2}>
-          <Tooltip label="Export current (filtered) view as CSV">
-            <Button leftIcon={<DownloadIcon />} colorScheme="teal" variant="ghost" onClick={handleExportCsv}>Export CSV</Button>
+          <Tooltip label="Toggle voice commands">
+            <Button size="sm" variant={listening ? 'solid' : 'outline'} colorScheme={listening ? 'purple' : 'gray'} onClick={() => (listening ? stopVoice() : startVoice())}>
+              {listening ? 'Listening...' : 'Voice'}
+            </Button>
           </Tooltip>
+
+          <Tooltip label="Generate quick report">
+            <Button size="sm" leftIcon={<DownloadIcon />} colorScheme="teal" onClick={handleExportCsv}>Export CSV</Button>
+          </Tooltip>
+
           <Button leftIcon={<RepeatIcon />} variant="outline" onClick={handleResetAll} aria-label="Reset filters">
             Reset
           </Button>
         </HStack>
       </Flex>
 
-      <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={6}>
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+      {/* Stats — colored cards */}
+      <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
+        <Stat bg="linear-gradient(180deg,#fff7ed,#fffaf0)" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{(new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean))).size}</StatNumber>
           <StatHelpText>Distinct SAD numbers</StatHelpText>
         </Stat>
 
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+        <Stat bg="linear-gradient(180deg,#ecfeff,#f0f9ff)" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>unique ticket numbers</StatHelpText>
+          <StatHelpText>Unique ticket numbers</StatHelpText>
         </Stat>
 
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
+        <Stat bg="linear-gradient(180deg,#f0fdf4,#f6ffef)" p={4} borderRadius="md" boxShadow="sm">
           <StatLabel>Unique Tickets in View</StatLabel>
           <StatNumber>{statsUniqueTickets}</StatNumber>
           <StatHelpText>{searchTerm ? 'Tickets from SAD search' : 'Unique tickets after filters'}</StatHelpText>
         </Stat>
 
-        <Stat bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel>Cumulative Net (view)</StatLabel>
-          <StatNumber>{statsTotals.cumulativeNet ? formatWeight(statsTotals.cumulativeNet) + ' kg' : '—'}</StatNumber>
+        <Stat bg="linear-gradient(135deg,#f5f3ff,#eef2ff)" p={4} borderRadius="md" boxShadow="sm">
+          <StatLabel>Total Discharged (view)</StatLabel>
+          <StatNumber>{statsTotals.cumulativeNet ? `${formatWeight(statsTotals.cumulativeNet)} kg` : '—'}</StatNumber>
           <StatHelpText>From current filtered results</StatHelpText>
         </Stat>
       </SimpleGrid>
 
+      {/* SAD mini-stats when searching */}
       { (searchTerm && (sadResults.length > 0 || sadDeclaration.exists)) && (
         <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mb={6}>
-          <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+          <Stat bg="white" px={4} py={3} borderRadius="md" boxShadow="sm">
             <StatLabel>Declared Weight</StatLabel>
             <StatNumber>{formatWeight(sadDeclaration.declaredWeight)}</StatNumber>
             <StatHelpText>{sadDeclaration.exists ? 'From SAD declaration' : 'No declaration found'}</StatHelpText>
           </Stat>
 
-          <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+          <Stat bg="white" px={4} py={3} borderRadius="md" boxShadow="sm">
             <StatLabel>Discharged Weight</StatLabel>
             <StatNumber>{formatWeight(sadTotalsMemo.cumulativeNet)} kg</StatNumber>
             <StatHelpText>Sum of nets (respecting date/time filters)</StatHelpText>
           </Stat>
 
-          <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+          <Stat bg="white" px={4} py={3} borderRadius="md" boxShadow="sm">
             <StatLabel>SAD Status</StatLabel>
             <StatNumber>{sadDeclaration.status || (sadResults.length ? 'In Progress' : 'Unknown')}</StatNumber>
             <StatHelpText>{sadDeclaration.exists ? 'Declaration row found' : (sadResults.length ? 'No declaration - tickets found' : 'No data')}</StatHelpText>
@@ -735,19 +944,20 @@ export default function OutgateReports() {
         </SimpleGrid>
       )}
 
+      {/* Controls */}
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
           <Box>
             <FormLabel>Search</FormLabel>
             <Flex>
               <Input
-                placeholder="Search Here..."
+                placeholder="Search here (ticket, truck, sad...)"
                 value={searchTerm}
                 onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
               />
               <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { setCurrentPage(1); }} />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see total transactions below.</Text>
+            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see totals below.</Text>
           </Box>
 
           <Box>
@@ -765,7 +975,7 @@ export default function OutgateReports() {
               <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
             <Text fontSize="xs" color="gray.500" mt={1}>
-              Time From is applied to Date From; Time To is applied to Date To. Use different dates for cross-midnight ranges.
+              Time From applies to Date From; Time To applies to Date To.
             </Text>
           </Box>
 
@@ -780,6 +990,7 @@ export default function OutgateReports() {
         </SimpleGrid>
       </Box>
 
+      {/* SAD results (if any) */}
       {sadLoading ? (
         <Flex justify="center" mb={4}><Spinner /></Flex>
       ) : (sadFilteredResults && sadFilteredResults.length > 0) ? (
@@ -792,11 +1003,11 @@ export default function OutgateReports() {
 
             <HStack spacing={4}>
               <Box textAlign="right">
-                <Text fontSize="sm" color="gray.500">Transactions</Text>
+                <Text fontSize="sm" color="gray.500">No. of Transacts</Text>
                 <Text fontWeight="bold">{sadTotalsMemo.transactions}</Text>
               </Box>
               <Box textAlign="right">
-                <Text fontSize="sm" color="gray.500">Cumulative Net</Text>
+                <Text fontSize="sm" color="gray.500">Total Discharged</Text>
                 <Text fontWeight="bold">{formatWeight(sadTotalsMemo.cumulativeNet)} kg</Text>
               </Box>
 
@@ -836,19 +1047,82 @@ export default function OutgateReports() {
         </Box>
       ) : null}
 
-      {!searchTerm && !sadFilteredResults?.length && !loading && (
-        <Box bg="white" p={6} borderRadius="md" boxShadow="sm" textAlign="center" color="gray.600">
-          <Text>No table to display. Type a SAD number (or other search) to see filtered transactions.</Text>
-        </Box>
-      )}
+      {/* Unique-ticket view */}
+      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+        <Flex justify="space-between" align="center" mb={3} wrap="wrap">
+          <Text fontWeight="semibold">Unique-ticket view</Text>
+          <HStack>
+            <Text fontSize="sm" color="gray.500">Showing {uniqueFilteredReports.length} items</Text>
+            <Button size="sm" onClick={handleExportCsv}>Export CSV</Button>
+          </HStack>
+        </Flex>
 
-      {loading && (
-        <Flex justify="center" p={12}><Spinner size="xl" /></Flex>
-      )}
+        {loading ? (
+          <Flex justify="center" p={8}><Spinner /></Flex>
+        ) : (
+          <>
+            {/* responsive cards for small screens */}
+            <Box display={{ base: 'block', md: 'none' }}>
+              <Stack spacing={3}>
+                {uniqueFilteredReports.map((r) => (
+                  <ReportCard key={r.ticketNo ?? r.id ?? Math.random()} r={r} />
+                ))}
+              </Stack>
+            </Box>
 
-      <Modal isOpen={isDetailsOpen} onClose={onDetailsClose} size="4xl" scrollBehavior="inside">
+            {/* table for md+ */}
+            <Box display={{ base: 'none', md: 'block' }} overflowX="auto">
+              <Table variant="striped" size="sm">
+                <Thead>
+                  <Tr>
+                    <Th>Ticket</Th>
+                    <Th>Date & Time</Th>
+                    <Th>Truck</Th>
+                    <Th isNumeric>Gross</Th>
+                    <Th isNumeric>Tare</Th>
+                    <Th isNumeric>Net</Th>
+                    <Th>Driver</Th>
+                    <Th>Actions</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {uniqueFilteredReports.map((r) => {
+                    const { gross, tare, net } = computeWeights(r);
+                    return (
+                      <Tr key={r.ticketNo ?? r.id ?? Math.random()}>
+                        <Td>{r.ticketNo ?? '—'}</Td>
+                        <Td>{r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '—'}</Td>
+                        <Td>{r.vehicleNumber ?? r.truck ?? '—'}</Td>
+                        <Td isNumeric>{gross != null ? formatWeight(gross) : '—'}</Td>
+                        <Td isNumeric>{tare != null ? formatWeight(tare) : '—'}</Td>
+                        <Td isNumeric>{net != null ? formatWeight(net) : '—'}</Td>
+                        <Td>{r.driverName ?? '—'}</Td>
+                        <Td>
+                          <HStack>
+                            <Button size="sm" onClick={() => openDetailsFor(r)}>View Details</Button>
+                            <Menu>
+                              <MenuButton as={IconButton} icon={<FaEllipsisV />} size="sm" />
+                              <MenuList>
+                                <MenuItem icon={<FaEye />} onClick={() => openDetailsFor(r)}>View Details</MenuItem>
+                                <MenuItem icon={<FaFileAlt />} onClick={() => openDocsFor(r)}>View Docs</MenuItem>
+                              </MenuList>
+                            </Menu>
+                          </HStack>
+                        </Td>
+                      </Tr>
+                    );
+                  })}
+                </Tbody>
+              </Table>
+            </Box>
+          </>
+        )}
+      </Box>
+
+      {/* Details modal */}
+      <Modal isOpen={isDetailsOpen} onClose={() => { onDetailsClose(); setSelectedReport(null); }} size="4xl" scrollBehavior="inside">
         <ModalOverlay />
-        <ModalContent maxW="90vw">
+        <ModalContent>
           <ModalHeader>Report Details</ModalHeader>
           <ModalCloseButton />
           <ModalBody>
@@ -923,8 +1197,137 @@ export default function OutgateReports() {
             )}
           </ModalBody>
           <ModalFooter>
-            <Button onClick={onDetailsClose}>Close</Button>
+            <Button onClick={() => { onDetailsClose(); setSelectedReport(null); }}>Close</Button>
           </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Docs modal */}
+      <Modal isOpen={isDocsOpen} onClose={() => { onDocsClose(); setDocsForView([]); }} size="lg" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Documents</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            {(!docsForView || !docsForView.length) ? (
+              <Text color="gray.500">No documents attached</Text>
+            ) : (
+              <Stack spacing={3}>
+                {docsForView.map((d, i) => (
+                  <Box key={i} p={2} border="1px solid" borderColor="gray.100" borderRadius="md">
+                    <Flex justify="space-between" align="center">
+                      <Box>
+                        <Text fontWeight="semibold">{d.name || `Doc ${i+1}`}</Text>
+                        <Text fontSize="sm" color="gray.600">{d.url}</Text>
+                      </Box>
+                      <HStack>
+                        <Button size="sm" onClick={() => window.open(d.url, '_blank')}>Open</Button>
+                        <Button size="sm" variant="ghost" onClick={() => {
+                          const a = document.createElement('a');
+                          a.href = d.url;
+                          a.download = d.name || '';
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                        }}>Download</Button>
+                      </HStack>
+                    </Flex>
+                  </Box>
+                ))}
+              </Stack>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={() => { onDocsClose(); setDocsForView([]); }}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Floating crystal orb CTA */}
+      <Box position="fixed" bottom="28px" right="28px" zIndex={2200} display="flex" alignItems="center" gap={3}>
+        <MotionBox
+          onClick={onOrbOpen}
+          whileHover={{ scale: 1.07 }}
+          whileTap={{ scale: 0.95 }}
+          cursor="pointer"
+          width="64px"
+          height="64px"
+          borderRadius="999px"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          boxShadow="0 10px 30px rgba(59,130,246,0.18)"
+          style={{ background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', color: '#fff' }}
+          title="Quick generate"
+        >
+          <Box fontSize="24px" fontWeight="700">✺</Box>
+        </MotionBox>
+      </Box>
+
+      {/* Orb holographic modal */}
+      <Modal isOpen={isOrbOpen} onClose={onOrbClose} isCentered>
+        <ModalOverlay />
+        <ModalContent bg="transparent" boxShadow="none">
+          <AnimatePresence>
+            <MotionBox
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 40 }}
+              borderRadius="xl"
+              overflow="hidden"
+              style={{
+                background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))',
+                border: '1px solid rgba(255,255,255,0.06)',
+                backdropFilter: 'blur(8px)',
+                padding: 18,
+                width: 640,
+                maxWidth: '94vw',
+              }}
+            >
+              <MotionBox mb={3} initial={{ rotateY: 0 }} animate={{ rotateY: 4 }} style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <Box width="72px" height="72px" borderRadius="12px" bg="#0ea5a0" display="flex" alignItems="center" justifyContent="center" color="#fff">
+                  <img src={logoUrl} alt="logo" style={{ width: 48 }} />
+                </Box>
+                <Box>
+                  <Text fontSize="lg" fontWeight="bold">Generate Quick Outgate Report</Text>
+                  <Text fontSize="sm" color="gray.300">Create/export & log a quick summary — confetti included.</Text>
+                </Box>
+              </MotionBox>
+
+              <Divider />
+
+              <Box mt={3}>
+                <FormLabel>Report type</FormLabel>
+                <Select defaultValue="Outgate CSV" id="orb-report-type">
+                  <option>Outgate CSV</option>
+                  <option>Outgate PDF</option>
+                  <option>SAD CSV</option>
+                  <option>SAD PDF</option>
+                </Select>
+
+                <FormLabel mt={3}>Include current SAD search (if any)?</FormLabel>
+                <Select id="orb-include-sad" defaultValue="no">
+                  <option value="no">No</option>
+                  <option value="yes">Yes (use search term)</option>
+                </Select>
+              </Box>
+
+              <Flex mt={4} justify="flex-end" gap={2}>
+                <Button variant="ghost" onClick={onOrbClose}>Cancel</Button>
+                <Button
+                  colorScheme="purple"
+                  onClick={() => {
+                    const type = (document.getElementById('orb-report-type')?.value) || 'Outgate CSV';
+                    const includeSadVal = (document.getElementById('orb-include-sad')?.value) || 'no';
+                    handleGenerateFromOrb({ type, includeSad: includeSadVal === 'yes' });
+                  }}
+                  isLoading={orbGenerating}
+                >
+                  Generate
+                </Button>
+              </Flex>
+            </MotionBox>
+          </AnimatePresence>
         </ModalContent>
       </Modal>
     </Box>
