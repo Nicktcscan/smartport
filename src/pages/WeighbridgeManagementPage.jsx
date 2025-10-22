@@ -184,7 +184,7 @@ export function OCRComponent({ onComplete }) {
         <Input type="file" accept="image/*,application/pdf" onChange={handleFileChange} ref={inputRef} />
       </FormControl>
       <Button mt={2} onClick={handleOCR} isLoading={loading} colorScheme="teal">
-        Run OCR Extractor
+        Run Ticket Reader
       </Button>
       {loading && <Progress mt={2} value={progress} />}
     </Box>
@@ -1140,7 +1140,7 @@ const handleCancelSubmit = () => {
 return (
   <Box p={6} maxWidth="1200px" mx="auto">
     <Heading mb={4} textAlign="center">
-      OCR Ticket Reader
+      Ticket Reader
     </Heading>
 
     {/* OCR Extraction Section */}
