@@ -39,9 +39,7 @@ import {
   MenuButton,
   MenuList,
   MenuItem,
-  MenuDivider,
   VStack,
-  Image,
 } from '@chakra-ui/react';
 import {
   RepeatIcon,
@@ -181,7 +179,7 @@ export default function OutgateReports() {
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
+  const [, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(ITEMS_PER_PAGE);
   const [loading, setLoading] = useState(true);
   const toast = useToast();
@@ -205,7 +203,6 @@ export default function OutgateReports() {
   // orb modal (generate report)
   const { isOpen: isOrbOpen, onOpen: onOrbOpen, onClose: onOrbClose } = useDisclosure();
   const [orbGenerating, setOrbGenerating] = useState(false);
-  const orbStartRef = useRef(null);
 
   // voice recognition
   const recognitionRef = useRef(null);
@@ -817,7 +814,7 @@ export default function OutgateReports() {
 
   // small responsive helper: show "card" UI for each report on small screens
   const ReportCard = ({ r }) => {
-    const { gross, tare, net } = computeWeights(r);
+    const { net } = computeWeights(r);
     return (
       <MotionBox
         whileHover={{ y: -6 }}

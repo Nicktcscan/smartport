@@ -59,11 +59,7 @@ const PAGE_SIZE = 5;
 /* -----------------------
    Helpers (unchanged behaviour)
 ----------------------- */
-function parseNumber(v) {
-  if (v === null || v === undefined || v === '') return null;
-  const n = Number(String(v).replace(/[,\s]+/g, ''));
-  return Number.isFinite(n) ? n : null;
-}
+// parseNumber was removed because it's not used; use computeWeights/formatWeight helpers instead when needed.
 
 function computeWeights(row) {
   const toNum = (val) => {
@@ -145,10 +141,10 @@ async function extractTextFromPdfUrl(url) {
 function parseDriverNameFromText(text) {
   if (!text) return null;
   const patterns = [
-    /Driver\s*Name\s*[:\-]\s*(.+?)(?:\n|$)/i,
-    /Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
-    /Name\s*of\s*Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
-    /Driver\s+[:]\s*([A-Z][A-Za-z'’\-\s]+[A-Za-z])/m,
+    /Driver\s*Name\s*[:-]\s*(.+?)(?:\n|$)/i,
+    /Driver\s*[:-]\s*(.+?)(?:\n|$)/i,
+    /Name\s*of\s*Driver\s*[:-]\s*(.+?)(?:\n|$)/i,
+    /Driver\s+[:]\s*([A-Z][A-Za-z'’\s-]+[A-Za-z])/m,
   ];
   for (const pat of patterns) {
     const m = text.match(pat);
@@ -449,14 +445,8 @@ export default function ConfirmExit() {
   }, [searchParams, dateFrom, dateTo, timeFrom, timeTo]);
 
   // Sorting & pagination UI helpers
-  const handleSortClick = (key) => {
-    if (sortKey === key) setSortOrder((s) => (s === 'asc' ? 'desc' : 'asc'));
-    else {
-      setSortKey(key);
-      setSortOrder('asc');
-    }
-  };
-  const getSortIndicator = (key) => (sortKey === key ? (sortOrder === 'asc' ? ' ↑' : ' ↓') : '');
+    // Sorting state is managed by sortKey and sortOrder; interactive header click handlers were removed
+    // to avoid unused-variable lint errors — update headers to call setSortKey/setSortOrder if needed.
 
   const sortedResults = useMemo(() => {
     const arr = [...filteredResults];
@@ -701,8 +691,6 @@ export default function ConfirmExit() {
 
   // Derived counts for stats
   const pendingCount = filteredResults.length;
-  const confirmedUniqueCount = confirmedTickets.filter((t) => t.ticket_id).length;
-  const noTicketIdConfirmedCount = confirmedTickets.filter((t) => !t.ticket_id).length;
 
   // ---------------------
   // UI ENHANCEMENTS: Orb Modal, confetti, voice commands
@@ -1240,14 +1228,4 @@ export default function ConfirmExit() {
   );
 }
 
-/* Small helpers for reuse */
-function isPdfUrl(url) {
-  if (!url) return false;
-  const lower = url.split('?')[0].toLowerCase();
-  return lower.endsWith('.pdf');
-}
-function isImageUrl(url) {
-  if (!url) return false;
-  const lower = url.split('?')[0].toLowerCase();
-  return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
-}
+/* Small helpers are defined inline inside the component to avoid duplicate globals */

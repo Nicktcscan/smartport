@@ -49,7 +49,6 @@ import {
   MenuButton,
   MenuList,
   MenuItem,
-  Badge,
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowForwardIcon } from '@chakra-ui/icons';
@@ -817,7 +816,7 @@ export default function WeightReports() {
     // Try to upload to storage if available
     if (blob && supabase?.storage && typeof supabase.storage.from === 'function') {
       try {
-        const safePart = safeHint.replace(/[^a-zA-Z0-9-_\.]/g, '_') || 'report';
+        const safePart = safeHint.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'report';
         const ext = chosenType === 'PDF' ? '.pdf' : chosenType === 'CSV' ? '.csv' : '.bin';
         const path = `${chosenType}/${Date.now()}-${safePart}${ext}`;
 

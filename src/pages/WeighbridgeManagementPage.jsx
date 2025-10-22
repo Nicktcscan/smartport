@@ -4,7 +4,7 @@ import {
   Box, Heading, Button, Input, FormControl, FormLabel, Table,
   Thead, Tbody, Tr, Th, Td, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
-  useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, HStack
+  useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, HStack, Switch
 } from '@chakra-ui/react';
 import { ViewIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
 
@@ -186,33 +186,22 @@ export function OCRComponent({ onComplete }) {
       <Button mt={2} onClick={handleOCR} isLoading={loading} colorScheme="teal">
         Run Ticket Reader
       </Button>
+      <Button
+        mt={2}
+        ml={2}
+        onClick={reset}
+        isDisabled={!file}
+        size="sm"
+        variant="outline"
+      >
+        Clear Selection
+      </Button>
       {loading && <Progress mt={2} value={progress} />}
     </Box>
   );
 }
 
-/**
- * Helper to normalize key-value pairs
- */
-function parseExtractedText(text) {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const match = line.match(/^(.+?)\s*:\s*(.+)$/);
-      if (!match) return null;
-      let [, key, value] = match;
-      key = key
-        .toLowerCase()
-        .split(' ')
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-        .join(' ');
-      value = value.replace(/\s+kg/i, 'kg').replace(/\s{2,}/g, ' ');
-      return { key, value };
-    })
-    .filter(Boolean);
-}
+/* parseExtractedText removed (unused) */
 
 
 // --------------------------
@@ -250,7 +239,7 @@ function WeighbridgeManagementPage() {
   });
 
   const [ocrFile, setOcrFile] = useState(null);
-  const [ocrText, setOcrText] = useState('');
+  const [, setOcrText] = useState('');
   const [extractedPairs, setExtractedPairs] = useState([]);
   const [tickets, setTickets] = useState([]); // holds either page (server-side) or all tickets (client-side)
   const [loadingTickets, setLoadingTickets] = useState(false);
@@ -269,7 +258,6 @@ function WeighbridgeManagementPage() {
   const [searchTicketNo, setSearchTicketNo] = useState('');
   const debouncedSearchTicket = useDebounce(searchTicketNo, 300);
 
-  const debouncedOcrText = useDebounce(ocrText, 500);
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
 
 /**
@@ -325,20 +313,20 @@ function handleExtract(rawText) {
     Array.from(full.matchAll(/\b(\d{2,6})\b/g)).map((m) => m[1]);
 
   // 1) Ticket No — look for many label variants (Ticket No, Ticket#, Tkt, Pass Number)
-  const ticketLine =
-    extractLabelLine(/\bTicket\s*(?:No\.?|#)?\b/i) ||
-    extractLabelLine(/\bTkt\b/i) ||
-    extractLabelLine(/\bTicket#\b/i) ||
-    extractLabelLine(/\bPass\s*Number\b/i);
-
-  if (ticketLine) {
-    const m =
-      ticketLine.match(/\b(?:Ticket|Tkt|Pass\s*Number)\s*(?:No\.?|#)?\s*[:\-]?\s*(\d{2,6})/i) ||
-      ticketLine.match(/\b(\d{2,6})\b/);
-    if (m && m[1]) {
-      found.ticket_no = m[1];
+    const ticketLine =
+      extractLabelLine(/\bTicket\s*(?:No\.?|#)?\b/i) ||
+      extractLabelLine(/\bTkt\b/i) ||
+      extractLabelLine(/\bTicket#\b/i) ||
+      extractLabelLine(/\bPass\s*Number\b/i);
+  
+    if (ticketLine) {
+      const m =
+        ticketLine.match(/\b(?:Ticket|Tkt|Pass\s*Number)\s*(?:No\.?|#)?\s*[:-]?\s*(\d{2,6})/i) ||
+        ticketLine.match(/\b(\d{2,6})\b/);
+      if (m && m[1]) {
+        found.ticket_no = m[1];
+      }
     }
-  }
   // fallback: prefer the first 2-6 digit number that is not SAD (we'll capture SAD later)
   if (!found.ticket_no) {
     const numbers = allSmallNumbers();
@@ -353,8 +341,8 @@ function handleExtract(rawText) {
     extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
   if (gnswLine) {
     const m =
-      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i) ||
-      gnswLine.match(/Truck\s*No\.?\s*[:\-]?\s*([A-Z0-9\-\/]{3,15})/i);
+      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i) ||
+      gnswLine.match(/Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i);
     if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
   } else {
     // fallback: plate-like pattern (letters+digits). Avoid picking pure numeric tokens.
@@ -365,20 +353,20 @@ function handleExtract(rawText) {
   }
 
   // 3) Driver — label-first, strip leading dashes and trailing "Truck..." junk
-  const driverLine = extractLabelLine(/\bDriver\b/i);
-  if (driverLine) {
-    let drv = driverLine.replace(/Driver\s*[:\-]?\s*/i, "").trim();
-    drv = drv.replace(/^[-:]+/, "").trim();
-    drv = drv.replace(/\bTruck\b.*$/i, "").trim();
-    // remove parentheses content like (PT) etc
-    drv = drv.replace(/\(.*?\)/g, "").trim();
-    found.driver = drv || null;
-  }
+    const driverLine = extractLabelLine(/\bDriver\b/i);
+    if (driverLine) {
+      let drv = driverLine.replace(/Driver\s*[:-]?\s*/i, "").trim();
+      drv = drv.replace(/^[-:]+/, "").trim();
+      drv = drv.replace(/\bTruck\b.*$/i, "").trim();
+      // remove parentheses content like (PT) etc
+      drv = drv.replace(/\(.*?\)/g, "").trim();
+      found.driver = drv || null;
+    }
 
   // 4) Scale Name — explicit label else WBRIDGE\d fallback
   const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
   if (scaleLine) {
-    const m = scaleLine.match(/Scale\s*Name\s*[:\-]?\s*([A-Z0-9\-_]+)/i) || scaleLine.match(/Scale\s*[:\-]?\s*([A-Z0-9\-_]+)/i);
+    const m = scaleLine.match(/Scale\s*Name\s*[:-]?\s*([A-Z0-9_-]+)/i) || scaleLine.match(/Scale\s*[:-]?\s*([A-Z0-9_-]+)/i);
     if (m && m[1]) {
       const cand = String(m[1]).toUpperCase();
       // ignore generic "WEIGHT" if possible — prefer WBRIDGE if present later
@@ -392,24 +380,24 @@ function handleExtract(rawText) {
   }
 
   // 5) Gross / Tare / Net — strict label parsing; parse only 4-6 digit groups per line
-  const grossLine = extractLabelLine(/\bGross\b/i);
-  if (grossLine) found.gross = parseWeightFromLine(grossLine);
-
-  const tareLine = extractLabelLine(/\bTare\b/i);
-  if (tareLine) found.tare = parseWeightFromLine(tareLine);
-  else {
-    // sometimes "Tare: (PT) 20740 kg" sits on same line as consignee — check full
-    const mt = full.match(/Tare\s*[:\-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
-    if (mt && mt[1]) {
-      const num = Number(mt[1]);
-      if (Number.isFinite(num) && num >= 100 && num <= 200000) found.tare = num;
+    const grossLine = extractLabelLine(/\bGross\b/i);
+    if (grossLine) found.gross = parseWeightFromLine(grossLine);
+  
+    const tareLine = extractLabelLine(/\bTare\b/i);
+    if (tareLine) found.tare = parseWeightFromLine(tareLine);
+    else {
+      // sometimes "Tare: (PT) 20740 kg" sits on same line as consignee — check full
+      const mt = full.match(/Tare\s*[:-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
+      if (mt && mt[1]) {
+        const num = Number(mt[1]);
+        if (Number.isFinite(num) && num >= 100 && num <= 200000) found.tare = num;
+      }
     }
-  }
 
   const netLine = extractLabelLine(/\bNet\b/i);
   if (netLine) found.net = parseWeightFromLine(netLine);
   else {
-    const mn = full.match(/Net\s*[:\-]?\s*(\d{4,6})/i);
+    const mn = full.match(/Net\s*[:-]?\s*(\d{4,6})/i);
     if (mn && mn[1]) {
       const num = Number(mn[1]);
       if (Number.isFinite(num) && num >= 100 && num <= 200000) found.net = num;
@@ -419,17 +407,17 @@ function handleExtract(rawText) {
   // 6) SAD No (now accepts 2-digit SADs)
   const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
   if (sadLine) {
-    const m = sadLine.match(/SAD\s*No\.?\s*[:\-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:\-]?\s*(\d{2,6})/i);
+    const m = sadLine.match(/SAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:-]?\s*(\d{2,6})/i);
     if (m && m[1]) found.sad_no = m[1];
   } else {
-    const sadFb = full.match(/\bSAD\s*No\.?\s*[:\-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:\-]?\s*(\d{2,6})/i);
+    const sadFb = full.match(/\bSAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:-]?\s*(\d{2,6})/i);
     if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
   }
 
   // 7) Container / Consignee / Material
   const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
   if (containerLine) {
-    const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:\-]?\s*([A-Z0-9\-]+)/i);
+    const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
     if (m && m[1]) found.container_no = String(m[1]).trim();
   } else {
     // fallback: look for known tokens like BULK on its own line
@@ -439,7 +427,7 @@ function handleExtract(rawText) {
 
   const consigneeLine = extractLabelLine(/Consignee\b/i);
   if (consigneeLine) {
-    let c = consigneeLine.replace(/Consignee\s*[:\-]?\s*/i, "").trim();
+    let c = consigneeLine.replace(/Consignee\s*[:-]?\s*/i, "").trim();
     c = c.split(/\bTare\b/i)[0].trim();
     c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
     found.consignee = c || null;
@@ -447,7 +435,7 @@ function handleExtract(rawText) {
 
   const materialLine = extractLabelLine(/Material\b/i);
   if (materialLine) {
-    const m = materialLine.match(/Material\s*[:\-]?\s*(.+)/i);
+    const m = materialLine.match(/Material\s*[:-]?\s*(.+)/i);
     if (m && m[1]) found.material = m[1].trim();
   }
 
@@ -467,7 +455,7 @@ function handleExtract(rawText) {
   // 10) Operator — prefer label; if label present but no clean name afterwards, fall back to literal "Operator"
   const opLine = extractLabelLine(/\bOperator\b/i);
   if (opLine) {
-    let op = opLine.replace(/Operator\s*[:\-]?\s*/i, "").trim();
+    let op = opLine.replace(/Operator\s*[:-]?\s*/i, "").trim();
     // strip timestamps / WB / weight tokens and boolean flags
     op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
     op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
@@ -476,7 +464,7 @@ function handleExtract(rawText) {
     op = op.replace(/\b(true|false)\b/ig, "");
     op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
     if (op) {
-      const opMatch = op.match(/[A-Za-z][A-Za-z\.\s'\-]{0,40}/);
+      const opMatch = op.match(/[A-Za-z][A-Za-z.\s'-]{0,40}/);
       found.operator = opMatch ? opMatch[0].trim() : op;
     } else {
       // label existed but no clear name — keep the label as placeholder
@@ -651,7 +639,6 @@ const EMPTY_FORM = {
 
 const numericFields = ['gross', 'tare', 'net', 'weight', 'total_weight'];
 
-const normalizeEmpty = (val) => (val === '' || val === undefined || val === null ? null : val);
 
 const uploadFileToSupabase = async (file) => {
   if (!(file instanceof File)) {
@@ -857,12 +844,6 @@ const displayedTickets = useClientSidePagination
 const handlePageSizeChange = (e) => {
   const newSize = Number(e.target.value);
   setPageSize(newSize);
-};
-
-// toggle pagination mode
-const handleTogglePaginationMode = (e) => {
-  setUseClientSidePagination(e.target.checked);
-  setCurrentPage(1);
 };
 
 // number buttons array (left for compatibility; not used in condensed UI)
@@ -1186,6 +1167,22 @@ return (
             }}
           />
         </HStack>
+      </FormControl>
+
+      {/* Toggle between client-side and server-side pagination */}
+      <FormControl display="flex" alignItems="center" maxW="220px">
+        <FormLabel fontSize="sm" mb={0} mr={2}>Client-side pagination</FormLabel>
+        <Switch
+          size="sm"
+          isChecked={useClientSidePagination}
+          onChange={(e) => {
+            setUseClientSidePagination(e.target.checked);
+            // reset to first page when switching mode
+            setCurrentPage(1);
+            // refetch immediately for the new mode
+            fetchTickets();
+          }}
+        />
       </FormControl>
 
       <Box flex="1" />
