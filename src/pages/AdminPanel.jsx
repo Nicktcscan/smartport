@@ -44,12 +44,14 @@ import {
   Th,
   Td,
   useDisclosure,
+  Stack,
+  Flex,
 } from '@chakra-ui/react';
 import { motion, useAnimation } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../context/AuthContext';
-import { FiRefreshCw, FiDownload, FiTruck, FiFileText, FiUsers } from 'react-icons/fi';
+import { FiRefreshCw, FiDownload, FiTruck, FiFileText, FiUsers, FiPlus } from 'react-icons/fi';
 import { Line, Pie } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -97,8 +99,8 @@ export default function AdminPanel() {
 
   // theme
   const statBg = useColorModeValue('white', 'gray.700');
-  const activityItemBg = useColorModeValue('gray.50', 'gray.800');
-  const activityBadgeBg = useColorModeValue('gray.100', 'gray.700');
+  const activityItemBg = useColorModeValue('rgba(255,255,255,0.6)', 'rgba(255,255,255,0.03)');
+  const activityBadgeBg = useColorModeValue('rgba(255,255,255,0.8)', 'rgba(255,255,255,0.06)');
   const userCardBg = useColorModeValue('white', 'gray.800');
 
   // data
@@ -126,8 +128,9 @@ export default function AdminPanel() {
   const [activitySearch, setActivitySearch] = useState('');
   const debouncedActivitySearch = useDebounce(activitySearch, 250);
 
-  // reports modal/popover
+  // reports modal/popover + orb modal (generate)
   const { isOpen: isReportsOpen, onOpen: onReportsOpen, onClose: onReportsClose } = useDisclosure();
+  const { isOpen: isNewReportOpen, onOpen: onNewReportOpen, onClose: onNewReportClose } = useDisclosure();
   const [reportSearch, setReportSearch] = useState('');
   const [reportSortDir, setReportSortDir] = useState('desc');
   const [reportLoadingExport, setReportLoadingExport] = useState(false);
@@ -140,6 +143,17 @@ export default function AdminPanel() {
   const reportsAnim = useAnimation();
   const prevTrucksExitedRef = useRef(0);
   const prevReportsRef = useRef(0);
+
+  // mounted guard to ensure animation controls are started only after mount
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // voice recognition
+  const recognitionRef = useRef(null);
+  const [listening, setListening] = useState(false);
 
   // redirect non-admins
   useEffect(() => {
@@ -266,15 +280,27 @@ export default function AdminPanel() {
     // reportsGenerated derived from reportsArr length (single source)
     const reportsGenerated = (reportsArr || []).length;
 
-    // animations for increases
-    if (trucksExited > (prevTrucksExitedRef.current ?? 0)) {
-      trucksAnim.start({ scale: [1, 1.08, 1], transition: { duration: 0.6 } });
-    }
-    prevTrucksExitedRef.current = trucksExited;
+    // animations for increases — only start animations if component mounted
+    if (mountedRef.current) {
+      try {
+        if (trucksExited > (prevTrucksExitedRef.current ?? 0)) {
+          trucksAnim.start({ scale: [1, 1.08, 1], transition: { duration: 0.6 } });
+        }
+      } catch (e) {
+        // swallow if animation cannot start (safety)
+        // console.debug('trucksAnim.start failed', e);
+      }
 
-    if (reportsGenerated > (prevReportsRef.current ?? 0)) {
-      reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } });
+      try {
+        if (reportsGenerated > (prevReportsRef.current ?? 0)) {
+          reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } });
+        }
+      } catch (e) {
+        // console.debug('reportsAnim.start failed', e);
+      }
     }
+
+    prevTrucksExitedRef.current = trucksExited;
     prevReportsRef.current = reportsGenerated;
 
     setAnalytics((prev) => ({
@@ -450,8 +476,9 @@ export default function AdminPanel() {
         // toast & animate on new report
         try {
           if (evt === 'INSERT' && newRec) {
-            // animate reports stat card
-            reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } });
+            if (mountedRef.current) {
+              try { reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } }); } catch (e) {}
+            }
 
             const actorLabel = (newRec.generated_by && ((users.find(u => String(u.id) === String(newRec.generated_by))?.username) || newRec.generated_by)) || 'Unknown';
 
@@ -509,7 +536,7 @@ export default function AdminPanel() {
     return filtered.slice(0, activityLimit);
   }, [recentActivity, activityFilter, activityLimit, debouncedActivitySearch]);
 
-  // chart line data
+  // chart line data with subtle gradient fill
   const chartLineData = useMemo(() => {
     const days = [];
     const counts = [];
@@ -533,7 +560,27 @@ export default function AdminPanel() {
         }
       }
     });
-    return { labels, datasets: [{ label: 'Tickets', data: counts, tension: 0.3, fill: false, borderWidth: 2 }] };
+    return {
+      labels,
+      datasets: [
+        {
+          label: 'Tickets',
+          data: counts,
+          tension: 0.3,
+          fill: true,
+          borderWidth: 2,
+          pointRadius: 3,
+          backgroundColor: function(context) {
+            const ctx = context.chart.ctx;
+            const gradient = ctx.createLinearGradient(0, 0, 0, 220);
+            gradient.addColorStop(0, 'rgba(99,102,241,0.28)');
+            gradient.addColorStop(1, 'rgba(14,165,233,0.04)');
+            return gradient;
+          },
+          borderColor: 'rgba(99,102,241,0.95)',
+        },
+      ],
+    };
   }, [tickets, chartDays]);
 
   // pie chart for users
@@ -571,15 +618,20 @@ export default function AdminPanel() {
         <PopoverTrigger>
           <MotionBox
             p={3}
-            borderRadius="md"
+            borderRadius="12px"
             bg={activityItemBg}
             boxShadow={shadows.md}
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            whileHover={{ y: -3 }}
+            whileHover={{ y: -6, boxShadow: shadows.lg }}
             cursor="pointer"
             role="group"
             aria-label={`${item.type} activity`}
+            transition={{ type: 'spring', stiffness: 200, damping: 20 }}
+            style={{
+              backdropFilter: 'blur(6px)',
+              border: '1px solid rgba(255,255,255,0.06)',
+            }}
           >
             <HStack justify="space-between" align="start">
               <VStack align="start" spacing={0}>
@@ -587,7 +639,7 @@ export default function AdminPanel() {
                   <Box as={Icon} boxSize={4} color="gray.500" />
                   <Text fontSize="sm" fontWeight="semibold">{item.title}</Text>
                   {(item.type === 'weighbridge' || item.type === 'outgate') && (
-                    <Button size="xs" onClick={(e) => { e.stopPropagation(); openDetail(); }} variant="ghost" colorScheme="blue">View</Button>
+                    <Button size="xs" onClick={(e) => { e.stopPropagation(); openDetail(); }} variant="ghost" colorScheme="blue">Open</Button>
                   )}
                 </HStack>
                 <Text fontSize="xs" color="gray.500">{new Date(item.time).toLocaleString()}</Text>
@@ -600,7 +652,7 @@ export default function AdminPanel() {
                 )}
               </VStack>
 
-              <Badge colorScheme={badgeColor} bg={activityBadgeBg} px={2} py={1} borderRadius="md" textTransform="capitalize">{item.type}</Badge>
+              <Badge colorScheme={badgeColor} bg={activityBadgeBg} px={3} py={1} borderRadius="md" textTransform="capitalize">{item.type}</Badge>
             </HStack>
           </MotionBox>
         </PopoverTrigger>
@@ -691,6 +743,146 @@ export default function AdminPanel() {
     return String(generated_by);
   };
 
+  // Voice recognition: simple commands
+  const startVoice = () => {
+    if (typeof window === 'undefined') {
+      toast({ title: 'Voice not supported here', status: 'warning' });
+      return;
+    }
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      toast({ title: 'Voice not supported', description: 'This browser does not support SpeechRecognition', status: 'warning' });
+      return;
+    }
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recog = new Speech();
+    recog.lang = 'en-US';
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+
+    recog.onresult = (ev) => {
+      const text = (ev.results[0][0].transcript || '').toLowerCase();
+      toast({ title: 'Heard', description: text, status: 'info', duration: 2500 });
+
+      // commands
+      if (text.includes('promote all')) {
+        // NOTE: local UI update only to avoid accidental permission escalations
+        setUsers((prev) => prev.map((u) => ({ ...u, role: 'admin' })));
+        toast({ title: 'Promoted all (UI only)', description: 'All user roles set to admin locally (not persisted)', status: 'success' });
+      } else if (text.includes('demote row three') || text.includes('demote row 3') || text.includes('demote third')) {
+        setUsers((prev) => {
+          if (!prev || prev.length < 3) {
+            toast({ title: 'Not enough rows', status: 'warning' });
+            return prev;
+          }
+          const copy = [...prev];
+          copy[2] = { ...copy[2], role: 'user' };
+          return copy;
+        });
+        toast({ title: 'Demoted row three (UI only)', status: 'success' });
+      } else if (text.includes('generate report') || text.includes('create report') || text.includes('new report')) {
+        onNewReportOpen();
+      } else if (text.includes('refresh data')) {
+        refreshData();
+      } else {
+        toast({ title: 'Command not recognized', description: text, status: 'warning' });
+      }
+    };
+
+    recog.onend = () => setListening(false);
+    recog.onerror = (e) => {
+      setListening(false);
+      toast({ title: 'Voice error', description: e?.error || 'Speech recognition error', status: 'error' });
+    };
+
+    recognitionRef.current = recog;
+    try {
+      recog.start();
+      setListening(true);
+      toast({ title: 'Listening', description: 'Say: "Promote all", "Demote row three", "Generate report"', status: 'info' });
+    } catch (e) {
+      setListening(false);
+      toast({ title: 'Voice error', description: 'Could not start recognition', status: 'error' });
+    }
+  };
+
+  const stopVoice = () => {
+    try {
+      if (recognitionRef.current) recognitionRef.current.stop();
+    } catch (e) {}
+    recognitionRef.current = null;
+    setListening(false);
+  };
+
+  // confetti helper
+  const runConfetti = async () => {
+    if (typeof window === 'undefined') return;
+    try {
+      if (typeof window.confetti === 'function') {
+        window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
+        return;
+      }
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+      if (typeof window.confetti === 'function') {
+        window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
+      }
+    } catch (e) {
+      console.warn('Confetti load failed', e);
+    }
+  };
+
+  // New report modal: form state
+  const [newReportType, setNewReportType] = useState('System Summary');
+  const [newReportFileUrl, setNewReportFileUrl] = useState('');
+  const [creatingReport, setCreatingReport] = useState(false);
+
+  const handleCreateReport = async () => {
+    if (creatingReport) return;
+    setCreatingReport(true);
+    try {
+      const payload = {
+        report_type: newReportType,
+        generated_by: (user && (user.id || user.email)) || 'unknown',
+        generated_at: new Date().toISOString(),
+        file_url: newReportFileUrl || null,
+      };
+
+      // optimistic UI: create a local temporary object
+      const temp = { id: `tmp-${Date.now()}`, ...payload };
+      setReports((p) => [temp, ...(p || [])]);
+
+      // persist
+      const { data, error } = await supabase.from('reports_generated').insert([payload]).select().single();
+      if (error) {
+        // rollback optimistic
+        setReports((p) => (p || []).filter((r) => r.id !== temp.id));
+        toast({ title: 'Failed to create report', description: error.message || String(error), status: 'error' });
+      } else {
+        // replace temp with actual response (safe)
+        setReports((p) => {
+          const copy = (p || []).filter((r) => r.id !== temp.id);
+          return [data, ...copy];
+        });
+
+        await runConfetti();
+        toast({ title: 'Report generated', description: `${data.report_type} created`, status: 'success' });
+      }
+    } catch (err) {
+      console.error('create report', err);
+      toast({ title: 'Error', description: err?.message || String(err), status: 'error' });
+    } finally {
+      setCreatingReport(false);
+      onNewReportClose();
+      setNewReportFileUrl('');
+      setNewReportType('System Summary');
+    }
+  };
+
   // Loading skeleton UI while fetching
   if (authLoading || loadingData || loadingUsers || loadingReports) {
     return (
@@ -701,183 +893,187 @@ export default function AdminPanel() {
     );
   }
 
+  // resolveGeneratedBy for UI
+  const resolveGeneratedByUI = (r) => {
+    if (!r) return 'Unknown';
+    try {
+      return resolveActorLabel(r.generated_by);
+    } catch (e) {
+      return String(r.generated_by || 'Unknown');
+    }
+  };
+
   return (
-    <Box mt={8} px={{ base: '4', md: '10' }} pb={8}>
+    <Box mt={8} px={{ base: '6', md: '12' }} pb={12} fontFamily="Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial" maxW="1600px" mx="auto">
       <Heading mb={6} textAlign="center" fontWeight="extrabold">Admin Panel</Heading>
 
-      {/* Top Stats */}
+      {/* Header controls */}
+      <Flex justify="space-between" align="center" wrap="wrap" gap={4} mb={6}>
+        <HStack spacing={3}>
+          <Button leftIcon={<FiRefreshCw />} colorScheme="gray" variant="ghost" onClick={refreshData}>Refresh</Button>
+          <Button leftIcon={<FiDownload />} colorScheme="blue" variant="ghost" onClick={exportReportsCsv} isLoading={reportLoadingExport}>Export Reports</Button>
+          <Button onClick={() => { if (listening) stopVoice(); else startVoice(); }} colorScheme={listening ? 'purple' : 'gray'} variant={listening ? 'solid' : 'outline'}>
+            {listening ? 'Listening...' : 'Voice Commands'}
+          </Button>
+        </HStack>
+
+        <HStack spacing={3}>
+          <Text fontSize="sm" color="gray.500">Signed in as</Text>
+          <Avatar name={user?.email || user?.id} size="sm" />
+          <Text fontWeight="semibold">{user?.email || user?.id}</Text>
+        </HStack>
+      </Flex>
+
+      {/* Top Stats (neon + glass) */}
       <SimpleGrid minChildWidth="220px" spacing={6} mb={6}>
-        <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel fontWeight="bold">Gate Ops (Today)</StatLabel>
-          <StatNumber>{analytics.gateOpsToday ?? 0}</StatNumber>
+        <Stat
+          p={4}
+          borderRadius="12px"
+          boxShadow="0 8px 30px rgba(2,6,23,0.06)"
+          style={{
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.85), rgba(255,255,255,0.6))',
+            border: '1px solid rgba(124,58,237,0.08)',
+          }}
+        >
+          <StatLabel fontWeight="bold" color="#6b21a8">Gate Ops (Today)</StatLabel>
+          <StatNumber color="#111827">{analytics.gateOpsToday ?? 0}</StatNumber>
           <StatHelpText>Entries & exits today</StatHelpText>
         </Stat>
 
-        <Stat bg={statBg} p={4} borderRadius="md" boxShadow="sm">
-          <StatLabel fontWeight="bold">Tickets Processed</StatLabel>
-          <StatNumber>{analytics.ticketsProcessed ?? 0}</StatNumber>
+        <Stat
+          p={4}
+          borderRadius="12px"
+          boxShadow="0 8px 30px rgba(2,6,23,0.06)"
+          style={{
+            background: 'linear-gradient(90deg, rgba(6,182,212,0.06), rgba(99,102,241,0.03))',
+            border: '1px solid rgba(6,182,212,0.06)',
+          }}
+        >
+          <StatLabel fontWeight="bold" color="#0891b2">Tickets Processed</StatLabel>
+          <StatNumber color="#065f46">{analytics.ticketsProcessed ?? 0}</StatNumber>
           <StatHelpText>Unique tickets processed</StatHelpText>
         </Stat>
 
-        <Stat bg="linear-gradient(90deg, rgba(16,185,129,0.04), rgba(16,185,129,0.01))" p={4} borderRadius="md" boxShadow="sm" border="1px solid" borderColor="teal.300">
-          <StatLabel fontWeight="bold">Trucks Exited</StatLabel>
-          <MotionStatNumber fontSize="2xl" animate={trucksAnim} transition={{ type: 'spring', stiffness: 300, damping: 20 }}>
+        <Stat
+          p={4}
+          borderRadius="12px"
+          boxShadow="0 10px 30px rgba(14,165,233,0.06)"
+          style={{
+            background: 'linear-gradient(135deg, rgba(16,185,129,0.06), rgba(99,102,241,0.03))',
+            border: '1px solid rgba(99,102,241,0.06)',
+          }}
+        >
+          <StatLabel fontWeight="bold" color="#059669">Trucks Exited</StatLabel>
+          <MotionStatNumber fontSize="2xl" animate={trucksAnim} transition={{ type: 'spring', stiffness: 300, damping: 20 }} color="#065f46">
             {analytics.trucksExited ?? 0}
           </MotionStatNumber>
           <StatHelpText>Unique tickets with exit recorded</StatHelpText>
         </Stat>
 
-        {/* Reports: Popover preview + Modal for full table */}
-        <Popover placement="bottom-start">
-          <PopoverTrigger>
-            <MotionBox
-              as="button"
-              textAlign="left"
-              p={4}
-              borderRadius="md"
-              boxShadow="sm"
-              bg={statBg}
-              border="1px solid"
-              borderColor="transparent"
-              whileHover={{ scale: 1.02 }}
-              animate={reportsAnim}
-              _hover={{ borderColor: 'gray.200' }}
-            >
-              <Stat>
-                <StatLabel fontWeight="bold">Reports Generated</StatLabel>
-                <StatNumber>{analytics.reportsGenerated ?? 0}</StatNumber>
-                <StatHelpText>Reports from Weight & Outgate modules (click to view)</StatHelpText>
-              </Stat>
-            </MotionBox>
-          </PopoverTrigger>
-
-          <PopoverContent width="420px" boxShadow="lg" _focus={{ boxShadow: 'lg' }}>
-            <PopoverArrow />
-            <PopoverCloseButton />
-            <PopoverHeader fontWeight="bold">Recent Reports</PopoverHeader>
-            <PopoverBody>
-              {reports && reports.length ? (
-                <VStack spacing={2} align="stretch">
-                  {reports.slice(0, 6).map((r) => (
-                    <HStack key={r.id} justify="space-between">
-                      <Box>
-                        <Text fontSize="sm" fontWeight="semibold">{r.report_type ?? 'Report'}</Text>
-                        <Text fontSize="xs" color="gray.500">{resolveActorLabel(r.generated_by)} — {r.generated_at ? new Date(r.generated_at).toLocaleString() : '—'}</Text>
-                      </Box>
-                      <Button size="xs" variant="ghost" onClick={() => { onReportsOpen(); }}>View all</Button>
-                    </HStack>
-                  ))}
-                  {reports.length > 6 && <Button size="sm" onClick={() => onReportsOpen()}>View all reports ({reports.length})</Button>}
-                </VStack>
-              ) : (
-                <Text>No reports yet.</Text>
-              )}
-            </PopoverBody>
-          </PopoverContent>
-        </Popover>
+        <MotionBox
+          as="button"
+          textAlign="left"
+          p={4}
+          borderRadius="12px"
+          boxShadow="0 8px 30px rgba(124,58,237,0.08)"
+          bg="linear-gradient(90deg, rgba(124,58,237,0.08), rgba(99,102,241,0.02))"
+          whileHover={{ scale: 1.01 }}
+          animate={reportsAnim}
+          style={{ border: '1px solid rgba(124,58,237,0.06)' }}
+          onClick={onReportsOpen}
+        >
+          <Stat>
+            <StatLabel fontWeight="bold" color="#7c3aed">Reports Generated</StatLabel>
+            <StatNumber color="#6b21a8">{analytics.reportsGenerated ?? 0}</StatNumber>
+            <StatHelpText>Reports from Weight & Outgate modules (click to view)</StatHelpText>
+          </Stat>
+        </MotionBox>
       </SimpleGrid>
 
       <Divider mb={6} />
 
-      {/* Charts + Actions */}
-      <SimpleGrid columns={{ base: 1, md: 3 }} spacing={6} mb={6}>
-        {/* Line chart */}
-        <Box p={4} bg={statBg} borderRadius="md" boxShadow="sm">
-          <HStack justify="space-between" align="center" mb={3}>
-            <Heading size="sm">Recent Tickets</Heading>
-            <HStack>
+      {/* Charts + Activity: improved layout */}
+      <SimpleGrid columns={{ base: 1, md: 2 }} spacing={6} mb={6}>
+        {/* Left column: line + actions */}
+        <Box
+          p={4}
+          borderRadius="12px"
+          boxShadow="0 8px 30px rgba(2,6,23,0.04)"
+          style={{
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.92))',
+            border: '1px solid rgba(2,6,23,0.03)',
+          }}
+        >
+          <HStack justify="space-between" mb={3}>
+            <Heading size="md">Recent Tickets</Heading>
+            <HStack spacing={2}>
               <Select size="sm" value={chartDays} onChange={(e) => setChartDays(Number(e.target.value))}>
                 {[7, 14, 30].map((n) => <option key={n} value={n}>{n} days</option>)}
               </Select>
               <IconButton aria-label="Refresh charts" icon={<FiRefreshCw />} size="sm" onClick={refreshData} />
+              <Button leftIcon={<FiPlus />} size="sm" colorScheme="purple" onClick={onNewReportOpen}>New Report</Button>
             </HStack>
           </HStack>
-          <Box minH="160px">
+
+          <Box minH="220px" mb={3}>
             <Line
               data={chartLineData}
               options={{
                 responsive: true,
                 plugins: { legend: { display: false }, title: { display: false } },
-                scales: { x: { grid: { display: false } }, y: { ticks: { precision: 0 } } },
+                scales: {
+                  x: { grid: { display: false }, ticks: { maxRotation: 0 } },
+                  y: { ticks: { precision: 0 } },
+                },
+                interaction: { intersect: false, mode: 'index' },
+                maintainAspectRatio: false,
               }}
             />
           </Box>
-        </Box>
 
-        {/* Pie chart */}
-        <Box p={4} bg={statBg} borderRadius="md" boxShadow="sm">
-          <HStack justify="space-between" align="center" mb={3}>
-            <Heading size="sm">User Roles</Heading>
-            <Tooltip label="Export users CSV">
-              <IconButton size="sm" icon={<FiDownload />} onClick={() => {
-                const rows = (users || []).map(u => ({ id: u.id, username: u.username, email: u.email, role: u.role }));
-                if (!rows.length) return toast({ title: 'No users', status: 'info', duration: 1500 });
-                const keys = Object.keys(rows[0]);
-                const csv = [keys.join(','), ...rows.map(r => keys.map(k => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
-                const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a'); a.href = url; a.download = `users-${new Date().toISOString().slice(0,10)}.csv`; a.click(); a.remove(); URL.revokeObjectURL(url);
-                toast({ title: 'Users exported', status: 'success', duration: 1500 });
-              }} />
-            </Tooltip>
+          <HStack spacing={4} mt={2} align="center">
+            <Box p={3} borderRadius="md" boxShadow="sm" flex="1" bg="linear-gradient(90deg, rgba(124,58,237,0.04), rgba(99,102,241,0.02))">
+              <Text fontSize="sm" color="gray.600">Active Tickets</Text>
+              <Text fontWeight="bold" fontSize="lg">{analytics.ticketsProcessed}</Text>
+            </Box>
+            <Box p={3} borderRadius="md" boxShadow="sm" flex="1" bg="linear-gradient(90deg, rgba(16,185,129,0.04), rgba(16,185,129,0.02))">
+              <Text fontSize="sm" color="gray.600">Today Ops</Text>
+              <Text fontWeight="bold" fontSize="lg">{analytics.gateOpsToday}</Text>
+            </Box>
           </HStack>
-          <Box minH="160px" display="flex" alignItems="center" justifyContent="center">
-            <Pie data={chartPieData} options={{ plugins: { legend: { position: 'bottom' } }, maintainAspectRatio: false }} />
-          </Box>
         </Box>
 
-        {/* Quick actions + activity filter */}
-        <Box p={4} bg={statBg} borderRadius="md" boxShadow="sm">
-          <Heading size="sm" mb={3}>Quick Actions</Heading>
-          <VStack spacing={3} align="stretch">
-            <Button colorScheme="blue" onClick={refreshData}>Refresh Data</Button>
-            <Button colorScheme="purple" onClick={() => toast({ title: 'Report generation triggered', status: 'success', duration: 1500 })}>Generate System Report</Button>
-            <Button variant="ghost" onClick={() => {
-              // reuse activity export
-              const rows = (recentActivity || []).slice(0, activityLimit).map((r) => ({ time: r.time, type: r.type, title: r.title, meta: JSON.stringify(r.meta || {}) }));
-              if (!rows.length) return toast({ title: 'No activity to export', status: 'info' });
-              const keys = Object.keys(rows[0]);
-              const csv = [keys.join(','), ...rows.map((r) => keys.map((k) => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\n');
-              const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a'); a.href = url; a.download = `activity-${new Date().toISOString().slice(0,10)}.csv`; a.click(); a.remove(); URL.revokeObjectURL(url);
-              toast({ title: 'Activity exported', status: 'success' });
-            }}>Export Activity</Button>
+        {/* Right column: Activity feed (improved) */}
+        <Box
+          p={4}
+          borderRadius="12px"
+          boxShadow="0 8px 30px rgba(2,6,23,0.04)"
+          style={{
+            background: 'linear-gradient(180deg, rgba(255,255,255,0.96), rgba(255,255,255,0.92))',
+            border: '1px solid rgba(2,6,23,0.03)',
+          }}
+        >
+          <HStack justify="space-between" mb={3}>
+            <Heading size="md">Recent Activity</Heading>
+            <HStack>
+              <Text fontSize="sm" color="gray.500">{displayedActivity.length} of {recentActivity.length}</Text>
+              <Button size="sm" onClick={handleLoadMoreActivity}>Load more</Button>
+              <Button size="sm" onClick={handleShowLessActivity}>Show less</Button>
+            </HStack>
+          </HStack>
 
-            <Divider />
-
-            <Heading size="xs" mt={2}>Activity Filter</Heading>
-            <Select size="sm" value={activityFilter} onChange={(e) => setActivityFilter(e.target.value)}>
-              <option value="all">All</option>
-              <option value="weighbridge">Weighbridge</option>
-              <option value="outgate">Outgate</option>
-              <option value="users">Users</option>
-              <option value="report">Reports</option>
-            </Select>
-            <Input size="sm" placeholder="Search activity (ticket/truck/driver/SAD)" value={activitySearch} onChange={(e) => setActivitySearch(e.target.value)} aria-label="Search activity" />
-          </VStack>
+          <SimpleGrid columns={{ base: 1 }} spacing={3} ref={activityRef}>
+            {displayedActivity.length === 0 ? <Text color="gray.500">No activity yet.</Text> : displayedActivity.map(item => (
+              <ActivityItem key={item.id} item={item} />
+            ))}
+          </SimpleGrid>
         </Box>
       </SimpleGrid>
-
-      {/* Activity Feed */}
-      <Box bg={statBg} borderRadius="md" p={4} boxShadow="sm" mb={6}>
-        <HStack justify="space-between" mb={3}>
-          <Heading size="md">Recent Activity</Heading>
-          <HStack>
-            <Text fontSize="sm" color="gray.500">{displayedActivity.length} of {recentActivity.length}</Text>
-            <Button size="sm" onClick={handleLoadMoreActivity}>Load more</Button>
-            <Button size="sm" onClick={handleShowLessActivity}>Show less</Button>
-          </HStack>
-        </HStack>
-        <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3} ref={activityRef}>
-          {displayedActivity.length === 0 ? <Text color="gray.500">No activity yet.</Text> : displayedActivity.map(item => <ActivityItem key={item.id} item={item} />)}
-        </SimpleGrid>
-      </Box>
 
       <Divider mb={6} />
 
       {/* Users summary */}
-      <Box bg={statBg} borderRadius="md" p={4} boxShadow="sm">
+      <Box bg={statBg} borderRadius="12px" p={4} boxShadow="0 10px 30px rgba(2,6,23,0.04)" mb={6}>
         <HStack justify="space-between" mb={3}>
           <Heading size="md">Users ({users.length})</Heading>
           <Button size="sm" onClick={() => navigate('/users')}>Manage Users</Button>
@@ -890,7 +1086,7 @@ export default function AdminPanel() {
                 <Text fontSize="sm" fontWeight="semibold">{u.username}</Text>
                 <Text fontSize="xs" color="gray.500">{u.role}</Text>
               </VStack>
-              <Badge ml="auto" colorScheme="gray">{u.role}</Badge>
+              <Badge ml="auto" colorScheme={u.role === 'admin' ? 'purple' : 'gray'}>{u.role}</Badge>
             </HStack>
           ))}
         </SimpleGrid>
@@ -928,7 +1124,7 @@ export default function AdminPanel() {
                   ) : filteredSortedReports.map((r) => (
                     <Tr key={r.id}>
                       <Td textTransform="capitalize">{r.report_type ?? '—'}</Td>
-                      <Td>{resolveActorLabel(r.generated_by)}</Td>
+                      <Td>{resolveGeneratedByUI(r)}</Td>
                       <Td>
                         {r.file_url ? (
                           <Button size="xs" variant="link" onClick={() => window.open(r.file_url, '_blank')}>Open file</Button>
@@ -946,6 +1142,217 @@ export default function AdminPanel() {
           </ModalFooter>
         </ModalContent>
       </Modal>
+
+      {/* Floating Crystal Orb CTA */}
+      <Box position="fixed" bottom="28px" right="28px" zIndex={2200} display="flex" alignItems="center" gap={3}>
+        <MotionBox
+          onClick={onNewReportOpen}
+          whileHover={{ scale: 1.08, y: -4 }}
+          whileTap={{ scale: 0.96 }}
+          cursor="pointer"
+          width="72px"
+          height="72px"
+          borderRadius="999px"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          boxShadow="0 14px 40px rgba(99,102,241,0.18)"
+          style={{
+            background: 'radial-gradient(circle at 30% 20%, #9f7aea, #7c3aed 40%, #06b6d4 100%)',
+            color: '#fff',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}
+          title="New report"
+          aria-label="Create new report"
+        >
+          <Box fontSize="26px" fontWeight="700">✺</Box>
+        </MotionBox>
+      </Box>
+
+      {/* New Report holographic modal with DOM 3D cube group (background white as requested) */}
+      <Modal isOpen={isNewReportOpen} onClose={() => { if (!creatingReport) onNewReportClose(); }} isCentered size="lg">
+        <ModalOverlay />
+        <ModalContent
+          style={{
+            borderRadius: 18,
+            overflow: 'hidden',
+            background: '#fff', // white background per request
+            boxShadow: '0 30px 80px rgba(12,18,63,0.28)',
+            border: '1px solid rgba(124,58,237,0.08)',
+            position: 'relative',
+            maxWidth: '920px',
+          }}
+        >
+          <ModalHeader>
+            <HStack spacing={3}>
+              <Box
+                width="56px"
+                height="56px"
+                borderRadius="12px"
+                display="flex"
+                alignItems="center"
+                justifyContent="center"
+                style={{
+                  background: 'linear-gradient(135deg,#7c3aed,#06b6d4)',
+                  boxShadow: '0 10px 30px rgba(124,58,237,0.18)',
+                  color: 'white',
+                }}
+              >
+                ✸
+              </Box>
+              <Box>
+                <Text fontSize="lg" fontWeight="bold">Create New Report</Text>
+                <Text fontSize="sm" color="gray.500">Holographic generator — logs the creation</Text>
+              </Box>
+            </HStack>
+          </ModalHeader>
+
+          <ModalCloseButton isDisabled={creatingReport} />
+
+          <ModalBody>
+            {/* canvas-like holographic area with DOM cubes */}
+            <Box mb={4} position="relative" height="180px" borderRadius="12px" overflow="visible">
+              <Box
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  zIndex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  pointerEvents: 'none',
+                }}
+              >
+                {/* Cube group container */}
+                <div className="cube-scene" style={{ width: 260, height: 140 }}>
+                  <div className="cube-group">
+                    <div className="cube cube-a"><div className="face"></div></div>
+                    <div className="cube cube-b"><div className="face"></div></div>
+                    <div className="cube cube-c"><div className="face"></div></div>
+                  </div>
+                </div>
+              </Box>
+
+              {/* subtle textual overlay */}
+              <Box
+                position="absolute"
+                zIndex={2}
+                left={6}
+                top={6}
+                bg="transparent"
+                p={3}
+                borderRadius="md"
+                style={{ backdropFilter: 'blur(4px)' }}
+              >
+                <Text fontSize="sm" color="gray.600">Crystal core</Text>
+                <Text fontSize="xs" color="gray.400">Light shards assemble the 3D form</Text>
+              </Box>
+            </Box>
+
+            <Stack spacing={3}>
+              <Box>
+                <Text fontSize="sm" color="gray.600" mb={1}>Report Type</Text>
+                <Select value={newReportType} onChange={(e) => setNewReportType(e.target.value)}>
+                  <option>System Summary</option>
+                  <option>Outgate Snapshot</option>
+                  <option>Tickets Export</option>
+                  <option>Custom</option>
+                </Select>
+              </Box>
+
+              <Box>
+                <Text fontSize="sm" color="gray.600" mb={1}>Attach File URL (optional)</Text>
+                <Input placeholder="https://..." value={newReportFileUrl} onChange={(e) => setNewReportFileUrl(e.target.value)} />
+              </Box>
+
+              <Box>
+                <Text fontSize="xs" color="gray.500">Tip: This modal is cinematic — press Generate to log the report and trigger confetti.</Text>
+              </Box>
+            </Stack>
+          </ModalBody>
+
+          <ModalFooter>
+            <Button variant="ghost" onClick={() => { if (!creatingReport) onNewReportClose(); }} mr={3}>Cancel</Button>
+            <Button colorScheme="purple" onClick={handleCreateReport} isLoading={creatingReport}>Generate</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* cube CSS (DOM 3D cubes) + ultra-wide 3D panel tweak */}
+      <style>{`
+        /* Ultra-wide subtle tilt */
+        @media (min-width: 1600px) {
+          .chakra-box[role="region"] {
+            transform: perspective(1400px) rotateX(2deg) rotateY(-2deg);
+            transition: transform 0.6s ease;
+          }
+        }
+
+        /* Cube scene */
+        .cube-scene {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transform-style: preserve-3d;
+          perspective: 900px;
+        }
+
+        .cube-group {
+          width: 200px;
+          height: 120px;
+          position: relative;
+          transform-style: preserve-3d;
+        }
+
+        .cube {
+          width: 46px;
+          height: 46px;
+          position: absolute;
+          top: 20px;
+          left: 50%;
+          margin-left: -23px;
+          transform-style: preserve-3d;
+          animation: floatRotate 5s cubic-bezier(.2,.9,.3,.95) infinite;
+          filter: drop-shadow(0 8px 18px rgba(15,23,42,0.12));
+        }
+
+        .cube .face {
+          position: absolute;
+          width: 100%;
+          height: 100%;
+          border-radius: 6px;
+          background: linear-gradient(135deg,#7c3aed, #06b6d4);
+          opacity: 0.95;
+          transform: translateZ(23px);
+        }
+
+        .cube-a { left: 40px; transform-origin: center; animation-delay: 0s; }
+        .cube-b { left: 100px; transform-origin: center; animation-delay: 0.22s; transform: translateX(40px) translateZ(-12px) rotateY(18deg); }
+        .cube-c { left: 160px; transform-origin: center; animation-delay: 0.45s; transform: translateX(80px) translateZ(-24px) rotateY(32deg); }
+
+        /* different tints per cube */
+        .cube-a .face { background: linear-gradient(135deg, rgba(124,58,237,0.95), rgba(99,102,241,0.9)); box-shadow: 0 6px 18px rgba(124,58,237,0.18); }
+        .cube-b .face { background: linear-gradient(135deg, rgba(6,182,212,0.98), rgba(16,185,129,0.9)); box-shadow: 0 6px 18px rgba(6,182,212,0.12); }
+        .cube-c .face { background: linear-gradient(135deg, rgba(244,63,94,0.95), rgba(249,115,22,0.88)); box-shadow: 0 6px 18px rgba(244,63,94,0.12); }
+
+        @keyframes floatRotate {
+          0% { transform: translateY(0px) rotateX(0deg) rotateY(0deg) translateZ(0px); }
+          25% { transform: translateY(-8px) rotateX(18deg) rotateY(14deg) translateZ(8px); }
+          50% { transform: translateY(0px) rotateX(360deg) rotateY(360deg) translateZ(0px); }
+          75% { transform: translateY(-6px) rotateX(12deg) rotateY(6deg) translateZ(6px); }
+          100% { transform: translateY(0px) rotateX(0deg) rotateY(0deg) translateZ(0px); }
+        }
+
+        /* subtle pulse when modal opens */
+        .chakra-modal__content {
+          animation: popIn 420ms cubic-bezier(.2,.9,.3,.95);
+        }
+        @keyframes popIn {
+          0% { transform: scale(.985) translateY(8px); opacity: 0; }
+          100% { transform: scale(1) translateY(0); opacity: 1; }
+        }
+      `}</style>
     </Box>
   );
 }
