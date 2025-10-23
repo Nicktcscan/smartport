@@ -36,8 +36,15 @@ import {
   Stack,
   InputGroup,
   InputRightElement,
+  Spacer,
+  Stat,
+  StatLabel,
+  StatNumber,
+  StatHelpText,
+  Tooltip,
 } from '@chakra-ui/react';
-import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon, CopyIcon } from '@chakra-ui/icons';
+import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
+import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
 
 /* -----------------------
@@ -168,24 +175,20 @@ function NumericInput({
    utilities
    ----------------------- */
 async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7) {
-  // KEEP: limited retries for insert ticket creation (used by manual submit)
   let attempt = 0;
   while (attempt < retryLimit) {
     attempt += 1;
     try {
-      // Build a ticket_no if not present
       if (!insertData.ticket_no) {
         const suggested = await getNextTicketNoFromDB(historyRef);
         insertData.ticket_no = suggested.nextTicketNo;
-        // also set ticket_id if DB expects same (some schema use ticket_no as id); don't force ticket_id though
       }
       const { data, error } = await supabase.from('tickets').insert([insertData]).select();
       if (!error && data && data.length) return { data, error: null, ticketNo: insertData.ticket_no };
       const msg = String(error?.message || '').toLowerCase();
       if (msg.includes('duplicate') || msg.includes('unique') || error?.status === 409) {
-        // conflict: try again (get new suggested ticket_no)
         await new Promise((res) => setTimeout(res, 200 * attempt));
-        insertData.ticket_no = null; // force re-get next loop
+        insertData.ticket_no = null;
         continue;
       }
       return { data: null, error, ticketNo: null };
@@ -232,9 +235,6 @@ async function getNextTicketNoFromDB(localHistory = []) {
   }
 }
 
-/* -----------------------
-   Deduplicate tickets by ticketNo (keep first occurrence)
-   ----------------------- */
 function dedupeByTicketNo(tickets = []) {
   const seen = new Set();
   const out = [];
@@ -251,37 +251,26 @@ function dedupeByTicketNo(tickets = []) {
   return out;
 }
 
-/* -----------------------
-   Small helpers for updates
-   ----------------------- */
 function isUUID(val) {
   if (!val || typeof val !== 'string') return false;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
 }
 
-/**
- * Update tickets row robustly. Use ticket_id when identifier is UUID; fallback to ticket_no.
- * Throws if no rows updated or if Supabase returns an error.
- */
 async function updateTicketsRow(payload, ticketIdentifier, originalTicketNo = null) {
   if (!ticketIdentifier) throw new Error('Missing ticket identifier');
-  // Try ticket_id first when available
   if (isUUID(ticketIdentifier)) {
     const res = await supabase.from('tickets').update(payload).eq('ticket_id', ticketIdentifier).select();
     if (res.error) throw res.error;
     if (res.data && res.data.length) return res.data;
-    // fallback: try original ticket_no if provided
     if (originalTicketNo) {
       const fb = await supabase.from('tickets').update(payload).eq('ticket_no', originalTicketNo).select();
       if (fb.error) throw fb.error;
       if (fb.data && fb.data.length) return fb.data;
     }
   } else {
-    // treat as ticket_no
     const res = await supabase.from('tickets').update(payload).eq('ticket_no', ticketIdentifier).select();
     if (res.error) throw res.error;
     if (res.data && res.data.length) return res.data;
-    // fallback: maybe the ticketIdentifier is actually a ticket_id mistakenly stored; try ticket_id query
     if (isUUID(originalTicketNo)) {
       const fb = await supabase.from('tickets').update(payload).eq('ticket_id', originalTicketNo).select();
       if (fb.error) throw fb.error;
@@ -290,6 +279,32 @@ async function updateTicketsRow(payload, ticketIdentifier, originalTicketNo = nu
   }
   throw new Error(`No rows updated for identifier=${ticketIdentifier}`);
 }
+
+/* -----------------------
+   Motion helpers & confetti
+   ----------------------- */
+const MotionBox = motion(Box);
+
+const runConfetti = async () => {
+  try {
+    if (typeof window.confetti === 'function') {
+      window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
+      return;
+    }
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+    if (typeof window.confetti === 'function') {
+      window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
+    }
+  } catch (e) {
+    console.warn('Confetti load failed', e);
+  }
+};
 
 /* -----------------------
    Main Component
@@ -351,6 +366,9 @@ export default function ManualEntry() {
   // view modal edit state
   const [viewIsEditing, setViewIsEditing] = useState(false);
   const [viewEditData, setViewEditData] = useState({});
+
+  // authoritative manual count (tickets table where ticket_no starts with M-)
+  const [manualCount, setManualCount] = useState(0);
 
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
@@ -444,7 +462,6 @@ export default function ManualEntry() {
         console.warn('Error fetching vehicle_tare_history', histErr);
       }
 
-      // update state only if changed
       setVehicleSummary((prev) => {
         const newSummary = summaryData || null;
         if (JSON.stringify(prev) === JSON.stringify(newSummary)) return prev;
@@ -603,6 +620,7 @@ export default function ManualEntry() {
 
       if (!Array.isArray(data)) {
         setHistory([]);
+        setManualCount(0);
         return;
       }
 
@@ -644,6 +662,17 @@ export default function ManualEntry() {
       const deduped = dedupeByTicketNo(mapped);
       setHistory(deduped);
       setPage(1);
+
+      // authoritative manual count: tickets where ticket_no starts with "M-"
+      try {
+        const manualRows = (data || []).filter((r) => {
+          const tn = (r.ticket_no ?? '').toString();
+          return /^M-/i.test(tn);
+        });
+        setManualCount(manualRows.length);
+      } catch (e) {
+        setManualCount(0);
+      }
     } catch (err) {
       console.error('fetchHistory error', err);
     }
@@ -654,7 +683,6 @@ export default function ManualEntry() {
     (async () => {
       await fetchHistory();
 
-      // set operator from auth
       try {
         let currentUser = null;
         if (supabase.auth?.getUser) {
@@ -728,12 +756,10 @@ export default function ManualEntry() {
 
     setHistory((prev) => [tempTicket, ...prev]);
 
-    // canonical truck value (we store it to gnsw_truck_no)
     const truck = formDataRef.current.truckOnWb || null;
 
-    // Build insert payload: prefer canonical names used elsewhere
     const insertData = {
-      ticket_no: null, // let insertTicketWithRetry pick/generate if required
+      ticket_no: null,
       gnsw_truck_no: truck,
       truck_on_wb: null,
       consignee: formDataRef.current.consignee || null,
@@ -768,7 +794,6 @@ export default function ManualEntry() {
       const newTicketNo = ticketNo || (data && data[0] && data[0].ticket_no) || 'M-0001';
       const newTicketId = (data && data[0] && (data[0].ticket_id || data[0].id)) || newTicketNo;
 
-      // record tare history if requested
       if (truck && computed.tareValue !== null && saveTare) {
         try {
           await supabase.from('vehicle_tare_history').insert([
@@ -791,7 +816,7 @@ export default function ManualEntry() {
           if (!allErr && Array.isArray(allHist) && allHist.length > 0) {
             const tares = allHist.map((r) => Number(r.tare)).filter((n) => !Number.isNaN(n));
             const sum = tares.reduce((a, b) => a + b, 0);
-            const avg = tares.length > 0 ? sum / tares.length : computed.tareValue;
+            const avg = tares.length ? sum / tares.length : computed.tareValue;
             const entryCount = tares.length;
 
             await supabase.from('vehicle_tares').upsert(
@@ -852,6 +877,9 @@ export default function ManualEntry() {
       lastAutoFilledTruckRef.current = '';
 
       onClose();
+
+      // celebratory confetti
+      await runConfetti();
     } catch (err) {
       setHistory((prev) => prev.filter((r) => r.ticketId !== tempId));
       console.error(err);
@@ -885,7 +913,6 @@ export default function ManualEntry() {
       return matchesSearch && matchesStatus;
     });
 
-    // explicit sort newest -> oldest by submittedAt
     arr.sort((a, b) => {
       const da = new Date(a.submittedAt).getTime ? new Date(a.submittedAt).getTime() : 0;
       const db = new Date(b.submittedAt).getTime ? new Date(b.submittedAt).getTime() : 0;
@@ -902,7 +929,6 @@ export default function ManualEntry() {
   const startIndex = (page - 1) * pageSize;
   const pagedHistory = filteredHistory.slice(startIndex, startIndex + pageSize);
 
-  // condensed pagination items
   function getCondensedPages(current, total, edge = 1, around = 2) {
     const pages = new Set();
     for (let i = 1; i <= Math.min(edge, total); i++) pages.add(i);
@@ -924,7 +950,6 @@ export default function ManualEntry() {
     setPage(n);
   };
 
-  // stats summary
   const stats = useMemo(() => {
     const manualOnly = history.filter((h) => h.data.manual && String(h.data.manual).toLowerCase() === 'yes');
     const count = manualOnly.length;
@@ -936,7 +961,6 @@ export default function ManualEntry() {
     return { count, avgGross, avgNet };
   }, [history]);
 
-  // responsive: mobile cards vs desktop table
   const isMobile = useBreakpointValue({ base: true, md: false });
 
   /* -----------------------
@@ -961,7 +985,6 @@ export default function ManualEntry() {
     setEditRowData((p) => ({ ...p, [field]: value }));
   };
 
-  // updates both DB and audit_logs (if ticket is not temporary)
   const saveRowEdit = async (ticket) => {
     if (!isAdmin) {
       toast({ title: 'Permission denied', description: 'Only admins can save edits', status: 'warning', duration: 2500 });
@@ -969,7 +992,6 @@ export default function ManualEntry() {
     }
     if (!ticket) return;
 
-    // validation: numeric conversions
     const g = numericValue(editRowData.gross);
     const t = numericValue(editRowData.tare);
     let n = numericValue(editRowData.net);
@@ -997,10 +1019,8 @@ export default function ManualEntry() {
       net: formatNumber(String(n)),
     };
 
-    // update local UI immediately
     setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
 
-    // if ticket is temporary (optimistic), just keep local
     if (String(ticket.ticketId || '').startsWith('tmp-')) {
       setEditingRowId(null);
       setEditRowData({});
@@ -1008,7 +1028,6 @@ export default function ManualEntry() {
       return;
     }
 
-    // attempt DB update: use helper that ensures correct WHERE
     try {
       const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
       if (!ticketIdValue) throw new Error('Missing ticket identifier');
@@ -1021,18 +1040,14 @@ export default function ManualEntry() {
         container_no: afterData.containerNo || null,
         driver: afterData.driver || null,
         operator: afterData.operator || null,
-        // important mappings to persist SAD and truck
         sad_no: afterData.sadNo || null,
         truck_on_wb: afterData.truckOnWb || null,
-        // also write gnsw_truck_no if that is your canonical truck column:
         gnsw_truck_no: afterData.truckOnWb || null,
-        ticket_no: afterData.ticketNo || null, // if ticketNo changed, attempt to set it
+        ticket_no: afterData.ticketNo || null,
       };
 
-      // call helper that will try ticket_id first (if uuid), then fallback to ticket_no
       await updateTicketsRow(payload, ticketIdValue, ticket.data.ticketNo);
 
-      // audit log
       try {
         const auditEntry = {
           action: 'update',
@@ -1048,7 +1063,7 @@ export default function ManualEntry() {
         console.debug('Audit log insertion failed', auditErr);
       }
 
-      // --- propagate changes to outgate table ---
+      // propagate to outgate (best-effort)
       try {
         const oldTicketNo = ticket.data?.ticketNo ?? null;
         const newTicketNo = afterData?.ticketNo ?? oldTicketNo;
@@ -1064,18 +1079,15 @@ export default function ManualEntry() {
           ticket_no: newTicketNo || null,
         };
 
-        // Prefer update by ticket_id if possible
         if (isUUID(ticketIdValue)) {
           const byId = await supabase.from('outgate').update(outPayload).eq('ticket_id', ticketIdValue).select();
           if (byId.error) {
             console.warn('Failed to update outgate by ticket_id', byId.error);
           } else if (!byId.data || byId.data.length === 0) {
-            // try by old ticket_no if provided
             if (oldTicketNo) {
               const byOldNo = await supabase.from('outgate').update(outPayload).eq('ticket_no', oldTicketNo).select();
               if (byOldNo.error) console.warn('Failed to update outgate by old ticket_no', byOldNo.error);
               else if (!byOldNo.data || byOldNo.data.length === 0) {
-                // nothing updated -> attempt insert to ensure outgate row exists
                 try {
                   await supabase.from('outgate').insert([{
                     ticket_no: newTicketNo || oldTicketNo,
@@ -1096,12 +1108,9 @@ export default function ManualEntry() {
             }
           }
         } else {
-          // identifier not UUID -> try ticket_no update first
           const byNo = await supabase.from('outgate').update(outPayload).eq('ticket_no', ticketIdValue).select();
-          if (byNo.error) {
-            console.warn('Failed to update outgate by ticket_no', byNo.error);
-          } else if (!byNo.data || byNo.data.length === 0) {
-            // fallback to ticket_id if we have one in outgate (try to find it)
+          if (byNo.error) console.warn('Failed to update outgate by ticket_no', byNo.error);
+          else if (!byNo.data || byNo.data.length === 0) {
             if (oldTicketNo) {
               const byOldNo = await supabase.from('outgate').update(outPayload).eq('ticket_no', oldTicketNo).select();
               if (byOldNo.error) console.warn('Failed to update outgate by old ticket_no', byOldNo.error);
@@ -1129,9 +1138,7 @@ export default function ManualEntry() {
       } catch (outErrGeneral) {
         console.error('Outgate update/insert error', outErrGeneral);
       }
-      // --- END outgate propagation ---
 
-      // refresh authoritative data from DB so UI shows persisted values
       await fetchHistory();
 
       toast({ title: 'Saved', description: `Ticket updated`, status: 'success', duration: 2500 });
@@ -1139,7 +1146,6 @@ export default function ManualEntry() {
       setEditRowData({});
     } catch (err) {
       console.error('Update failed', err);
-      // roll back local if DB fails
       setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...before } } : r)));
       toast({ title: 'Update failed', description: err?.message || 'Could not update ticket', status: 'error', duration: 5000 });
     }
@@ -1170,7 +1176,6 @@ export default function ManualEntry() {
   const saveViewEdit = async () => {
     if (!viewTicket) return;
     const ticket = viewTicket;
-    // similar validation as saveRowEdit
     const g = numericValue(viewEditData.gross);
     const t = numericValue(viewEditData.tare);
     let n = numericValue(viewEditData.net);
@@ -1198,11 +1203,9 @@ export default function ManualEntry() {
       net: formatNumber(String(n)),
     };
 
-    // update local UI
     setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...afterData } } : r)));
     setViewTicket((v) => ({ ...v, data: afterData }));
 
-    // persist to DB if not temp
     if (!String(ticket.ticketId || '').startsWith('tmp-')) {
       try {
         const ticketIdValue = ticket.ticketId ?? ticket.data.ticketNo ?? null;
@@ -1216,7 +1219,6 @@ export default function ManualEntry() {
           container_no: afterData.containerNo || null,
           driver: afterData.driver || null,
           operator: afterData.operator || null,
-          // ensure SAD & truck are persisted
           sad_no: afterData.sadNo || null,
           truck_on_wb: afterData.truckOnWb || null,
           gnsw_truck_no: afterData.truckOnWb || null,
@@ -1225,7 +1227,6 @@ export default function ManualEntry() {
 
         await updateTicketsRow(payload, ticketIdValue, ticket.data.ticketNo);
 
-        // audit log
         try {
           const auditEntry = {
             action: 'update',
@@ -1241,7 +1242,7 @@ export default function ManualEntry() {
           console.debug('Audit log insertion failed', auditErr);
         }
 
-        // --- propagate to outgate similarly to saveRowEdit ---
+        // propagate to outgate
         try {
           const oldTicketNo = ticket.data?.ticketNo ?? null;
           const newTicketNo = afterData?.ticketNo ?? oldTicketNo;
@@ -1316,12 +1317,10 @@ export default function ManualEntry() {
           console.error('Outgate update/insert error', outErrGeneral);
         }
 
-        // refresh data
         await fetchHistory();
       } catch (err) {
         console.error('Save view edit failed', err);
         toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error', duration: 5000 });
-        // roll back local change (optional): revert to `before`
         setHistory((prev) => prev.map((r) => (r.ticketId === ticket.ticketId ? { ...r, data: { ...before } } : r)));
         setViewTicket((v) => ({ ...v, data: before }));
         setViewIsEditing(false);
@@ -1335,7 +1334,6 @@ export default function ManualEntry() {
     toast({ title: 'Saved', status: 'success', duration: 2500 });
   };
 
-  // utility to render out-of-range badge
   const renderOutOfRangeBadge = (val) => {
     const n = numericValue(val);
     if (n === null) return null;
@@ -1346,416 +1344,400 @@ export default function ManualEntry() {
   };
 
   /* -----------------------
+     Voice recognition (simple)
+  ----------------------- */
+  const recognitionRef = useRef(null);
+  const [listening, setListening] = useState(false);
+
+  const startVoice = () => {
+    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+      toast({ title: 'Voice not supported', description: 'This browser does not support SpeechRecognition', status: 'warning' });
+      return;
+    }
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const recog = new Speech();
+    recog.lang = 'en-US';
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+
+    recog.onresult = (ev) => {
+      const text = (ev.results[0][0].transcript || '').toLowerCase();
+      toast({ title: 'Heard', description: text, status: 'info', duration: 2500 });
+      if (text.includes('new ticket') || text.includes('create ticket') || text.includes('new manual')) {
+        onOpen();
+      } else if (text.includes('submit ticket') || text.includes('submit') || text.includes('save ticket')) {
+        handleSubmit();
+      } else if (text.includes('reset form')) {
+        setFormData({
+          truckOnWb: '',
+          consignee: '',
+          operation: '',
+          driver: '',
+          sadNo: '',
+          containerNo: '',
+          gross: '',
+          tare: '',
+          net: '',
+        });
+        toast({ title: 'Form reset', status: 'info' });
+      } else {
+        toast({ title: 'Command not recognized', description: text, status: 'warning' });
+      }
+    };
+
+    recog.onend = () => {
+      setListening(false);
+    };
+
+    recog.onerror = (e) => {
+      console.warn('speech error', e);
+      setListening(false);
+      toast({ title: 'Voice error', description: e?.error || 'Speech recognition error', status: 'error' });
+    };
+
+    recognitionRef.current = recog;
+    recog.start();
+    setListening(true);
+    toast({ title: 'Listening', description: 'Say a command: "New ticket", "Submit ticket", "Reset form"', status: 'info' });
+  };
+
+  const stopVoice = () => {
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+    } catch (e) {
+      // ignore
+    }
+    setListening(false);
+  };
+
+  /* -----------------------
+     Floating orb + styling + cube animation (pure CSS)
+  ----------------------- */
+
+  const Orb = ({ onClick }) => {
+    return (
+      <MotionBox
+        onClick={onClick}
+        whileHover={{ scale: 1.06 }}
+        whileTap={{ scale: 0.96 }}
+        cursor="pointer"
+        width="64px"
+        height="64px"
+        borderRadius="999px"
+        display="flex"
+        alignItems="center"
+        justifyContent="center"
+        boxShadow="0 12px 30px rgba(59,130,246,0.16)"
+        style={{
+          background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)',
+          color: '#fff',
+          position: 'relative',
+          overflow: 'visible',
+        }}
+        title="New manual ticket"
+      >
+        <span style={{ fontSize: 26, fontWeight: 700 }}>✺</span>
+        {/* subtle glow */}
+        <Box as="span" className="orb-glow" />
+        <style>{`
+          .orb-glow {
+            position: absolute;
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            filter: blur(18px);
+            opacity: 0.18;
+            background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.18), rgba(0,0,0,0));
+            transform: translate(-10px,-10px);
+            pointer-events: none;
+          }
+        `}</style>
+      </MotionBox>
+    );
+  };
+
+  /* small card view component */
+  const HistoryCard = ({ item }) => {
+    const computed = computeWeights({ gross: item.data.gross, tare: item.data.tare, net: item.data.net });
+    return (
+      <MotionBox
+        whileHover={{ y: -6 }}
+        p={4}
+        borderRadius="12px"
+        border="1px solid"
+        borderColor="rgba(2,6,23,0.06)"
+        bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96))"
+        boxShadow="0 8px 24px rgba(2,6,23,0.04)"
+      >
+        <Flex justify="space-between" align="center">
+          <Box>
+            <Text fontWeight="bold">{item.data.ticketNo}</Text>
+            <Text fontSize="sm" color="gray.500">{item.data.truckOnWb || 'N/A'} • SAD: {item.data.sadNo || 'N/A'}</Text>
+          </Box>
+          <Box textAlign="right">
+            {item.data.manual && String(item.data.manual).toLowerCase() === 'yes' && <Badge colorScheme="purple">Manual</Badge>}
+            <Text fontSize="xs" color="gray.500">{new Date(item.submittedAt).toLocaleString()}</Text>
+          </Box>
+        </Flex>
+
+        <Flex mt={3} justify="space-between">
+          <Box>
+            <Text fontSize="xs" color="gray.500">Gross</Text>
+            <Text fontWeight="semibold">{computed.grossDisplay || '—'}</Text>
+          </Box>
+          <Box>
+            <Text fontSize="xs" color="gray.500">Tare</Text>
+            <Text fontWeight="semibold">{computed.tareDisplay || '—'}</Text>
+          </Box>
+          <Box>
+            <Text fontSize="xs" color="gray.500">Net</Text>
+            <Text fontWeight="semibold">{computed.netDisplay || '—'}</Text>
+          </Box>
+        </Flex>
+
+        <Flex mt={3} justify="flex-end" gap={2}>
+          {item.data.fileUrl && (
+            <Button size="sm" variant="outline" onClick={() => window.open(item.data.fileUrl, '_blank', 'noopener')}>Open PDF</Button>
+          )}
+          <Button size="sm" colorScheme="teal" onClick={() => handleView(item)}>View</Button>
+          {isAdmin && <Button size="sm" variant="ghost" leftIcon={<EditIcon />} onClick={() => startRowEdit(item)}>Edit</Button>}
+        </Flex>
+      </MotionBox>
+    );
+  };
+
+  /* -----------------------
      Render
   ----------------------- */
   return (
-    <Box p={6} maxW="1200px" mx="auto">
-      <Heading mb={6}>Manual Ticket Entry</Heading>
-
-      <Flex gap={4} align="center" mb={6} wrap="wrap">
-        <Button onClick={onOpen} colorScheme="teal">New Manual Ticket</Button>
-
-        <Box ml="auto" display="flex" gap={4} alignItems="center" flexWrap="wrap">
-          <Box>
-            <Text fontSize="sm" color="gray.600">Manual tickets</Text>
-            <Text fontWeight="bold">{stats.count}</Text>
-          </Box>
-          <Box>
-            <Text fontSize="sm" color="gray.600">Avg Gross</Text>
-            <Text fontWeight="bold">{stats.avgGross ? formatNumber(String(stats.avgGross)) + ' kg' : '—'}</Text>
-          </Box>
-          <Box>
-            <Text fontSize="sm" color="gray.600">Avg Net</Text>
-            <Text fontWeight="bold">{stats.avgNet ? formatNumber(String(stats.avgNet)) + ' kg' : '—'}</Text>
-          </Box>
+    <Box p={{ base: 4, md: 6 }} maxW="1200px" mx="auto" style={{ fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial' }}>
+      <Flex align="center" mb={6} gap={4} wrap="wrap">
+        <Box>
+          <Heading size="lg">Manual Ticket Entry</Heading>
+          <Text color="gray.500">Create manual tickets quickly — improved UI & ergonomics.</Text>
         </Box>
+
+        <Spacer />
+
+        <HStack spacing={3}>
+          <Tooltip label={listening ? 'Stop voice' : 'Start voice commands'}>
+            <Button size="sm" variant={listening ? 'solid' : 'outline'} colorScheme={listening ? 'purple' : 'gray'} onClick={() => (listening ? stopVoice() : startVoice())}>
+              {listening ? 'Listening...' : 'Voice'}
+            </Button>
+          </Tooltip>
+
+          <Button size="sm" colorScheme="teal" onClick={onOpen}>New Manual Ticket</Button>
+        </HStack>
       </Flex>
 
-      <Modal
-        isOpen={isOpen}
-        onClose={isSubmitting ? () => {} : onClose}
-        size="xl"
-        scrollBehavior="inside"
-        initialFocusRef={firstInputRef}
-      >
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Manual Ticket Submission</ModalHeader>
-          <ModalCloseButton isDisabled={isSubmitting} />
-          <ModalBody>
-            <SimpleGrid columns={[1, 2]} spacing={4}>
-              <FormControl isRequired isInvalid={!!errors.truckOnWb}>
-                <FormLabel>
-                  Truck Number <Text as="span" color="red">*</Text>
-                </FormLabel>
-                <Input
-                  ref={firstInputRef}
-                  value={formData.truckOnWb}
-                  onChange={(e) => handleChange('truckOnWb', e.target.value)}
-                  placeholder="Enter Truck (GNSW plate)"
-                  isDisabled={isSubmitting}
-                />
-                <FormErrorMessage>{errors.truckOnWb}</FormErrorMessage>
-              </FormControl>
+      {/* Stats cards (neon gradients + glassmorphism) */}
+      <SimpleGrid columns={{ base: 1, md: 3 }} spacing={4} mb={6}>
+        <Stat
+          p={4}
+          borderRadius="md"
+          boxShadow="lg"
+          style={{
+            background: 'linear-gradient(135deg,#fff8f0, #fff2e6)',
+            border: '1px solid rgba(255,255,255,0.6)',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <StatLabel>Total Manual Tickets</StatLabel>
+          <StatNumber>{manualCount}</StatNumber>
+          <StatHelpText>Tickets with ticket_no starting with "M-"</StatHelpText>
+        </Stat>
 
-              <FormControl isRequired isInvalid={!!errors.sadNo}>
-                <FormLabel>
-                  SAD Number <Text as="span" color="red">*</Text>
-                </FormLabel>
-                <Input value={formData.sadNo} onChange={(e) => handleChange('sadNo', e.target.value)} placeholder="Enter SAD No" isDisabled={isSubmitting} />
-                <FormErrorMessage>{errors.sadNo}</FormErrorMessage>
-              </FormControl>
+        <Stat
+          p={4}
+          borderRadius="md"
+          boxShadow="lg"
+          style={{
+            background: 'linear-gradient(135deg,#E0FCFF,#E8FDF6)',
+            border: '1px solid rgba(255,255,255,0.6)',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <StatLabel>Average Gross</StatLabel>
+          <StatNumber>{stats.avgGross ? `${formatNumber(String(stats.avgGross))} kg` : '—'}</StatNumber>
+          <StatHelpText>Recent average gross</StatHelpText>
+        </Stat>
 
-              <FormControl isRequired isInvalid={!!errors.operation}>
-                <FormLabel>
-                  Operation <Text as="span" color="red">*</Text>
-                </FormLabel>
-                <Select placeholder="Select operation" value={formData.operation} onChange={(e) => handleChange('operation', e.target.value)} isDisabled={isSubmitting}>
-                  <option value="Import">Import</option>
-                  <option value="Export">Export</option>
-                </Select>
-                <FormErrorMessage>{errors.operation}</FormErrorMessage>
-              </FormControl>
+        <Stat
+          p={4}
+          borderRadius="md"
+          boxShadow="lg"
+          style={{
+            background: 'linear-gradient(135deg,#F5F3FF,#EEF2FF)',
+            border: '1px solid rgba(255,255,255,0.6)',
+            backdropFilter: 'blur(6px)',
+          }}
+        >
+          <StatLabel>Average Net</StatLabel>
+          <StatNumber>{stats.avgNet ? `${formatNumber(String(stats.avgNet))} kg` : '—'}</StatNumber>
+          <StatHelpText>Recent average net</StatHelpText>
+        </Stat>
+      </SimpleGrid>
 
-              <FormControl>
-                <FormLabel>Container Number</FormLabel>
-                <Input value={formData.containerNo} onChange={(e) => handleChange('containerNo', e.target.value)} placeholder="Container No (optional)" isDisabled={isSubmitting} />
-              </FormControl>
-
-              <FormControl>
-                <FormLabel>Consignee</FormLabel>
-                <Input value={formData.consignee} onChange={(e) => handleChange('consignee', e.target.value)} placeholder="Consignee (optional)" isDisabled={isSubmitting} />
-              </FormControl>
-
-              <FormControl>
-                <FormLabel>Driver Name</FormLabel>
-                <Input value={formData.driver} onChange={(e) => handleChange('driver', e.target.value)} placeholder="Driver name (optional)" isDisabled={isSubmitting} />
-              </FormControl>
-
-              <FormControl isRequired isInvalid={!!errors.gross}>
-                <FormLabel>
-                  Gross Weight<Text as="span" color="red">*</Text>
-                </FormLabel>
-                <NumericInput
-                  name="gross"
-                  rawValue={formData.gross}
-                  onRawChange={(v) => updateNumericField('gross', v)}
-                  placeholder="Enter gross (kg)"
-                  isDisabled={isSubmitting}
-                />
-                <FormErrorMessage>{errors.gross}</FormErrorMessage>
-              </FormControl>
-
-              <FormControl isRequired isInvalid={!!errors.tare}>
-                <HStack justify="space-between">
-                  <FormLabel>
-                    Tare (PT) <Text as="span" color="red">*</Text>
-                  </FormLabel>
-                  <HStack spacing={2}>
-                    {isTareAuto && <Badge colorScheme="green">Auto-filled</Badge>}
-                    {fetchingTare && <Text fontSize="sm" color="gray.500">Looking up tare…</Text>}
-                    {isTareAuto && (
-                      <Button size="xs" variant="link" onClick={() => { setIsTareAuto(false); setSaveTare(true); }} isDisabled={isSubmitting}>
-                        Override
-                      </Button>
-                    )}
-                  </HStack>
-                </HStack>
-
-                <NumericInput
-                  name="tare"
-                  rawValue={formData.tare}
-                  onRawChange={(v) => updateNumericField('tare', v)}
-                  placeholder="Enter tare (kg)"
-                  isReadOnly={isTareAuto}
-                  isDisabled={isSubmitting}
-                  inputProps={{
-                    borderColor: isTareAnomaly ? 'red.400' : undefined,
-                    borderWidth: isTareAnomaly ? '2px' : undefined,
-                  }}
-                />
-
-                {(vehicleSummary || (lastTares && lastTares.length > 0)) && (
-                  <Box mt={2}>
-                    <Text fontSize="sm" color="gray.600" mb={1}>
-                      Suggestions:
-                      {vehicleSummary && vehicleSummary.avg_tare ? ` Avg ${formatNumber(String(vehicleSummary.avg_tare))} kg (${vehicleSummary.entry_count || 1} entries)` : ''}
-                      {vehicleSummary && vehicleSummary.updated_at ? ` • last: ${new Date(vehicleSummary.updated_at).toLocaleDateString()}` : ''}
-                    </Text>
-
-                    <HStack spacing={2} wrap="wrap">
-                      {vehicleSummary && vehicleSummary.avg_tare && (
-                        <Badge
-                          cursor="pointer"
-                          onClick={() => handlePickSuggestedTare(`avg:${vehicleSummary.avg_tare}`)}
-                          colorScheme="green"
-                          px={2}
-                          py={1}
-                        >
-                          Avg: {formatNumber(String(vehicleSummary.avg_tare))} kg
-                        </Badge>
-                      )}
-
-                      {lastTares && lastTares.slice(0, 3).map((h, idx) => (
-                        <Badge
-                          key={`b-${idx}`}
-                          cursor="pointer"
-                          onClick={() => handlePickSuggestedTare(`hist:${encodeURIComponent(JSON.stringify({ tare: h.tare, recorded_at: h.recorded_at }))}`)}
-                          colorScheme="blue"
-                          px={2}
-                          py={1}
-                        >
-                          Recent: {formatNumber(String(h.tare))} kg — {new Date(h.recorded_at).toLocaleDateString()}
-                        </Badge>
-                      ))}
-                    </HStack>
-
-                    {isTareAnomaly && (
-                      <Text mt={2} fontSize="sm" color="red.500">
-                        Warning: entered tare differs from historical prediction by more than 5%.
-                      </Text>
-                    )}
-
-                    <Text fontSize="xs" color="gray.500" mt={1}>
-                      Click a suggestion to apply it. You can always override.
-                    </Text>
-                  </Box>
-                )}
-
-                {!isTareAuto && (formData.truckOnWb || '').trim() && !tareRecordExists && (
-                  <HStack mt={2} align="center">
-                    <Checkbox size="sm" isChecked={saveTare} onChange={(e) => setSaveTare(e.target.checked)} isDisabled={isSubmitting}>
-                      Save this tare for {formData.truckOnWb}
-                    </Checkbox>
-                    <Text fontSize="sm" color="gray.500">(optional)</Text>
-                  </HStack>
-                )}
-
-                <FormErrorMessage>{errors.tare}</FormErrorMessage>
-              </FormControl>
-
-              <FormControl isRequired isInvalid={!!errors.net}>
-                <FormLabel>
-                  Net Weight <Text as="span" color="red">*</Text>
-                </FormLabel>
-                <NumericInput
-                  name="net"
-                  rawValue={formData.net}
-                  onRawChange={() => {}}
-                  placeholder="Net (auto-calculated: Gross − Tare)"
-                  isReadOnly={true}
-                  isDisabled={isSubmitting}
-                />
-                <FormErrorMessage>{errors.net}</FormErrorMessage>
-              </FormControl>
-            </SimpleGrid>
-          </ModalBody>
-
-          <ModalFooter>
-            <Button colorScheme="teal" mr={3} onClick={handleSubmit} isLoading={isSubmitting} isDisabled={isSubmitting}>
-              Submit Ticket
-            </Button>
-            <Button variant="ghost" onClick={onClose} isDisabled={isSubmitting}>
-              Cancel
-            </Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* Search & filter */}
-      <Box mb={4} display="flex" justifyContent="space-between" flexWrap="wrap" gap={4}>
+      <Flex mb={4} gap={4} align="center" wrap="wrap">
         <Input placeholder="Search by SAD, Truck on WB, Ticket No..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} maxW="480px" />
         <FormControl maxW="200px">
-          <FormLabel>Status Filter</FormLabel>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ width: '100%', padding: '0.5rem', borderRadius: '0.375rem', border: '1px solid #CBD5E0' }}>
+          <FormLabel mb={1} fontSize="sm">Status</FormLabel>
+          <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} size="sm">
             <option value="">All</option>
             <option value="Pending">Pending</option>
             <option value="Exited">Exited</option>
-          </select>
+          </Select>
         </FormControl>
-      </Box>
 
-      {/* History table / cards */}
+        <Spacer />
+
+        <Text fontSize="sm" color="gray.500">Showing {filteredHistory.length} tickets</Text>
+      </Flex>
+
+      {/* History */}
       {filteredHistory.length === 0 ? (
-        <Text>No tickets found.</Text>
+        <Text color="gray.600">No tickets found.</Text>
       ) : (
         <>
           {isMobile ? (
             <VStack spacing={3} align="stretch">
-              {pagedHistory.map(({ ticketId, data, submittedAt }) => {
-                const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
-                const anomaly = (computed.grossValue !== null && computed.tareValue !== null && computed.netValue !== null && !(computed.grossValue > computed.tareValue));
-                return (
-                  <Box key={ticketId} borderWidth="1px" borderRadius="md" p={3} bg="white" boxShadow="sm">
-                    <Flex justify="space-between" align="center">
-                      <Box>
-                        <Text fontWeight="bold">{data.ticketNo}</Text>
-                        <Text fontSize="sm" color="gray.500">{data.truckOnWb || 'N/A'} • SAD: {data.sadNo || 'N/A'}</Text>
-                      </Box>
-                      <Box textAlign="right">
-                        {anomaly && <Badge colorScheme="red" mb={1}>Check weights</Badge>}
-                        {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge colorScheme="purple">Manual</Badge>}
-                      </Box>
-                    </Flex>
-
-                    <Stack direction="row" spacing={4} mt={3} justify="space-between">
-                      <Box>
-                        <Text fontSize="xs" color="gray.500">Gross</Text>
-                        <Text fontWeight="semibold">{computed.grossDisplay || '—'} {renderOutOfRangeBadge(data.gross)}</Text>
-                      </Box>
-                      <Box>
-                        <Text fontSize="xs" color="gray.500">Tare</Text>
-                        <Text fontWeight="semibold">{computed.tareDisplay || '—'} {renderOutOfRangeBadge(data.tare)}</Text>
-                      </Box>
-                      <Box>
-                        <Text fontSize="xs" color="gray.500">Net</Text>
-                        <Text fontWeight="semibold">{computed.netDisplay || '—'} {renderOutOfRangeBadge(data.net)}</Text>
-                      </Box>
-                    </Stack>
-
-                    <Flex mt={3} justify="flex-end" gap={2}>
-                      {data.fileUrl && (
-                        <Button size="sm" variant="outline" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')}>Open PDF</Button>
-                      )}
-                      <Button size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })}>View</Button>
-                      {isAdmin && (
-                        <Button size="sm" variant="ghost" leftIcon={<EditIcon />} onClick={() => startRowEdit({ ticketId, data })}>Edit</Button>
-                      )}
-                    </Flex>
-                  </Box>
-                );
-              })}
+              {pagedHistory.map((t) => <HistoryCard key={t.ticketId} item={t} />)}
             </VStack>
           ) : (
-            <Table variant="striped" colorScheme="teal" size="sm">
-              <Thead>
-                <Tr>
-                  <Th>Ticket No</Th>
-                  <Th>Truck No</Th>
-                  <Th>SAD No</Th>
-                  <Th>Gross (KG)</Th>
-                  <Th>Tare (KG)</Th>
-                  <Th>Net (KG)</Th>
-                  <Th>View</Th>
-                </Tr>
-              </Thead>
-              <Tbody>
-                {pagedHistory.map(({ ticketId, data, submittedAt }) => {
-                  const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
-                  const anomaly = (computed.grossValue !== null && computed.tareValue !== null && computed.netValue !== null && !(computed.grossValue > computed.tareValue));
-                  const isEditingThis = editingRowId === ticketId;
-                  return (
-                    <Tr key={ticketId}>
-                      <Td>
-                        <Box display="flex" alignItems="center" gap={2}>
+            <Box borderRadius="md" overflowX="auto" bg="white" p={2} boxShadow="sm">
+              <Table variant="striped" colorScheme="teal" size="sm">
+                <Thead>
+                  <Tr>
+                    <Th>Ticket No</Th>
+                    <Th>Truck No</Th>
+                    <Th>SAD No</Th>
+                    <Th>Gross (KG)</Th>
+                    <Th>Tare (KG)</Th>
+                    <Th>Net (KG)</Th>
+                    <Th>View</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {pagedHistory.map(({ ticketId, data, submittedAt }) => {
+                    const computed = computeWeights({ gross: data.gross, tare: data.tare, net: data.net });
+                    const anomaly = (computed.grossValue !== null && computed.tareValue !== null && computed.netValue !== null && !(computed.grossValue > computed.tareValue));
+                    const isEditingThis = editingRowId === ticketId;
+                    return (
+                      <Tr key={ticketId}>
+                        <Td>
+                          <Flex align="center" gap={2}>
+                            {isEditingThis ? (
+                              <Input value={editRowData.ticketNo ?? data.ticketNo} onChange={(e) => handleRowFieldChange('ticketNo', e.target.value)} size="sm" />
+                            ) : (
+                              <Box>
+                                <Text>{data.ticketNo}</Text>
+                                {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge ml={2} colorScheme="purple">Manual</Badge>}
+                              </Box>
+                            )}
+                          </Flex>
+                        </Td>
+
+                        <Td>
                           {isEditingThis ? (
-                            <Input value={editRowData.ticketNo ?? data.ticketNo} onChange={(e) => handleRowFieldChange('ticketNo', e.target.value)} size="sm" />
+                            <Input value={editRowData.truckOnWb ?? data.truckOnWb} onChange={(e) => handleRowFieldChange('truckOnWb', e.target.value)} size="sm" />
                           ) : (
-                            <Box>
-                              <Text>{data.ticketNo}</Text>
-                              {data.manual && String(data.manual).toLowerCase() === 'yes' && <Badge ml={2} colorScheme="purple">Manual</Badge>}
-                            </Box>
+                            <Text>{data.truckOnWb}</Text>
                           )}
-                        </Box>
-                      </Td>
+                        </Td>
 
-                      <Td>
-                        {isEditingThis ? (
-                          <Input value={editRowData.truckOnWb ?? data.truckOnWb} onChange={(e) => handleRowFieldChange('truckOnWb', e.target.value)} size="sm" />
-                        ) : (
-                          <Text>{data.truckOnWb}</Text>
-                        )}
-                      </Td>
-
-                      <Td>
-                        {isEditingThis ? (
-                          <Input value={editRowData.sadNo ?? data.sadNo} onChange={(e) => handleRowFieldChange('sadNo', e.target.value)} size="sm" />
-                        ) : (
-                          <Text>{data.sadNo}</Text>
-                        )}
-                      </Td>
-
-                      <Td>
-                        <Box display="flex" alignItems="center" gap={2}>
+                        <Td>
                           {isEditingThis ? (
-                            <InputGroup size="sm">
-                              <Input value={editRowData.gross ?? data.gross} onChange={(e) => handleRowFieldChange('gross', e.target.value)} />
-                              <InputRightElement width="3rem">
-                                <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.gross ?? data.gross)}</Text>
-                              </InputRightElement>
-                            </InputGroup>
+                            <Input value={editRowData.sadNo ?? data.sadNo} onChange={(e) => handleRowFieldChange('sadNo', e.target.value)} size="sm" />
                           ) : (
-                            <Text>{computed.grossDisplay}</Text>
+                            <Text>{data.sadNo}</Text>
                           )}
-                        </Box>
-                      </Td>
+                        </Td>
 
-                      <Td>
-                        <Box display="flex" alignItems="center" gap={2}>
-                          {isEditingThis ? (
-                            <InputGroup size="sm">
-                              <Input value={editRowData.tare ?? data.tare} onChange={(e) => handleRowFieldChange('tare', e.target.value)} />
-                              <InputRightElement width="3rem">
-                                <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.tare ?? data.tare)}</Text>
-                              </InputRightElement>
-                            </InputGroup>
-                          ) : (
-                            <Box display="flex" alignItems="center" gap={2}>
-                              <Text>{computed.tareDisplay}</Text>
-                              {isTareAnomaly && data.truckOnWb && String(data.truckOnWb).trim() === String(formData.truckOnWb).trim() && (
-                                <Badge colorScheme="red">Tare anomaly</Badge>
-                              )}
-                            </Box>
-                          )}
-                        </Box>
-                      </Td>
+                        <Td>
+                          <Box display="flex" alignItems="center" gap={2}>
+                            {isEditingThis ? (
+                              <InputGroup size="sm">
+                                <Input value={editRowData.gross ?? data.gross} onChange={(e) => handleRowFieldChange('gross', e.target.value)} />
+                                <InputRightElement width="3rem">
+                                  <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.gross ?? data.gross)}</Text>
+                                </InputRightElement>
+                              </InputGroup>
+                            ) : (
+                              <Text>{computed.grossDisplay}</Text>
+                            )}
+                          </Box>
+                        </Td>
 
-                      <Td>
-                        <Box display="flex" alignItems="center" gap={2}>
-                          {isEditingThis ? (
-                            <InputGroup size="sm">
-                              <Input value={editRowData.net ?? data.net} onChange={(e) => handleRowFieldChange('net', e.target.value)} />
-                              <InputRightElement width="3rem">
-                                <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.net ?? data.net)}</Text>
-                              </InputRightElement>
-                            </InputGroup>
-                          ) : (
-                            <Box display="flex" alignItems="center" gap={2}>
-                              <Text>{computed.netDisplay}</Text>
-                              {anomaly && <Badge colorScheme="red">Check</Badge>}
-                              {renderOutOfRangeBadge(data.net)}
-                            </Box>
-                          )}
-                        </Box>
-                      </Td>
+                        <Td>
+                          <Box display="flex" alignItems="center" gap={2}>
+                            {isEditingThis ? (
+                              <InputGroup size="sm">
+                                <Input value={editRowData.tare ?? data.tare} onChange={(e) => handleRowFieldChange('tare', e.target.value)} />
+                                <InputRightElement width="3rem">
+                                  <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.tare ?? data.tare)}</Text>
+                                </InputRightElement>
+                              </InputGroup>
+                            ) : (
+                              <Box display="flex" alignItems="center" gap={2}>
+                                <Text>{computed.tareDisplay}</Text>
+                                {isTareAnomaly && data.truckOnWb && String(data.truckOnWb).trim() === String(formData.truckOnWb).trim() && (
+                                  <Badge colorScheme="red">Tare anomaly</Badge>
+                                )}
+                              </Box>
+                            )}
+                          </Box>
+                        </Td>
 
-                      <Td>
-                        <HStack>
-                          {data.fileUrl && (
-                            <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
-                          )}
+                        <Td>
+                          <Box display="flex" alignItems="center" gap={2}>
+                            {isEditingThis ? (
+                              <InputGroup size="sm">
+                                <Input value={editRowData.net ?? data.net} onChange={(e) => handleRowFieldChange('net', e.target.value)} />
+                                <InputRightElement width="3rem">
+                                  <Text fontSize="xs">{renderOutOfRangeBadge(editRowData.net ?? data.net)}</Text>
+                                </InputRightElement>
+                              </InputGroup>
+                            ) : (
+                              <Box display="flex" alignItems="center" gap={2}>
+                                <Text>{computed.netDisplay}</Text>
+                                {anomaly && <Badge colorScheme="red">Check</Badge>}
+                                {renderOutOfRangeBadge(data.net)}
+                              </Box>
+                            )}
+                          </Box>
+                        </Td>
 
-                          {isEditingThis ? (
-                            <>
-                              <IconButton icon={<CheckIcon />} aria-label="Save" size="sm" colorScheme="green" onClick={() => saveRowEdit({ ticketId, data })} />
-                              <IconButton icon={<CloseIcon />} aria-label="Cancel" size="sm" onClick={cancelRowEdit} />
-                            </>
-                          ) : (
-                            <>
-                              <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
-                              {isAdmin && <IconButton icon={<EditIcon />} aria-label="Edit" size="sm" onClick={() => startRowEdit({ ticketId, data })} />}
-                            </>
-                          )}
-                        </HStack>
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </Tbody>
-            </Table>
+                        <Td>
+                          <HStack>
+                            {data.fileUrl && (
+                              <IconButton icon={<ExternalLinkIcon />} aria-label="Open file" size="sm" colorScheme="blue" onClick={() => window.open(data.fileUrl, '_blank', 'noopener')} />
+                            )}
+
+                            {isEditingThis ? (
+                              <>
+                                <IconButton icon={<CheckIcon />} aria-label="Save" size="sm" colorScheme="green" onClick={() => saveRowEdit({ ticketId, data })} />
+                                <IconButton icon={<CloseIcon />} aria-label="Cancel" size="sm" onClick={cancelRowEdit} />
+                              </>
+                            ) : (
+                              <>
+                                <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
+                                {isAdmin && <IconButton icon={<EditIcon />} aria-label="Edit" size="sm" onClick={() => startRowEdit({ ticketId, data })} />}
+                              </>
+                            )}
+                          </HStack>
+                        </Td>
+                      </Tr>
+                    );
+                  })}
+                </Tbody>
+              </Table>
+            </Box>
           )}
-{/* Pagination and lower UI remain unchanged */}
-          {/* Pagination (condensed) */}
+
+          {/* Pagination */}
           <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
             <Flex gap={2} align="center" flexWrap="wrap">
               <Button size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} isDisabled={page === 1}>Previous</Button>
@@ -1781,7 +1763,7 @@ export default function ManualEntry() {
             <Text>Page {page} of {totalPages} ({totalTickets} tickets)</Text>
 
             <Box>
-              <Text fontSize="sm" color="gray.600">{/* empty placeholder */}</Text>
+              <Text fontSize="sm" color="gray.600">{/* placeholder */}</Text>
             </Box>
           </Flex>
 
@@ -1796,10 +1778,265 @@ export default function ManualEntry() {
         </>
       )}
 
-      {/* View modal */}
-      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewIsEditing(false); setViewEditData({}); }} size="xl" scrollBehavior="inside">
+      {/* New Manual Ticket Modal (glassmorphism + 3D cubes), modal background set to white per request */}
+      <Modal
+        isOpen={isOpen}
+        onClose={isSubmitting ? () => {} : onClose}
+        size="xl"
+        scrollBehavior="inside"
+        initialFocusRef={firstInputRef}
+        isCentered
+      >
         <ModalOverlay />
-        <ModalContent maxW="90vw">
+        <AnimatePresence>
+          {isOpen && (
+            <ModalContent
+              as={MotionBox}
+              initial={{ opacity: 0, y: 20, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10 }}
+              style={{
+                /* background white as requested (holographic elements still present) */
+                background: 'linear-gradient(180deg,#ffffff,#fbfbff)',
+                border: '1px solid rgba(255,255,255,0.6)',
+                backdropFilter: 'blur(6px) saturate(120%)',
+                boxShadow: '0 12px 40px rgba(2,6,23,0.12)',
+              }}
+            >
+              <ModalHeader>
+                <Flex align="center" gap={3}>
+                  <Box
+                    width="56px"
+                    height="56px"
+                    borderRadius="12px"
+                    style={{
+                      background: 'linear-gradient(135deg,#7b61ff,#3ef4d0)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#fff',
+                      boxShadow: '0 8px 24px rgba(62,244,208,0.12)',
+                    }}
+                  >
+                    ✺
+                  </Box>
+                  <Box>
+                    <Text fontSize="lg" fontWeight="bold">Manual Ticket Submission</Text>
+                    <Text fontSize="sm" color="gray.600">Crystal orb → holographic modal ✨</Text>
+                  </Box>
+                </Flex>
+              </ModalHeader>
+
+              <ModalCloseButton isDisabled={isSubmitting} />
+
+              <ModalBody>
+                {/* floating cubes / 3D effect (CSS) */}
+                <Box mb={4}>
+                  <div style={{ position: 'relative', height: 72 }}>
+                    <div style={{
+                      position: 'absolute',
+                      right: 0,
+                      top: 0,
+                      width: 120,
+                      height: 72,
+                      pointerEvents: 'none',
+                      opacity: 0.12,
+                    }}>
+                      {/* simple CSS cubes */}
+                      <div style={{
+                        width: 18, height: 18, background: 'linear-gradient(135deg,#fff,#e0f7ff)',
+                        transform: 'rotateX(20deg) rotateY(8deg)', borderRadius: 3, boxShadow: '0 8px 20px rgba(0,0,0,0.06)',
+                        position: 'absolute', right: 16, top: 6, animation: 'floaty 4s ease-in-out infinite',
+                      }} />
+                      <div style={{
+                        width: 14, height: 14, background: 'linear-gradient(135deg,#FFF4F4,#ffe6f2)',
+                        transform: 'rotateX(18deg) rotateY(6deg)', borderRadius: 3, boxShadow: '0 8px 20px rgba(0,0,0,0.06)',
+                        position: 'absolute', right: 46, top: 22, animation: 'floaty 5s ease-in-out -1s infinite',
+                      }} />
+                      <style>{`
+                        @keyframes floaty {
+                          0% { transform: translateY(0) rotateX(10deg) rotateY(6deg) }
+                          50% { transform: translateY(-8px) rotateX(10deg) rotateY(6deg) }
+                          100% { transform: translateY(0) rotateX(10deg) rotateY(6deg) }
+                        }
+                      `}</style>
+                    </div>
+                  </div>
+                </Box>
+
+                <SimpleGrid columns={[1, 2]} spacing={4}>
+                  <FormControl isRequired isInvalid={!!errors.truckOnWb}>
+                    <FormLabel>Truck Number <Text as="span" color="red">*</Text></FormLabel>
+                    <Input
+                      ref={firstInputRef}
+                      value={formData.truckOnWb}
+                      onChange={(e) => handleChange('truckOnWb', e.target.value)}
+                      placeholder="Enter Truck (GNSW plate)"
+                      isDisabled={isSubmitting}
+                    />
+                    <FormErrorMessage>{errors.truckOnWb}</FormErrorMessage>
+                  </FormControl>
+
+                  <FormControl isRequired isInvalid={!!errors.sadNo}>
+                    <FormLabel>SAD Number <Text as="span" color="red">*</Text></FormLabel>
+                    <Input value={formData.sadNo} onChange={(e) => handleChange('sadNo', e.target.value)} placeholder="Enter SAD No" isDisabled={isSubmitting} />
+                    <FormErrorMessage>{errors.sadNo}</FormErrorMessage>
+                  </FormControl>
+
+                  <FormControl isRequired isInvalid={!!errors.operation}>
+                    <FormLabel>Operation <Text as="span" color="red">*</Text></FormLabel>
+                    <Select placeholder="Select operation" value={formData.operation} onChange={(e) => handleChange('operation', e.target.value)} isDisabled={isSubmitting}>
+                      <option value="Import">Import</option>
+                      <option value="Export">Export</option>
+                    </Select>
+                    <FormErrorMessage>{errors.operation}</FormErrorMessage>
+                  </FormControl>
+
+                  <FormControl>
+                    <FormLabel>Container Number</FormLabel>
+                    <Input value={formData.containerNo} onChange={(e) => handleChange('containerNo', e.target.value)} placeholder="Container No (optional)" isDisabled={isSubmitting} />
+                  </FormControl>
+
+                  <FormControl>
+                    <FormLabel>Consignee</FormLabel>
+                    <Input value={formData.consignee} onChange={(e) => handleChange('consignee', e.target.value)} placeholder="Consignee (optional)" isDisabled={isSubmitting} />
+                  </FormControl>
+
+                  <FormControl>
+                    <FormLabel>Driver Name</FormLabel>
+                    <Input value={formData.driver} onChange={(e) => handleChange('driver', e.target.value)} placeholder="Driver name (optional)" isDisabled={isSubmitting} />
+                  </FormControl>
+
+                  <FormControl isRequired isInvalid={!!errors.gross}>
+                    <FormLabel>Gross Weight<Text as="span" color="red">*</Text></FormLabel>
+                    <NumericInput
+                      name="gross"
+                      rawValue={formData.gross}
+                      onRawChange={(v) => updateNumericField('gross', v)}
+                      placeholder="Enter gross (kg)"
+                      isDisabled={isSubmitting}
+                    />
+                    <FormErrorMessage>{errors.gross}</FormErrorMessage>
+                  </FormControl>
+
+                  <FormControl isRequired isInvalid={!!errors.tare}>
+                    <HStack justify="space-between">
+                      <FormLabel>Tare (PT) <Text as="span" color="red">*</Text></FormLabel>
+                      <HStack spacing={2}>
+                        {isTareAuto && <Badge colorScheme="green">Auto-filled</Badge>}
+                        {fetchingTare && <Text fontSize="sm" color="gray.500">Looking up tare…</Text>}
+                        {isTareAuto && (
+                          <Button size="xs" variant="link" onClick={() => { setIsTareAuto(false); setSaveTare(true); }} isDisabled={isSubmitting}>
+                            Override
+                          </Button>
+                        )}
+                      </HStack>
+                    </HStack>
+
+                    <NumericInput
+                      name="tare"
+                      rawValue={formData.tare}
+                      onRawChange={(v) => updateNumericField('tare', v)}
+                      placeholder="Enter tare (kg)"
+                      isReadOnly={isTareAuto}
+                      isDisabled={isSubmitting}
+                      inputProps={{
+                        borderColor: isTareAnomaly ? 'red.400' : undefined,
+                        borderWidth: isTareAnomaly ? '2px' : undefined,
+                      }}
+                    />
+
+                    {(vehicleSummary || (lastTares && lastTares.length > 0)) && (
+                      <Box mt={2}>
+                        <Text fontSize="sm" color="gray.600" mb={1}>
+                          Suggestions:
+                          {vehicleSummary && vehicleSummary.avg_tare ? ` Avg ${formatNumber(String(vehicleSummary.avg_tare))} kg (${vehicleSummary.entry_count || 1} entries)` : ''}
+                          {vehicleSummary && vehicleSummary.updated_at ? ` • last: ${new Date(vehicleSummary.updated_at).toLocaleDateString()}` : ''}
+                        </Text>
+
+                        <HStack spacing={2} wrap="wrap">
+                          {vehicleSummary && vehicleSummary.avg_tare && (
+                            <Badge
+                              cursor="pointer"
+                              onClick={() => handlePickSuggestedTare(`avg:${vehicleSummary.avg_tare}`)}
+                              colorScheme="green"
+                              px={2}
+                              py={1}
+                            >
+                              Avg: {formatNumber(String(vehicleSummary.avg_tare))} kg
+                            </Badge>
+                          )}
+
+                          {lastTares && lastTares.slice(0, 3).map((h, idx) => (
+                            <Badge
+                              key={`b-${idx}`}
+                              cursor="pointer"
+                              onClick={() => handlePickSuggestedTare(`hist:${encodeURIComponent(JSON.stringify({ tare: h.tare, recorded_at: h.recorded_at }))}`)}
+                              colorScheme="blue"
+                              px={2}
+                              py={1}
+                            >
+                              Recent: {formatNumber(String(h.tare))} kg — {new Date(h.recorded_at).toLocaleDateString()}
+                            </Badge>
+                          ))}
+                        </HStack>
+
+                        {isTareAnomaly && (
+                          <Text mt={2} fontSize="sm" color="red.500">
+                            Warning: entered tare differs from historical prediction by more than 5%.
+                          </Text>
+                        )}
+
+                        <Text fontSize="xs" color="gray.500" mt={1}>
+                          Click a suggestion to apply it. You can always override.
+                        </Text>
+                      </Box>
+                    )}
+
+                    {!isTareAuto && (formData.truckOnWb || '').trim() && !tareRecordExists && (
+                      <HStack mt={2} align="center">
+                        <Checkbox size="sm" isChecked={saveTare} onChange={(e) => setSaveTare(e.target.checked)} isDisabled={isSubmitting}>
+                          Save this tare for {formData.truckOnWb}
+                        </Checkbox>
+                        <Text fontSize="sm" color="gray.500">(optional)</Text>
+                      </HStack>
+                    )}
+
+                    <FormErrorMessage>{errors.tare}</FormErrorMessage>
+                  </FormControl>
+
+                  <FormControl isRequired isInvalid={!!errors.net}>
+                    <FormLabel>Net Weight <Text as="span" color="red">*</Text></FormLabel>
+                    <NumericInput
+                      name="net"
+                      rawValue={formData.net}
+                      onRawChange={() => {}}
+                      placeholder="Net (auto-calculated: Gross − Tare)"
+                      isReadOnly={true}
+                      isDisabled={isSubmitting}
+                    />
+                    <FormErrorMessage>{errors.net}</FormErrorMessage>
+                  </FormControl>
+                </SimpleGrid>
+              </ModalBody>
+
+              <ModalFooter>
+                <HStack spacing={3}>
+                  <Button colorScheme="teal" mr={3} onClick={handleSubmit} isLoading={isSubmitting} isDisabled={isSubmitting}>
+                    Submit Ticket
+                  </Button>
+                  <Button variant="ghost" onClick={onClose} isDisabled={isSubmitting}>Cancel</Button>
+                </HStack>
+              </ModalFooter>
+            </ModalContent>
+          )}
+        </AnimatePresence>
+      </Modal>
+
+      {/* View modal */}
+      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewIsEditing(false); setViewEditData({}); }} size="xl" scrollBehavior="inside" isCentered>
+        <ModalOverlay />
+        <ModalContent>
           <ModalHeader>View Ticket</ModalHeader>
           <ModalCloseButton />
           <ModalBody>
@@ -1877,6 +2114,11 @@ export default function ManualEntry() {
           </ModalFooter>
         </ModalContent>
       </Modal>
+
+      {/* Floating orb CTA */}
+      <Box position="fixed" bottom="28px" right="28px" zIndex={2200} display="flex" alignItems="center" gap={3}>
+        <Orb onClick={onOpen} />
+      </Box>
     </Box>
   );
 }

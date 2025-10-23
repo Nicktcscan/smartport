@@ -59,7 +59,7 @@ const MotionBox = motion(Box);
 const ITEMS_PER_PAGE = 5;
 
 /* -----------------------
-   Utilities (unchanged / improved)
+   Utilities
 ----------------------- */
 function parseNumber(val) {
   if (val === null || val === undefined || val === '') return null;
@@ -179,7 +179,7 @@ export default function OutgateReports() {
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
-  const [, setCurrentPage] = useState(1);
+  const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(ITEMS_PER_PAGE);
   const [loading, setLoading] = useState(true);
   const toast = useToast();
@@ -207,6 +207,14 @@ export default function OutgateReports() {
   // voice recognition
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
+
+  // helper: convert date + time to Date
+  const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
+    if (!dateStr) return null;
+    const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
+    const fullTime = time.length <= 5 ? `${time}:00` : time;
+    return new Date(`${dateStr}T${fullTime}`);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -292,13 +300,6 @@ export default function OutgateReports() {
     };
   }, [toast]);
 
-  const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
-    if (!dateStr) return null;
-    const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
-    const fullTime = time.length <= 5 ? `${time}:00` : time;
-    return new Date(`${dateStr}T${fullTime}`);
-  };
-
   useEffect(() => {
     if (sadDebounceRef.current) {
       clearTimeout(sadDebounceRef.current);
@@ -326,7 +327,6 @@ export default function OutgateReports() {
             exists: true,
             total_recorded_weight: sadRow.total_recorded_weight ?? null,
             created_at: sadRow.created_at ?? null,
-            // created_by not present on your schema; avoid referencing it
           });
         } else {
           setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
@@ -551,20 +551,40 @@ export default function OutgateReports() {
     return s.size;
   }, [statsSource]);
 
-  // --- NEW: Log report generation to reports_generated table ---
+  // --- NEW: Log report generation to reports_generated table (robust) ---
   const logReportGeneration = async (reportType, fileUrl = null, sadNo = null) => {
     try {
+      const mapping = {
+        'Outgate CSV': 'outgate_csv',
+        'Outgate PDF': 'outgate_pdf',
+        'SAD CSV': 'sad_csv',
+        'SAD PDF': 'sad_pdf',
+      };
+      const safeReportType = mapping[reportType] ?? 'other';
+
       const generatedBy = user?.id ?? user?.email ?? null;
       const payload = {
-        report_type: reportType,
+        report_type: safeReportType,
         generated_by: generatedBy,
         generated_at: new Date().toISOString(),
         file_url: fileUrl,
         sad_no: sadNo ?? null,
         report_name: `Outgate ${reportType} ${new Date().toISOString()}`,
       };
+
       const { data, error } = await supabase.from('reports_generated').insert([payload]).select().single();
       if (error) {
+        try {
+          const fallback = {
+            report_type: 'other',
+            generated_by: generatedBy,
+            generated_at: new Date().toISOString(),
+            file_url: fileUrl,
+          };
+          await supabase.from('reports_generated').insert([fallback]);
+        } catch (fallbackErr) {
+          // ignore
+        }
         toast({ title: 'Report log failed', description: error.message || String(error), status: 'warning', duration: 4000 });
         return null;
       }
@@ -572,7 +592,7 @@ export default function OutgateReports() {
       return data;
     } catch (err) {
       console.error('logReportGeneration', err);
-      toast({ title: 'Failed to log report', description: err.message || String(err), status: 'error', duration: 4000 });
+      toast({ title: 'Failed to log report', description: String(err), status: 'error', duration: 4000 });
       return null;
     }
   };
@@ -650,10 +670,8 @@ export default function OutgateReports() {
       </table>
     `;
 
-    // Open printable window (trigger print)
     openPrintableWindow(html, `SAD-${searchTerm}`);
 
-    // Log generation (we don't have a persisted file URL in this flow)
     await logReportGeneration('SAD PDF', null, searchTerm);
   };
 
@@ -675,7 +693,6 @@ export default function OutgateReports() {
     exportToCSV(rows, `SAD-${searchTerm || 'report'}.csv`);
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
 
-    // Log generation
     await logReportGeneration('SAD CSV', null, searchTerm);
   };
 
@@ -698,7 +715,6 @@ export default function OutgateReports() {
         window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
         return;
       }
-      // load script
       await new Promise((resolve, reject) => {
         const s = document.createElement('script');
         s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
@@ -710,7 +726,6 @@ export default function OutgateReports() {
         window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
       }
     } catch (e) {
-      // ignore
       console.warn('Confetti load failed', e);
     }
   };
@@ -732,7 +747,6 @@ export default function OutgateReports() {
     recog.onresult = (ev) => {
       const text = (ev.results[0][0].transcript || '').toLowerCase();
       toast({ title: 'Heard', description: text, status: 'info', duration: 2500 });
-      // simple commands
       if (text.includes('export csv')) {
         handleExportCsv();
       } else if (text.includes('reset filters') || text.includes('reset')) {
@@ -780,7 +794,6 @@ export default function OutgateReports() {
   const handleGenerateFromOrb = async ({ type = 'Outgate CSV', includeSad = false } = {}) => {
     try {
       setOrbGenerating(true);
-      // simulate generation / perhaps call server-side rendering here
       await new Promise((r) => setTimeout(r, 800));
       await runConfetti();
       toast({ title: `Generated ${type}`, status: 'success' });
@@ -800,9 +813,7 @@ export default function OutgateReports() {
   };
   const openDocsFor = (r) => {
     const files = [];
-    // prefer the outgate fileUrl, otherwise the rawRow may contain doc references
     if (r.fileUrl) files.push({ name: 'attachment', url: r.fileUrl });
-    // also include raw row docs if any (supporting multiple shapes)
     if (r.rawRow && Array.isArray(r.rawRow.docs)) {
       for (const d of r.rawRow.docs) {
         if (d && (d.url || d.path)) files.push({ name: d.name || d.path || 'doc', url: d.url || d.path });
@@ -821,9 +832,9 @@ export default function OutgateReports() {
         p={3}
         borderRadius="12px"
         border="1px solid"
-        borderColor="rgba(2,6,23,0.06)"
+        borderColor="rgba(255,255,255,0.06)"
         bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96))"
-        boxShadow="0 8px 24px rgba(2,6,23,0.04)"
+        boxShadow="0 10px 30px rgba(124,58,237,0.06), inset 0 -8px 18px rgba(255,255,255,0.6)"
       >
         <Flex justify="space-between" align="center">
           <Box>
@@ -862,9 +873,33 @@ export default function OutgateReports() {
     );
   };
 
-  // ------------------------
+  // Pagination display helpers
+  const totalPages = Math.max(1, Math.ceil(uniqueFilteredReports.length / itemsPerPage));
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalPages]);
+
+  const pageStart = (currentPage - 1) * itemsPerPage;
+  const pageEnd = pageStart + itemsPerPage;
+  const pagedUniqueReports = uniqueFilteredReports.slice(pageStart, pageEnd);
+
+  // --- vivid stat card styles (reusable)
+  const statCardStyle = {
+    borderRadius: 12,
+    p: 4,
+    boxShadow: '0 8px 30px rgba(99,102,241,0.12), inset 0 -6px 18px rgba(255,255,255,0.18)',
+    color: '#041124',
+  };
+
+  const vividCards = {
+    a: { bg: 'linear-gradient(135deg,#fff7ed 0%, #ffe0b2 100%)', border: '1px solid rgba(255,165,64,0.12)' },
+    b: { bg: 'linear-gradient(135deg,#ecfeff 0%, #c7fff6 100%)', border: '1px solid rgba(16,185,129,0.08)' },
+    c: { bg: 'linear-gradient(135deg,#f0fdf4 0%, #b9f6d0 100%)', border: '1px solid rgba(34,197,94,0.06)' },
+    d: { bg: 'linear-gradient(135deg,#f5f3ff 0%, #dbeafe 100%)', border: '1px solid rgba(124,58,237,0.08)' },
+  };
+
   // Render
-  // ------------------------
   return (
     <Box p={{ base: 4, md: 8 }} style={{ fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial' }}>
       {/* Header */}
@@ -891,27 +926,27 @@ export default function OutgateReports() {
         </HStack>
       </Flex>
 
-      {/* Stats — colored cards */}
+      {/* Stats — vivid colored cards */}
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
-        <Stat bg="linear-gradient(180deg,#fff7ed,#fffaf0)" p={4} borderRadius="md" boxShadow="sm">
+        <Stat sx={{ ...statCardStyle, ...vividCards.a }}>
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{(new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean))).size}</StatNumber>
           <StatHelpText>Distinct SAD numbers</StatHelpText>
         </Stat>
 
-        <Stat bg="linear-gradient(180deg,#ecfeff,#f0f9ff)" p={4} borderRadius="md" boxShadow="sm">
+        <Stat sx={{ ...statCardStyle, ...vividCards.b }}>
           <StatLabel>Total Transactions</StatLabel>
           <StatNumber>{totalTransactions}</StatNumber>
           <StatHelpText>Unique ticket numbers</StatHelpText>
         </Stat>
 
-        <Stat bg="linear-gradient(180deg,#f0fdf4,#f6ffef)" p={4} borderRadius="md" boxShadow="sm">
+        <Stat sx={{ ...statCardStyle, ...vividCards.c }}>
           <StatLabel>Unique Tickets in View</StatLabel>
           <StatNumber>{statsUniqueTickets}</StatNumber>
           <StatHelpText>{searchTerm ? 'Tickets from SAD search' : 'Unique tickets after filters'}</StatHelpText>
         </Stat>
 
-        <Stat bg="linear-gradient(135deg,#f5f3ff,#eef2ff)" p={4} borderRadius="md" boxShadow="sm">
+        <Stat sx={{ ...statCardStyle, ...vividCards.d }}>
           <StatLabel>Total Discharged (view)</StatLabel>
           <StatNumber>{statsTotals.cumulativeNet ? `${formatWeight(statsTotals.cumulativeNet)} kg` : '—'}</StatNumber>
           <StatHelpText>From current filtered results</StatHelpText>
@@ -921,19 +956,19 @@ export default function OutgateReports() {
       {/* SAD mini-stats when searching */}
       { (searchTerm && (sadResults.length > 0 || sadDeclaration.exists)) && (
         <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mb={6}>
-          <Stat bg="white" px={4} py={3} borderRadius="md" boxShadow="sm">
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(79,70,229,0.06)', bg: 'linear-gradient(135deg,#fff 0%, #fff8ef 100%)' }}>
             <StatLabel>Declared Weight</StatLabel>
             <StatNumber>{formatWeight(sadDeclaration.declaredWeight)}</StatNumber>
             <StatHelpText>{sadDeclaration.exists ? 'From SAD declaration' : 'No declaration found'}</StatHelpText>
           </Stat>
 
-          <Stat bg="white" px={4} py={3} borderRadius="md" boxShadow="sm">
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(6,182,212,0.06)', bg: 'linear-gradient(135deg,#f0f9ff 0%, #ecfeff 100%)' }}>
             <StatLabel>Discharged Weight</StatLabel>
             <StatNumber>{formatWeight(sadTotalsMemo.cumulativeNet)} kg</StatNumber>
             <StatHelpText>Sum of nets (respecting date/time filters)</StatHelpText>
           </Stat>
 
-          <Stat bg="white" px={4} py={3} borderRadius="md" boxShadow="sm">
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(16,185,129,0.06)', bg: 'linear-gradient(135deg,#f0fff4 0%, #e6ffef 100%)' }}>
             <StatLabel>SAD Status</StatLabel>
             <StatNumber>{sadDeclaration.status || (sadResults.length ? 'In Progress' : 'Unknown')}</StatNumber>
             <StatHelpText>{sadDeclaration.exists ? 'Declaration row found' : (sadResults.length ? 'No declaration - tickets found' : 'No data')}</StatHelpText>
@@ -1083,7 +1118,7 @@ export default function OutgateReports() {
                   </Tr>
                 </Thead>
                 <Tbody>
-                  {uniqueFilteredReports.map((r) => {
+                  {pagedUniqueReports.map((r) => {
                     const { gross, tare, net } = computeWeights(r);
                     return (
                       <Tr key={r.ticketNo ?? r.id ?? Math.random()}>
@@ -1111,6 +1146,13 @@ export default function OutgateReports() {
                   })}
                 </Tbody>
               </Table>
+
+              {/* pagination */}
+              <Flex justify="center" align="center" mt={4} gap={3}>
+                <Button size="sm" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={currentPage === 1}>Prev</Button>
+                <Text fontSize="sm">Page {currentPage} of {totalPages}</Text>
+                <Button size="sm" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} isDisabled={currentPage === totalPages}>Next</Button>
+              </Flex>
             </Box>
           </>
         )}
@@ -1254,8 +1296,10 @@ export default function OutgateReports() {
           alignItems="center"
           justifyContent="center"
           boxShadow="0 10px 30px rgba(59,130,246,0.18)"
-          style={{ background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', color: '#fff' }}
+          style={{ background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', color: '#fff', transformOrigin: 'center' }}
           title="Quick generate"
+          animate={{ y: [0, -6, 0] }}
+          transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
         >
           <Box fontSize="24px" fontWeight="700">✺</Box>
         </MotionBox>

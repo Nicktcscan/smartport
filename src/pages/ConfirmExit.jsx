@@ -37,6 +37,11 @@ import {
   Divider,
   useBreakpointValue,
   Spinner,
+  Menu,
+  MenuButton,
+  MenuList,
+  MenuItem,
+  Checkbox,
 } from '@chakra-ui/react';
 import {
   SearchIcon,
@@ -47,19 +52,24 @@ import {
   RepeatIcon,
   CopyIcon,
 } from '@chakra-ui/icons';
-import { FaFilePdf, FaPrint, FaMagic } from 'react-icons/fa';
+import { FaFilePdf, FaPrint, FaMagic, FaBars, FaUser, FaEllipsisV, FaDownload } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
+import { useAuth } from '../context/AuthContext';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf';
 
-// Optional worker config for pdfjs if required
+// If your setup needs pdfjs worker, set it:
 // pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.worker.min.js';
 
 const PAGE_SIZE = 5;
 
 /* -----------------------
-   Helpers (unchanged behaviour)
+   Helpers
 ----------------------- */
-// parseNumber was removed because it's not used; use computeWeights/formatWeight helpers instead when needed.
+function parseNumber(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(/[,\s]+/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
 
 function computeWeights(row) {
   const toNum = (val) => {
@@ -141,10 +151,10 @@ async function extractTextFromPdfUrl(url) {
 function parseDriverNameFromText(text) {
   if (!text) return null;
   const patterns = [
-    /Driver\s*Name\s*[:-]\s*(.+?)(?:\n|$)/i,
-    /Driver\s*[:-]\s*(.+?)(?:\n|$)/i,
-    /Name\s*of\s*Driver\s*[:-]\s*(.+?)(?:\n|$)/i,
-    /Driver\s+[:]\s*([A-Z][A-Za-z'’\s-]+[A-Za-z])/m,
+    /Driver\s*Name\s*[:\-]\s*(.+?)(?:\n|$)/i,
+    /Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
+    /Name\s*of\s*Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
+    /Driver\s+[:]\s*([A-Z][A-Za-z'’\-\s]+[A-Za-z])/m,
   ];
   for (const pat of patterns) {
     const m = text.match(pat);
@@ -160,10 +170,51 @@ function parseDriverNameFromText(text) {
   return null;
 }
 
+function isPdfUrl(url) {
+  if (!url) return false;
+  const lower = url.split('?')[0].toLowerCase();
+  return lower.endsWith('.pdf');
+}
+function isImageUrl(url) {
+  if (!url) return false;
+  const lower = url.split('?')[0].toLowerCase();
+  return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
+}
+
 /* -----------------------
    Component
 ----------------------- */
 export default function ConfirmExit() {
+  // Auth
+  const { user } = useAuth(); // returns supabase user object or custom auth object depending on your app
+  const toast = useToast();
+
+  // We'll resolve current logged in username from users table (best-effort).
+  const [currentUsername, setCurrentUsername] = useState(null);
+
+  useEffect(() => {
+    const loadUsername = async () => {
+      try {
+        if (!user) return setCurrentUsername(null);
+        // Prefer matching by id; fallback to email
+        if (user.id) {
+          const { data: u, error } = await supabase.from('users').select('username').eq('id', user.id).maybeSingle();
+          if (!error && u && u.username) return setCurrentUsername(u.username);
+        }
+        if (user.email) {
+          const { data: u, error } = await supabase.from('users').select('username').ilike('email', user.email).maybeSingle();
+          if (!error && u && u.username) return setCurrentUsername(u.username);
+        }
+        // fallback
+        setCurrentUsername(user.email || user.id || null);
+      } catch (err) {
+        console.warn('Could not load current username', err);
+        setCurrentUsername(user?.email ?? user?.id ?? null);
+      }
+    };
+    loadUsername();
+  }, [user]);
+
   // search / filters
   const [searchParams, setSearchParams] = useState({
     vehicleNumber: '',
@@ -193,7 +244,6 @@ export default function ConfirmExit() {
   const [sortOrder, setSortOrder] = useState('asc');
   const [pendingPageSize, setPendingPageSize] = useState(PAGE_SIZE);
 
-  const toast = useToast();
   const printRef = useRef(null);
 
   // confirmed search (live) and small state
@@ -208,6 +258,22 @@ export default function ConfirmExit() {
 
   // responsive: switch table → cards on small devices
   const isMobile = useBreakpointValue({ base: true, md: false });
+
+  // selection state
+  const [selectedPending, setSelectedPending] = useState(new Set()); // ticket_id values
+  const [selectedConfirmed, setSelectedConfirmed] = useState(new Set());
+
+  // keyboard navigation
+  const [focusedPendingIndex, setFocusedPendingIndex] = useState(-1);
+  const pendingRowRefs = useRef([]); // array of row DOM refs
+
+  // users map for 'Exited By' lookup
+  const [usersMap, setUsersMap] = useState({}); // { userId: {id, username, email} }
+
+  // orb modal
+  const [orbOpen, setOrbOpen] = useState(false);
+  const openOrb = () => setOrbOpen(true);
+  const closeOrb = () => setOrbOpen(false);
 
   // ---------------------
   // Data fetching
@@ -229,6 +295,7 @@ export default function ConfirmExit() {
 
   const fetchConfirmedExits = useCallback(async () => {
     try {
+      // include created_by to show who exited (if available)
       const { data, error } = await supabase
         .from('outgate')
         .select(`
@@ -245,6 +312,7 @@ export default function ConfirmExit() {
           file_url,
           file_name,
           driver,
+          created_by,
           tickets ( date )
         `)
         .order('created_at', { ascending: false });
@@ -292,6 +360,21 @@ export default function ConfirmExit() {
       }
 
       setConfirmedTickets(finalConfirmed);
+
+      // load users who created these outgates (if created_by present)
+      const creatorIds = Array.from(new Set(finalConfirmed.map((r) => r.created_by).filter(Boolean)));
+      if (creatorIds.length) {
+        try {
+          const { data: users, error: uErr } = await supabase.from('users').select('id,username,email').in('id', creatorIds);
+          if (!uErr && users) {
+            const m = {};
+            users.forEach(u => { m[u.id] = u; });
+            setUsersMap((prev) => ({ ...prev, ...m }));
+          }
+        } catch (e) {
+          console.warn('Could not fetch users map', e);
+        }
+      }
     } catch (err) {
       toast({ title: 'Error fetching confirmed exits', description: err?.message || 'Could not fetch confirmed exits', status: 'error', duration: 5000, isClosable: true });
     }
@@ -374,7 +457,7 @@ export default function ConfirmExit() {
     setCurrentPage(1);
   }, [allTickets, confirmedTickets]);
 
-  // Input handlers
+  // Inputs
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setSearchParams((p) => ({ ...p, [name]: value }));
@@ -387,7 +470,7 @@ export default function ConfirmExit() {
     return hh * 60 + mm;
   };
 
-  // Search & filters for pending tickets
+  // Search & filter for pending tickets
   const handleSearch = () => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
     const df = dateFrom ? new Date(dateFrom) : null;
@@ -445,8 +528,14 @@ export default function ConfirmExit() {
   }, [searchParams, dateFrom, dateTo, timeFrom, timeTo]);
 
   // Sorting & pagination UI helpers
-    // Sorting state is managed by sortKey and sortOrder; interactive header click handlers were removed
-    // to avoid unused-variable lint errors — update headers to call setSortKey/setSortOrder if needed.
+  const handleSortClick = (key) => {
+    if (sortKey === key) setSortOrder((s) => (s === 'asc' ? 'desc' : 'asc'));
+    else {
+      setSortKey(key);
+      setSortOrder('asc');
+    }
+  };
+  const getSortIndicator = (key) => (sortKey === key ? (sortOrder === 'asc' ? ' ↑' : ' ↓') : '');
 
   const sortedResults = useMemo(() => {
     const arr = [...filteredResults];
@@ -495,19 +584,8 @@ export default function ConfirmExit() {
   const totalConfirmedPages = Math.max(1, Math.ceil(filteredConfirmed.length / PAGE_SIZE));
 
   // ---------------------
-  // Modal actions (unchanged logic)
+  // Modal actions (unchanged logic, but attach created_by & edited_by)
   // ---------------------
-  const isPdfUrl = (url) => {
-    if (!url) return false;
-    const lower = url.split('?')[0].toLowerCase();
-    return lower.endsWith('.pdf');
-  };
-  const isImageUrl = (url) => {
-    if (!url) return false;
-    const lower = url.split('?')[0].toLowerCase();
-    return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
-  };
-
   const openActionModal = async (ticket, type) => {
     setActionType(type);
     if (type === 'view') {
@@ -564,6 +642,10 @@ export default function ConfirmExit() {
         driver: resolvedDriver || null,
       };
 
+      // attach creator / editor info if available
+      if (user && user.id) payload.created_by = user.id;
+      if (currentUsername) payload.edited_by = currentUsername;
+
       if (payload.ticket_id) {
         const { data: existing, error: existingErr } = await supabase
           .from('outgate')
@@ -608,29 +690,96 @@ export default function ConfirmExit() {
     }
   };
 
-  // Export handlers
-  const handleExportPending = () => {
-    const rows = sortedResults.map((t) => {
-      const w = computeWeights(t);
-      return {
-        'Ticket No': t.ticket_no || '',
-        'Truck': t.gnsw_truck_no || '',
-        'SAD No': t.sad_no || '',
-        'Container': t.container_no || '',
-        'Entry Date': t.date ? (new Date(t.date).toLocaleString()) : t.submitted_at ? (new Date(t.submitted_at).toLocaleString()) : '',
-        'Gross (KG)': w.gross ?? '',
-        'Tare (KG)': w.tare ?? '',
-        'Net (KG)': w.net ?? '',
-      };
-    });
-    if (!rows.length) {
-      toast({ title: 'No rows to export', status: 'info', duration: 2000 });
+  // Bulk confirm selected pending
+  const bulkConfirmSelected = async () => {
+    if (!selectedPending.size) {
+      toast({ title: 'No selection', status: 'info' });
       return;
     }
-    exportToCSV(rows, 'pending-tickets.csv');
-    toast({ title: 'Export started', status: 'success', duration: 2000 });
+    const ids = Array.from(selectedPending);
+    try {
+      toast({ title: `Processing ${ids.length} selected...`, status: 'info', duration: 2000 });
+      for (const tId of ids) {
+        try {
+          const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle();
+          if (!tk) continue;
+          const { gross, tare, net } = computeWeights(tk);
+          const payload = {
+            ticket_id: tk.ticket_id,
+            ticket_no: tk.ticket_no || null,
+            vehicle_number: tk.gnsw_truck_no || null,
+            container_id: tk.container_no || null,
+            sad_no: tk.sad_no || null,
+            gross,
+            tare,
+            net,
+            date: tk.date || tk.submitted_at || null,
+            file_url: tk.file_url || null,
+            file_name: tk.file_name || null,
+            driver: tk.driver || null,
+          };
+          if (user && user.id) payload.created_by = user.id;
+          if (currentUsername) payload.edited_by = currentUsername;
+
+          const { data: existing } = await supabase.from('outgate').select('id').eq('ticket_id', tId).limit(1);
+          if (!(existing && existing.length)) {
+            await supabase.from('outgate').insert([payload]);
+          }
+          await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', tId);
+        } catch (e) {
+          console.warn('bulk confirm per-ticket failed', tId, e);
+        }
+      }
+
+      await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+
+      try {
+        let confetti = null;
+        if (window && window.confetti) confetti = window.confetti;
+        else {
+          const mod = await import('canvas-confetti').catch(() => null);
+          if (mod && mod.default) confetti = mod.default;
+        }
+        if (confetti) confetti({ particleCount: Math.min(240, ids.length * 8), spread: 140, origin: { y: 0.6 } });
+      } catch (e) {}
+
+      toast({ title: `Bulk confirmed ${ids.length}`, status: 'success' });
+      setSelectedPending(new Set());
+    } catch (err) {
+      console.error('bulk confirm failed', err);
+      toast({ title: 'Bulk confirm failed', description: err?.message || 'Unexpected', status: 'error' });
+    }
   };
 
+  // Bulk export selected confirmed
+  const bulkExportConfirmedSelected = () => {
+    if (!selectedConfirmed.size) {
+      toast({ title: 'No selection', status: 'info' });
+      return;
+    }
+    const rows = filteredConfirmed
+      .filter((r) => selectedConfirmed.has(r.id ?? r.ticket_id))
+      .map((r) => {
+        const w = computeWeights(r);
+        return {
+          'Ticket No': r.ticket_no ?? '',
+          'Truck': r.vehicle_number ?? r.gnsw_truck_no ?? '',
+          'SAD No': r.sad_no ?? '',
+          'Container': r.container_id ?? '',
+          'Exit Date': r.created_at ? new Date(r.created_at).toLocaleString() : '',
+          'Weighed At': r.weighed_at ? new Date(r.weighed_at).toLocaleString() : '',
+          'Gross (KG)': w.gross ?? '',
+          'Tare (KG)': w.tare ?? '',
+          'Net (KG)': w.net ?? '',
+          'Driver': r.driver ?? '',
+        };
+      });
+    exportToCSV(rows, `confirmed-exits-selected_${new Date().toISOString().slice(0,10)}.csv`);
+    toast({ title: `Exported ${rows.length} rows`, status: 'success' });
+    setSelectedConfirmed(new Set());
+  };
+
+  // ----- handleExportConfirmed (existing full export) -----
   const handleExportConfirmed = () => {
     const rows = filteredConfirmed.map((r) => {
       const w = computeWeights(r);
@@ -648,11 +797,11 @@ export default function ConfirmExit() {
       };
     });
     if (!rows.length) {
-      toast({ title: 'No confirmed rows', status: 'info', duration: 2000 });
+      toast({ title: 'No rows to export', status: 'info', duration: 2000 });
       return;
     }
-    exportToCSV(rows, 'confirmed-exits.csv');
-    toast({ title: 'Export started', status: 'success', duration: 2000 });
+    exportToCSV(rows, `confirmed-exits_${new Date().toISOString().slice(0,10)}.csv`);
+    toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
   // Modal helpers
@@ -689,56 +838,101 @@ export default function ConfirmExit() {
     w.close();
   };
 
-  // Derived counts for stats
-  const pendingCount = filteredResults.length;
+  // keyboard navigation handlers for pending table
+  useEffect(() => {
+    const onKey = (e) => {
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
 
-  // ---------------------
-  // UI ENHANCEMENTS: Orb Modal, confetti, voice commands
-  // ---------------------
-  // confetti launcher (dynamic import)
-  const launchConfetti = async (particleCount = 80) => {
-    try {
-      let confetti = null;
-      if (window && window.confetti) confetti = window.confetti;
-      else {
-        const mod = await import('canvas-confetti').catch(() => null);
-        if (mod && mod.default) confetti = mod.default;
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setFocusedPendingIndex((i) => Math.min(paginatedResults.length - 1, i + 1));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setFocusedPendingIndex((i) => Math.max(0, i - 1));
+      } else if (e.key === 'Enter') {
+        const idx = focusedPendingIndex;
+        if (idx >= 0 && idx < paginatedResults.length) {
+          openActionModal(paginatedResults[idx], 'exit');
+        }
+      } else if (e.key === ' ') {
+        const idx = focusedPendingIndex;
+        if (idx >= 0 && idx < paginatedResults.length) {
+          e.preventDefault();
+          const id = paginatedResults[idx].ticket_id;
+          setSelectedPending((s) => {
+            const next = new Set(s);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+          });
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        const ids = paginatedResults.map((r) => r.ticket_id).filter(Boolean);
+        setSelectedPending(new Set(ids));
       }
-      if (!confetti) return;
-      confetti({
-        particleCount,
-        spread: 160,
-        origin: { y: 0.6 },
-        scalar: 1.1,
-      });
-    } catch (err) {
-      console.debug('Confetti not available:', err);
+    };
+
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [paginatedResults, focusedPendingIndex]);
+
+  useEffect(() => {
+    const idx = focusedPendingIndex;
+    const ref = pendingRowRefs.current?.[idx];
+    if (ref && ref.focus) {
+      ref.focus();
     }
-  };
+  }, [focusedPendingIndex]);
 
-  // orb behaviour
-  const [orbOpen, setOrbOpen] = useState(false);
-  const openOrb = () => setOrbOpen(true);
-  const closeOrb = () => setOrbOpen(false);
-
+  // Bulk orb confirm (visible page)
   const handleOrbConfirmAll = async () => {
     try {
-      const toConfirm = paginatedResults.filter(Boolean).map((t) => t.ticket_id).filter(Boolean);
-      if (!toConfirm.length) {
+      const ids = paginatedResults.map((t) => t.ticket_id).filter(Boolean);
+      if (!ids.length) {
         toast({ title: 'Nothing to confirm', status: 'info' });
         return;
       }
-      toast({ title: `Bulk confirming ${toConfirm.length} tickets...`, status: 'info', duration: 2000 });
-      for (const id of toConfirm) {
+      toast({ title: `Bulk confirming ${ids.length} tickets...`, status: 'info', duration: 2000 });
+      for (const id of ids) {
         try {
+          const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', id).limit(1).maybeSingle();
+          if (!tk) continue;
+          const { gross, tare, net } = computeWeights(tk);
+          const payload = {
+            ticket_id: tk.ticket_id,
+            ticket_no: tk.ticket_no || null,
+            vehicle_number: tk.gnsw_truck_no || null,
+            container_id: tk.container_no || null,
+            sad_no: tk.sad_no || null,
+            gross,
+            tare,
+            net,
+            date: tk.date || tk.submitted_at || null,
+            file_url: tk.file_url || null,
+            file_name: tk.file_name || null,
+            driver: tk.driver || null,
+          };
+          if (user && user.id) payload.created_by = user.id;
+          if (currentUsername) payload.edited_by = currentUsername;
+
+          const { data: existing } = await supabase.from('outgate').select('id').eq('ticket_id', id).limit(1);
+          if (!(existing && existing.length)) {
+            await supabase.from('outgate').insert([payload]);
+          }
           await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', id);
         } catch (e) {
-          console.warn('bulk set exited failed', id, e);
+          console.warn('orb confirm per-ticket failed', id, e);
         }
       }
       await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
-      launchConfetti(160);
-      toast({ title: `Marked ${toConfirm.length} as Exited`, status: 'success' });
+      try {
+        const mod = await import('canvas-confetti').catch(() => null);
+        const confetti = mod?.default ?? window.confetti;
+        if (confetti) confetti({ particleCount: 140, spread: 140, origin: { y: 0.6 } });
+      } catch (e) {}
+      toast({ title: `Marked ${ids.length} as Exited`, status: 'success' });
       closeOrb();
     } catch (err) {
       console.error('Orb bulk confirm failed', err);
@@ -746,11 +940,10 @@ export default function ConfirmExit() {
     }
   };
 
-  // Voice commands
+  // Voice commands (simple)
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition || null;
     if (!SpeechRecognition) return undefined;
-
     const r = new SpeechRecognition();
     r.lang = 'en-US';
     r.interimResults = false;
@@ -829,14 +1022,15 @@ export default function ConfirmExit() {
     return d.toLocaleString();
   };
 
-  // Responsive card rendering for mobile
-  const renderPendingCard = (ticket) => {
+  // Render pending card (mobile)
+  const renderPendingCard = (ticket, idx) => {
     const { gross, tare, net } = computeWeights(ticket);
     const ticketDate = ticket.date ? formatDate(ticket.date) : ticket.submitted_at ? formatDate(ticket.submitted_at) : '—';
+    const checked = selectedPending.has(ticket.ticket_id);
     return (
       <Box key={ticket.ticket_id || ticket.ticket_no} p={4}
         borderRadius="14px" boxShadow="0 10px 30px rgba(2,6,23,0.06)" mb={3} border="1px solid rgba(2,6,23,0.06)"
-        bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96))">
+        tabIndex={0}>
         <Flex justify="space-between" align="center" mb={2}>
           <Box>
             <Text fontWeight="bold">Ticket {ticket.ticket_no || '—'}</Text>
@@ -849,12 +1043,21 @@ export default function ConfirmExit() {
         </Flex>
 
         <SimpleGrid columns={3} spacing={2} mb={3}>
-          <Box textAlign="center"><Text fontSize="xs" color="gray.500">Gross</Text><Text fontWeight="bold">{formatWeight(gross)}</Text></Box>
-          <Box textAlign="center"><Text fontSize="xs" color="gray.500">Tare</Text><Text fontWeight="bold">{formatWeight(tare)}</Text></Box>
-          <Box textAlign="center"><Text fontSize="xs" color="gray.500">Net</Text><Text fontWeight="bold">{formatWeight(net)}</Text></Box>
+          <Box textAlign="center"><Text fontSize="xs" color="gray.600">Gross</Text><Text fontWeight="bold">{formatWeight(gross)}</Text></Box>
+          <Box textAlign="center"><Text fontSize="xs" color="gray.600">Tare</Text><Text fontWeight="bold">{formatWeight(tare)}</Text></Box>
+          <Box textAlign="center"><Text fontSize="xs" color="gray.600">Net</Text><Text fontWeight="bold">{formatWeight(net)}</Text></Box>
         </SimpleGrid>
 
         <HStack spacing={2}>
+          <Checkbox isChecked={checked} onChange={(e) => {
+            const id = ticket.ticket_id;
+            setSelectedPending((s) => {
+              const next = new Set(s);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            });
+          }} aria-label={`Select ticket ${ticket.ticket_no}`} />
           <Button size="sm" colorScheme="green" leftIcon={<CheckIcon />} onClick={() => openActionModal(ticket, 'exit')}>Confirm Exit</Button>
           <IconButton size="sm" variant="outline" aria-label="View" icon={<FaFilePdf />} onClick={() => openActionModal(ticket, 'view')} />
         </HStack>
@@ -862,7 +1065,7 @@ export default function ConfirmExit() {
     );
   };
 
-  // fancy stat card styles
+  // Fancy stat card styles
   const statStyles = [
     { bg: 'linear-gradient(135deg,#6D28D9 0%, #06B6D4 100%)', color: 'white' },
     { bg: 'linear-gradient(135deg,#0ea5a4 0%, #60a5fa 100%)', color: 'white' },
@@ -875,14 +1078,11 @@ export default function ConfirmExit() {
   // ---------------------
   return (
     <Box p={{ base: 4, md: 8 }}>
-      {/* Local page CSS for fancy table styling (vertical and horizontal lines, responsive cards, 3D on wide) */}
-      <style>
-        {`
+      <style>{`
         :root{
           --muted: rgba(7,17,25,0.55);
           --text-dark: #071126;
           --text-light: #ffffff;
-          --neon-1: linear-gradient(135deg,#6D28D9 0%, #06B6D4 100%);
           --radius: 14px;
           --glass-border: rgba(2,6,23,0.06);
         }
@@ -921,10 +1121,14 @@ export default function ConfirmExit() {
           .panel-3d { transform-style: preserve-3d; perspective:1200px; transition: transform 0.6s cubic-bezier(.2,.8,.2,1); }
           .panel-3d:hover { transform: rotateY(6deg) rotateX(2deg) translateZ(6px); box-shadow: 0 30px 60px rgba(2,6,23,0.12); }
         }
-        /* subtle hover */
-        .fancy-table tbody tr:hover td { transform: translateY(-2px); transition: transform 0.18s ease; }
-        `}
-      </style>
+        .row-focus {
+          outline: 2px solid rgba(99,102,241,0.24);
+          box-shadow: 0 6px 18px rgba(99,102,241,0.06);
+        }
+        /* small visual niceties */
+        .orb-cta { transition: transform 0.22s; }
+        .orb-cta:hover { transform: translateY(-4px) scale(1.03); }
+      `}</style>
 
       <Flex justify="space-between" align="center" mb={6} flexWrap="wrap" gap={4}>
         <Stack spacing={1}>
@@ -933,10 +1137,32 @@ export default function ConfirmExit() {
         </Stack>
 
         <HStack spacing={2}>
-          <Tooltip label="Export pending (filtered) to CSV"><Button leftIcon={<DownloadIcon />} colorScheme="teal" variant="ghost" onClick={handleExportPending}>Export Pending</Button></Tooltip>
-          <Tooltip label="Export confirmed exits to CSV"><Button leftIcon={<DownloadIcon />} variant="outline" onClick={handleExportConfirmed}>Export Confirmed</Button></Tooltip>
-          <Tooltip label="Reset filters"><Button leftIcon={<RepeatIcon />} variant="ghost" onClick={handleReset}>Reset</Button></Tooltip>
-          <Tooltip label={isListening ? 'Stop voice' : 'Start voice'}><Button onClick={toggleListening} colorScheme={isListening ? 'red' : 'purple'} leftIcon={<FaMagic />}>{isListening ? 'Listening…' : 'Voice'}</Button></Tooltip>
+          <Tooltip label="Export pending (filtered) to CSV"><Button leftIcon={<DownloadIcon />} colorScheme="teal" variant="ghost" onClick={() => {
+            const rows = sortedResults.map((t) => {
+              const w = computeWeights(t);
+              return {
+                'Ticket No': t.ticket_no || '',
+                'Truck': t.gnsw_truck_no || '',
+                'SAD No': t.sad_no || '',
+                'Container': t.container_no || '',
+                'Entry Date': t.date ? formatDate(t.date) : t.submitted_at ? formatDate(t.submitted_at) : '',
+                'Gross (KG)': w.gross ?? '',
+                'Tare (KG)': w.tare ?? '',
+                'Net (KG)': w.net ?? '',
+              };
+            });
+            if (!rows.length) return toast({ title: 'No rows to export', status: 'info' });
+            exportToCSV(rows, 'pending-tickets.csv');
+            toast({ title: `Export started (${rows.length} rows)`, status: 'success' });
+          }}>Export CSV</Button></Tooltip>
+
+          <Button leftIcon={<DownloadIcon />} variant="outline" onClick={handleExportConfirmed}>Export Confirmed</Button>
+
+          <Button leftIcon={<RepeatIcon />} variant="ghost" onClick={handleReset}>Reset</Button>
+
+          <Tooltip label={isListening ? 'Stop voice' : 'Start voice'}>
+            <Button onClick={toggleListening} colorScheme={isListening ? 'red' : 'purple'} leftIcon={<FaMagic />}>{isListening ? 'Listening…' : 'Voice'}</Button>
+          </Tooltip>
         </HStack>
       </Flex>
 
@@ -944,7 +1170,7 @@ export default function ConfirmExit() {
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={6}>
         <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: statStyles[0].bg, color: statStyles[0].color }}>
           <StatLabel>Total Pending</StatLabel>
-          <StatNumber>{pendingCount}</StatNumber>
+          <StatNumber>{filteredResults.length}</StatNumber>
           <StatHelpText>Tickets awaiting exit</StatHelpText>
         </Stat>
 
@@ -988,20 +1214,43 @@ export default function ConfirmExit() {
       <Flex mb={6} gap={4}>
         <Button leftIcon={<SearchIcon />} colorScheme="blue" onClick={handleSearch}>Search</Button>
         {isFilterActive && <Button variant="outline" onClick={handleReset}>Reset</Button>}
+
+        <HStack ml="auto" spacing={2}>
+          <Button variant="ghost" size="sm" onClick={() => {
+            if (!selectedPending.size) return toast({ title: 'No selection', status: 'info' });
+            bulkConfirmSelected();
+          }}>Confirm Selected ({selectedPending.size})</Button>
+
+          <Button variant="ghost" size="sm" onClick={() => {
+            if (!selectedConfirmed.size) return toast({ title: 'No selection', status: 'info' });
+            bulkExportConfirmedSelected();
+          }}>Export Confirmed Selected ({selectedConfirmed.size})</Button>
+        </HStack>
       </Flex>
 
-      {/* Pending table / cards */}
+      {/* Pending */}
       {loading ? (
         <Flex justify="center" mb={6}><Spinner /></Flex>
       ) : isMobile ? (
         <VStack align="stretch" spacing={3} mb={6}>
-          {paginatedResults.map((ticket) => renderPendingCard(ticket))}
+          {paginatedResults.map((ticket, idx) => renderPendingCard(ticket, idx))}
         </VStack>
       ) : (
         <Box className="table-wrapper mb-6">
           <Table className="fancy-table" size="sm">
             <Thead>
               <Tr>
+                <Th><Checkbox isChecked={selectedPending.size > 0 && selectedPending.size === paginatedResults.filter(r => r.ticket_id).length} onChange={(e) => {
+                  if (e.target.checked) {
+                    const ids = new Set(selectedPending);
+                    paginatedResults.forEach(r => { if (r.ticket_id) ids.add(r.ticket_id); });
+                    setSelectedPending(ids);
+                  } else {
+                    const ids = new Set(selectedPending);
+                    paginatedResults.forEach(r => { if (r.ticket_id) ids.delete(r.ticket_id); });
+                    setSelectedPending(ids);
+                  }
+                }} aria-label="Select all visible" /></Th>
                 <Th>SAD/Ticket</Th>
                 <Th>Truck</Th>
                 <Th isNumeric>Gross (kg)</Th>
@@ -1012,11 +1261,31 @@ export default function ConfirmExit() {
               </Tr>
             </Thead>
             <Tbody>
-              {paginatedResults.map((ticket) => {
+              {paginatedResults.map((ticket, idx) => {
                 const { gross, tare, net } = computeWeights(ticket);
                 const ticketDate = ticket.date ? formatDate(ticket.date) : ticket.submitted_at ? formatDate(ticket.submitted_at) : '—';
+                const checked = selectedPending.has(ticket.ticket_id);
                 return (
-                  <Tr key={ticket.ticket_id || ticket.ticket_no}>
+                  <Tr
+                    key={ticket.ticket_id || ticket.ticket_no}
+                    tabIndex={0}
+                    ref={(el) => (pendingRowRefs.current[idx] = el)}
+                    className={focusedPendingIndex === idx ? 'row-focus' : undefined}
+                    onClick={() => setFocusedPendingIndex(idx)}
+                    onDoubleClick={() => openActionModal(ticket, 'exit')}
+                  >
+                    <Td data-label="Select">
+                      <Checkbox isChecked={checked} onChange={(e) => {
+                        const id = ticket.ticket_id;
+                        setSelectedPending((s) => {
+                          const next = new Set(s);
+                          if (next.has(id)) next.delete(id);
+                          else next.add(id);
+                          return next;
+                        });
+                      }} aria-label={`Select ticket ${ticket.ticket_no}`} />
+                    </Td>
+
                     <Td data-label="SAD/Ticket">
                       <Text fontWeight="bold">{ticket.sad_no ?? '—'}</Text>
                       <Text fontSize="sm" color="gray.500">{ticket.ticket_no ?? '—'}</Text>
@@ -1047,11 +1316,11 @@ export default function ConfirmExit() {
         <IconButton icon={<ChevronRightIcon />} onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} isDisabled={currentPage === totalPages} />
       </Flex>
 
-      {/* Action Modal */}
+      {/* Action Modal (view/confirm) */}
       <Modal isOpen={isOpen} onClose={onClose} isCentered size={actionType === 'view' ? 'xl' : 'md'}>
         <ModalOverlay />
         <ModalContent borderRadius="16px" bg="linear-gradient(180deg, #fff, #fbfdff)" boxShadow="0 30px 60px rgba(2,6,23,0.08)">
-          <ModalHeader>{actionType === 'exit' ? 'Confirm Exit' : 'View Ticket File'}</ModalHeader>
+          <ModalHeader>{actionType === 'exit' ? 'Confirm Exit' : 'View/Details'}</ModalHeader>
           <ModalCloseButton />
           <ModalBody ref={printRef}>
             {actionType === 'exit' && selectedTicket && (
@@ -1080,24 +1349,69 @@ export default function ConfirmExit() {
 
             {actionType === 'view' && selectedTicket && (
               <>
-                {selectedTicket.file_url ? (
-                  isPdfUrl(selectedTicket.file_url) ? (
-                    <iframe src={selectedTicket.file_url} width="100%" height="600px" title={`Ticket ${selectedTicket.ticket_id || selectedTicket.id || ''}`} style={{ border: '1px solid #e2e8f0', borderRadius: 6 }} />
-                  ) : isImageUrl(selectedTicket.file_url) ? (
-                    <Box textAlign="center">
-                      <img src={selectedTicket.file_url} alt={`Ticket ${selectedTicket.ticket_id || ''}`} style={{ maxWidth: '100%', maxHeight: '70vh', borderRadius: 6, border: '1px solid #e2e8f0' }} />
-                    </Box>
-                  ) : (
-                    <Box>
-                      <iframe src={selectedTicket.file_url} width="100%" height="600px" title={`Ticket ${selectedTicket.ticket_id || ''}`} style={{ border: '1px solid #e2e8f0', borderRadius: 6 }} />
-                      <Text mt={2}>If the file doesn't render, <a href={selectedTicket.file_url} target="_blank" rel="noreferrer">open in a new tab</a>.</Text>
-                    </Box>
-                  )
-                ) : (
+                <Flex justify="space-between" mb={3}>
                   <Box>
-                    <Text mb={2}>No Attachment Found</Text>
-                    <Text fontSize="sm" color="gray.600">This appears to be a manual entry without an attachment.</Text>
+                    <Text fontWeight="bold">{selectedTicket.vehicle_number || selectedTicket.gnsw_truck_no || '—'}</Text>
+                    <Text fontSize="sm" color="gray.600">{selectedTicket.ticket_no ? `Ticket: ${selectedTicket.ticket_no}` : 'No ticket'}</Text>
+                    <Text fontSize="sm" color="gray.600">{selectedTicket.destination}</Text>
                   </Box>
+                  <Box textAlign="right">
+                    <Text fontSize="sm" color="gray.500">Exited At</Text>
+                    <Text fontWeight="semibold">{selectedTicket.created_at ? formatDate(selectedTicket.created_at) : '—'}</Text>
+                    <Badge colorScheme="teal" mt={1}>{selectedTicket.sad_no ?? 'No SAD'}</Badge>
+                  </Box>
+                </Flex>
+
+                <Divider mb={3} />
+
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
+                  <Box>
+                    <Text fontWeight="semibold">Driver</Text>
+                    <Text>{selectedTicket.driver ?? '—'}</Text>
+                    <Text mt={3} fontWeight="semibold">Container</Text>
+                    <Text>{selectedTicket.container_id ?? selectedTicket.container_no ?? '—'}</Text>
+                  </Box>
+
+                  <Box>
+                    <Text fontWeight="semibold">Weight Details (kg)</Text>
+                    {(() => {
+                      const { gross, tare, net } = computeWeights(selectedTicket);
+                      return (
+                        <>
+                          <Text><b>Gross (KG):</b> {formatWeight(gross)}</Text>
+                          <Text><b>Tare (KG):</b> {formatWeight(tare)}</Text>
+                          <Text><b>Net (KG):</b> {formatWeight(net)}</Text>
+                        </>
+                      );
+                    })()}
+
+                    <Box mt={3}>
+                      <Text fontWeight="semibold">More Info</Text>
+                      <Text>Weighed at: {selectedTicket.weighed_at ? formatDate(selectedTicket.weighed_at) : '—'}</Text>
+                      <Text>File: {selectedTicket.file_name ?? (selectedTicket.file_url ? 'Attachment' : '—')}</Text>
+                      <Text>Exited by: {
+                        (selectedTicket.created_by && usersMap[selectedTicket.created_by]) ?
+                          (usersMap[selectedTicket.created_by].username || usersMap[selectedTicket.created_by].email) : 'Unknown / System'
+                      }</Text>
+                    </Box>
+                  </Box>
+                </SimpleGrid>
+
+                {selectedTicket.file_url && (
+                  <>
+                    <Divider mt={4} mb={3} />
+                    <Box border="1px solid" borderColor="gray.200" borderRadius="md" overflow="hidden" minH="300px">
+                      {isPdfUrl(selectedTicket.file_url) ? (
+                        <iframe src={selectedTicket.file_url} width="100%" height="100%" style={{ border: 'none', minHeight: 300 }} title="file" />
+                      ) : isImageUrl(selectedTicket.file_url) ? (
+                        <Box textAlign="center" p={3}>
+                          <img src={selectedTicket.file_url} alt="attachment" style={{ maxWidth: '100%', maxHeight: '60vh', borderRadius: 6 }} />
+                        </Box>
+                      ) : (
+                        <iframe src={selectedTicket.file_url} width="100%" height="100%" style={{ border: 'none', minHeight: 300 }} title="file" />
+                      )}
+                    </Box>
+                  </>
                 )}
               </>
             )}
@@ -1124,6 +1438,10 @@ export default function ConfirmExit() {
         <HStack spacing={2}>
           <Input placeholder="Search confirmed by Truck, Driver, SAD, or Ticket No (live)" value={confirmedQuery} onChange={(e) => { setConfirmedQuery(e.target.value); setConfirmedPage(1); }} size="sm" maxW="380px" />
           <Button size="sm" onClick={() => { setConfirmedQuery(''); setConfirmedPage(1); }}>Clear</Button>
+          <Button size="sm" variant="ghost" onClick={() => {
+            if (!selectedConfirmed.size) return toast({ title: 'No selection', status: 'info' });
+            bulkExportConfirmedSelected();
+          }}>Export Selected ({selectedConfirmed.size})</Button>
         </HStack>
       </Flex>
 
@@ -1131,6 +1449,17 @@ export default function ConfirmExit() {
         <Table className="fancy-table" size="sm">
           <Thead>
             <Tr>
+              <Th><Checkbox isChecked={selectedConfirmed.size > 0 && selectedConfirmed.size === paginatedConfirmed.length} onChange={(e) => {
+                if (e.target.checked) {
+                  const ids = new Set(selectedConfirmed);
+                  paginatedConfirmed.forEach(r => ids.add(r.id ?? r.ticket_id));
+                  setSelectedConfirmed(ids);
+                } else {
+                  const ids = new Set(selectedConfirmed);
+                  paginatedConfirmed.forEach(r => ids.delete(r.id ?? r.ticket_id));
+                  setSelectedConfirmed(ids);
+                }
+              }} aria-label="Select all confirmed visible" /></Th>
               <Th>Ticket</Th>
               <Th>SAD</Th>
               <Th>Truck</Th>
@@ -1140,14 +1469,24 @@ export default function ConfirmExit() {
               <Th>Driver</Th>
               <Th>Exit At</Th>
               <Th>Weighed</Th>
-              <Th>View</Th>
+              <Th>Actions</Th>
             </Tr>
           </Thead>
           <Tbody>
             {paginatedConfirmed.map((ticket) => {
               const { gross, tare, net } = computeWeights(ticket);
+              const idKey = ticket.id ?? ticket.ticket_id;
+              const checked = selectedConfirmed.has(idKey);
               return (
-                <Tr key={ticket.ticket_id || ticket.id}>
+                <Tr key={idKey}>
+                  <Td><Checkbox isChecked={checked} onChange={(e) => {
+                    setSelectedConfirmed((s) => {
+                      const next = new Set(s);
+                      if (next.has(idKey)) next.delete(idKey);
+                      else next.add(idKey);
+                      return next;
+                    });
+                  }} aria-label={`Select confirmed ${ticket.ticket_no}`} /></Td>
                   <Td data-label="Ticket">{ticket.ticket_no ?? '-'}</Td>
                   <Td data-label="SAD">{ticket.sad_no ?? '—'}</Td>
                   <Td data-label="Truck">{ticket.vehicle_number ?? ticket.gnsw_truck_no ?? '—'}</Td>
@@ -1157,7 +1496,34 @@ export default function ConfirmExit() {
                   <Td data-label="Driver">{ticket.driver ?? '—'}</Td>
                   <Td data-label="Exit At">{ticket.created_at ? formatDate(ticket.created_at) : '—'}</Td>
                   <Td data-label="Weighed">{ticket.weighed_at ? formatDate(ticket.weighed_at) : '—'}</Td>
-                  <Td data-label="View"><IconButton aria-label="View File" icon={<FaFilePdf color="red" />} size="sm" variant="outline" onClick={() => openActionModal(ticket, 'view')} /></Td>
+                  <Td data-label="Actions">
+                    <Menu>
+                      <MenuButton as={IconButton} icon={<FaBars />} size="sm" aria-label="Actions" />
+                      <MenuList>
+                        <MenuItem icon={<FaFilePdf />} onClick={() => { setSelectedTicket(ticket); setActionType('view'); onOpen(); }}>View PDF</MenuItem>
+                        <MenuItem icon={<FaUser />} onClick={async () => {
+                          const by = ticket.created_by;
+                          if (!by) return toast({ title: 'No creator info', description: 'This record has no created_by', status: 'info' });
+                          try {
+                            if (!usersMap[by]) {
+                              const { data: u } = await supabase.from('users').select('id,username,email').eq('id', by).maybeSingle();
+                              if (u) setUsersMap((p) => ({ ...p, [u.id]: u }));
+                            }
+                            const info = usersMap[by] ? (usersMap[by].username || usersMap[by].email) : 'Unknown';
+                            toast({ title: `Exited by: ${info}`, status: 'info', duration: 3500 });
+                          } catch (e) {
+                            console.warn('user lookup failed', e);
+                            toast({ title: 'Lookup failed', status: 'error' });
+                          }
+                        }}>Show Exited By</MenuItem>
+                        <MenuItem icon={<FaEllipsisV />} onClick={() => { setSelectedTicket(ticket); setActionType('view'); onOpen(); }}>More Info</MenuItem>
+                        <MenuItem icon={<FaDownload />} onClick={() => {
+                          if (ticket.file_url) window.open(ticket.file_url, '_blank');
+                          else toast({ title: 'No file', status: 'info' });
+                        }}>Open Attachment</MenuItem>
+                      </MenuList>
+                    </Menu>
+                  </Td>
                 </Tr>
               );
             })}
@@ -1193,6 +1559,7 @@ export default function ConfirmExit() {
         aria-label="Orb"
         onClick={openOrb}
         title="Magic Orb — bulk actions and voice goodies"
+        className="orb-cta"
       >
         <FaMagic color="white" size={22} />
       </div>
@@ -1204,18 +1571,25 @@ export default function ConfirmExit() {
           <ModalHeader>Crystal Orb — Bulk Actions</ModalHeader>
           <ModalCloseButton />
           <ModalBody>
-            <Text mb={3} color="gray.600">Holographic bulk actions. Use carefully — marking visible tickets as Exited will update DB status.</Text>
+            <Text mb={3} color="gray.600">Holographic bulk actions. Use carefully — marking visible tickets as Exited will update DB status and create outgate rows.</Text>
             <Divider mb={3} />
             <VStack spacing={3} align="stretch">
               <Box>
                 <Text fontWeight="semibold">Bulk Confirm Visible</Text>
-                <Text fontSize="sm" color="gray.500">Marks currently visible pending tickets (current page) as <em>Exited</em> in the tickets table. This is a convenience helper; normal insert flows are separate.</Text>
+                <Text fontSize="sm" color="gray.500">Marks currently visible pending tickets (current page) as <em>Exited</em>.</Text>
               </Box>
 
               <HStack>
                 <Button colorScheme="teal" onClick={handleOrbConfirmAll}>Confirm Visible ({paginatedResults.length})</Button>
                 <Button variant="outline" onClick={() => { toast({ title: 'Orb: Demo action', description: 'This is a safe demo action.', status: 'info' }); }}>Demo</Button>
-                <Button onClick={() => { launchConfetti(120); toast({ title: 'Stardust!', status: 'success' }); }}>Stardust</Button>
+                <Button onClick={async () => {
+                  try {
+                    const mod = await import('canvas-confetti').catch(() => null);
+                    const confetti = mod?.default ?? window.confetti;
+                    if (confetti) confetti({ particleCount: 120, spread: 160, origin: { y: 0.6 } });
+                  } catch (e) {}
+                  toast({ title: 'Stardust!', status: 'success' });
+                }}>Stardust</Button>
               </HStack>
             </VStack>
           </ModalBody>
@@ -1227,5 +1601,3 @@ export default function ConfirmExit() {
     </Box>
   );
 }
-
-/* Small helpers are defined inline inside the component to avoid duplicate globals */
