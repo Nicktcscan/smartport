@@ -153,6 +153,7 @@ export default function OutgateReports() {
   const [sadDateTo, setSadDateTo] = useState('');
   const [sadTimeFrom, setSadTimeFrom] = useState('');
   const [sadTimeTo, setSadTimeTo] = useState('');
+  const [sadTruckQuery, setSadTruckQuery] = useState(''); // <-- new: truck filter
   const [sadLoading, setSadLoading] = useState(false);
   const [sadMeta, setSadMeta] = useState({});
 
@@ -203,6 +204,7 @@ export default function OutgateReports() {
     const hasDateRange = !!(sadDateFrom || sadDateTo);
     const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
     const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
+    const truckFilter = String(sadTruckQuery || '').trim().toLowerCase();
 
     const filtered = originalArr.filter((t) => {
       const dRaw = t.data.weighed_at; // filter by weighed_at
@@ -229,6 +231,12 @@ export default function OutgateReports() {
 
       if (sadSortStatus) {
         if ((t.data.status || 'Exited') !== sadSortStatus) return false;
+      }
+
+      // NEW: truck filter (partial match, case-insensitive) applied here
+      if (truckFilter) {
+        const truckVal = String(t.data.gnswTruckNo || '').toLowerCase();
+        if (!truckVal.includes(truckFilter)) return false;
       }
 
       return true;
@@ -279,10 +287,13 @@ export default function OutgateReports() {
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
+      // reset range & truck filter inputs (optionally we could keep previous)
       setSadDateFrom('');
       setSadDateTo('');
       setSadTimeFrom('');
       setSadTimeTo('');
+      setSadTruckQuery('');
+
       setSadMeta({
         sad: sadQuery.trim(),
         dateRangeText:
@@ -314,6 +325,7 @@ export default function OutgateReports() {
     setSadDateTo('');
     setSadTimeFrom('');
     setSadTimeTo('');
+    setSadTruckQuery('');
     setSadTickets(computeFilteredFromOriginal(sadOriginal));
     setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
@@ -428,6 +440,7 @@ export default function OutgateReports() {
 
       const mapped = mapOutgateRow(row);
 
+      // always update original set (dedupe downstream)
       setSadOriginal((prev) => {
         const filteredPrev = prev.filter((p) => {
           const a = (p?.data?.ticketNo ?? '').toString().trim();
@@ -444,6 +457,7 @@ export default function OutgateReports() {
         return dedupeByTicket(next);
       });
 
+      // Determine whether to include in the filtered visible list (apply same filters: date/time/status/truck)
       setSadTickets((prev) => {
         const passes = (() => {
           const dRaw = mapped.data.weighed_at;
@@ -471,6 +485,13 @@ export default function OutgateReports() {
           }
 
           if (sadSortStatus && (mapped.data.status || 'Exited') !== sadSortStatus) return false;
+
+          // NEW: truck filter check for incoming rows
+          const truckFilter = String(sadTruckQuery || '').trim().toLowerCase();
+          if (truckFilter) {
+            const truckVal = String(mapped.data.gnswTruckNo || '').toLowerCase();
+            if (!truckVal.includes(truckFilter)) return false;
+          }
 
           return true;
         })();
@@ -569,7 +590,7 @@ export default function OutgateReports() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sadQuery, sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortStatus]);
+  }, [sadQuery, sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortStatus, sadTruckQuery]);
 
   const resetSearch = () => {
     setSadQuery('');
@@ -579,6 +600,7 @@ export default function OutgateReports() {
     setSadDateTo('');
     setSadTimeFrom('');
     setSadTimeTo('');
+    setSadTruckQuery('');
     setSadMeta({});
   };
 
@@ -587,7 +609,7 @@ export default function OutgateReports() {
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Box>
           <Text fontSize="2xl" fontWeight="bold">Outgate / SAD Report</Text>
-          <Text color="gray.500">Search outgate (confirmed exits) by SAD → filter by date/time → export or print.</Text>
+          <Text color="gray.500">Search outgate (confirmed exits) by SAD → filter by date/time/truck → export or print.</Text>
         </Box>
 
         <HStack spacing={4}>
@@ -627,7 +649,8 @@ export default function OutgateReports() {
 
         {sadOriginal.length > 0 && (
           <Box mt={2}>
-            <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
+            {/* updated grid: add Truck No as a filter */}
+            <SimpleGrid columns={{ base: 1, md: 5 }} spacing={3}>
               <Box>
                 <FormLabel>Date From</FormLabel>
                 <Input type="date" value={sadDateFrom} onChange={(e) => setSadDateFrom(e.target.value)} />
@@ -643,6 +666,14 @@ export default function OutgateReports() {
               <Box>
                 <FormLabel>Time To</FormLabel>
                 <Input type="time" value={sadTimeTo} onChange={(e) => setSadTimeTo(e.target.value)} />
+              </Box>
+              <Box>
+                <FormLabel>Truck No (filter)</FormLabel>
+                <Input
+                  placeholder="Partial truck number (e.g. BJLO068Z)"
+                  value={sadTruckQuery}
+                  onChange={(e) => setSadTruckQuery(e.target.value)}
+                />
               </Box>
             </SimpleGrid>
 
@@ -678,7 +709,7 @@ export default function OutgateReports() {
               </HStack>
             </Flex>
 
-            <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time to narrow results before exporting. New outgate rows for the current SAD appear automatically below.</Text>
+            <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time and truck number to narrow results before exporting. New outgate rows for the current SAD appear automatically below.</Text>
           </Box>
         )}
       </Box>
