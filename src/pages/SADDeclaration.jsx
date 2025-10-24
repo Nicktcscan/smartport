@@ -994,7 +994,7 @@ export default function SADDeclaration() {
                       <Td data-label="Regime"><Text>{s.regime || '—'}</Text></Td>
                       <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
-                      <Td data-label="No. of Transacts" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
+                      <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Status">
                         <VStack align="start" spacing={1}>
                           <HStack>

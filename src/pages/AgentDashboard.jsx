@@ -1,4 +1,4 @@
-// src/pages/OutgateReports.jsx
+// src/pages/AgentDashboard.jsx
 import React, { useState, useMemo, useEffect } from 'react';
 import {
   Box,
@@ -21,6 +21,8 @@ import {
   StatLabel,
   StatNumber,
   StatHelpText,
+  VStack,
+  Spacer,
 } from '@chakra-ui/react';
 import { SearchIcon, DownloadIcon } from '@chakra-ui/icons';
 import { FaFilePdf, FaShareAlt, FaEnvelope } from 'react-icons/fa';
@@ -156,6 +158,10 @@ export default function OutgateReports() {
   const [sadLoading, setSadLoading] = useState(false);
   const [sadMeta, setSadMeta] = useState({});
 
+  // truck filter (new)
+  const [truckFilter, setTruckFilter] = useState(''); // exact pick from list
+  const [truckQuery, setTruckQuery] = useState(''); // free-text partial filter
+
   // status/sort controls (kept for UI compatibility)
   const [sadSortStatus, setSadSortStatus] = useState(''); // '', 'Pending', 'Exited'
   const [sadSortOrder, setSadSortOrder] = useState('none');
@@ -198,11 +204,15 @@ export default function OutgateReports() {
   // Filters are applied against the WEIGHED_AT (row.date) as before (so date/time range filters control weighed_at)
   const computeFilteredFromOriginal = (originalArr) => {
     if (!originalArr) return [];
+
     const tfMinutes = parseTimeToMinutes(sadTimeFrom);
     const ttMinutes = parseTimeToMinutes(sadTimeTo);
     const hasDateRange = !!(sadDateFrom || sadDateTo);
     const startDate = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : null;
     const endDate = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : null;
+
+    const qLower = (truckQuery || '').trim().toLowerCase();
+    const truckFilterLower = (truckFilter || '').trim().toLowerCase();
 
     const filtered = originalArr.filter((t) => {
       const dRaw = t.data.weighed_at; // filter by weighed_at
@@ -229,6 +239,16 @@ export default function OutgateReports() {
 
       if (sadSortStatus) {
         if ((t.data.status || 'Exited') !== sadSortStatus) return false;
+      }
+
+      // truck filter logic:
+      const truckVal = (t.data.gnswTruckNo || '').toString().toLowerCase();
+      if (truckFilterLower) {
+        // exact selected pick must match (or contain)
+        if (!truckVal.includes(truckFilterLower)) return false;
+      }
+      if (qLower) {
+        if (!truckVal.includes(qLower)) return false;
       }
 
       return true;
@@ -284,11 +304,12 @@ export default function OutgateReports() {
       const uniqueMapped = dedupeByTicket(mapped);
 
       setSadOriginal(uniqueMapped);
-      // compute filtered view (filters apply to weighed_at)
+
+      // compute filtered view (filters apply to weighed_at, also applies truck filters if set)
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
-      // reset range controls
+      // reset range controls (we keep truck filters so user can further narrow)
       setSadDateFrom('');
       setSadDateTo('');
       setSadTimeFrom('');
@@ -310,6 +331,11 @@ export default function OutgateReports() {
         console.debug('sad fetch failed', e);
       }
 
+      const declared = sadRow ? Number(sadRow.declared_weight ?? 0) : null;
+      const discharged = Number(totalNet || 0);
+      const discrepancy = (declared !== null && declared >= 0) ? Math.max(0, discharged - declared) : 0;
+      const discrepancyPercent = (declared && declared > 0) ? (discrepancy / declared) * 100 : null;
+
       setSadMeta({
         sad: sadQuery.trim(),
         dateRangeText:
@@ -318,10 +344,12 @@ export default function OutgateReports() {
             : 'All',
         startTimeLabel: '',
         endTimeLabel: '',
-        declaredWeight: sadRow ? Number(sadRow.declared_weight ?? 0) : null,
-        dischargedWeight: Number(totalNet || 0),
+        declaredWeight: declared,
+        dischargedWeight: discharged,
         sadStatus: sadRow ? (sadRow.status ?? 'In Progress') : 'Unknown',
         sadExists: !!sadRow,
+        discrepancy,
+        discrepancyPercent,
       });
 
       if ((uniqueMapped || []).length === 0) {
@@ -346,9 +374,11 @@ export default function OutgateReports() {
     setSadDateTo('');
     setSadTimeFrom('');
     setSadTimeTo('');
+    setTruckFilter('');
+    setTruckQuery('');
     const newFiltered = computeFilteredFromOriginal(sadOriginal);
     setSadTickets(newFiltered);
-    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '', dischargedWeight: computeTotalNetFromArray(newFiltered) }));
+    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '', dischargedWeight: computeTotalNetFromArray(newFiltered), discrepancy: 0, discrepancyPercent: null }));
   };
 
   const filteredSadTickets = useMemo(() => {
@@ -443,6 +473,16 @@ export default function OutgateReports() {
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
   };
 
+  // compute unique truck options from sadOriginal for the select dropdown
+  const truckOptions = useMemo(() => {
+    const set = new Set();
+    (sadOriginal || []).forEach((r) => {
+      const v = (r?.data?.gnswTruckNo || '').toString().trim();
+      if (v) set.add(v);
+    });
+    return Array.from(set).sort();
+  }, [sadOriginal]);
+
   // Real-time subscription: when a SAD search is active, subscribe to outgate inserts & updates
   useEffect(() => {
     if (!sadQuery || !sadQuery.trim()) return;
@@ -461,14 +501,9 @@ export default function OutgateReports() {
 
       const mapped = mapOutgateRow(row);
 
+      // Insert into sadOriginal (newest-first), dedupe and recompute filtered results centrally
       setSadOriginal((prev) => {
-        const filteredPrev = prev.filter((p) => {
-          const a = (p?.data?.ticketNo ?? '').toString().trim();
-          const b = (mapped?.data?.ticketNo ?? '').toString().trim();
-          if (!a && !b) return p.ticketId !== mapped.ticketId;
-          return a !== b;
-        });
-        const next = [mapped, ...filteredPrev];
+        const next = [mapped, ...prev];
         next.sort((a, b) => {
           const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
           const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
@@ -479,66 +514,18 @@ export default function OutgateReports() {
         // update discharged weight from the full original list
         setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(deduped) }));
 
-        return deduped;
-      });
-
-      setSadTickets((prev) => {
-        const passes = (() => {
-          const dRaw = mapped.data.weighed_at;
-          const d = dRaw ? new Date(dRaw) : null;
-          if (!d) return false;
-
-          if (sadDateFrom || sadDateTo) {
-            const start = sadDateFrom ? new Date(sadDateFrom + 'T00:00:00') : new Date(-8640000000000000);
-            const end = sadDateTo ? new Date(sadDateTo + 'T23:59:59.999') : new Date(8640000000000000000);
-
-            if (sadTimeFrom) {
-              const mins = parseTimeToMinutes(sadTimeFrom);
-              if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-            }
-            if (sadTimeTo) {
-              const mins = parseTimeToMinutes(sadTimeTo);
-              if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
-            }
-            if (d < start || d > end) return false;
-          } else if (sadTimeFrom || sadTimeTo) {
-            const mins = d.getHours() * 60 + d.getMinutes();
-            const from = sadTimeFrom ? parseTimeToMinutes(sadTimeFrom) : 0;
-            const to = sadTimeTo ? parseTimeToMinutes(sadTimeTo) : 24 * 60 - 1;
-            if (mins < from || mins > to) return false;
-          }
-
-          if (sadSortStatus && (mapped.data.status || 'Exited') !== sadSortStatus) return false;
-
-          return true;
-        })();
-
-        if (!passes) return prev;
-
-        const next = [mapped, ...prev.filter((p) => {
-          const a = (p?.data?.ticketNo ?? '').toString().trim();
-          const b = (mapped?.data?.ticketNo ?? '').toString().trim();
-          if (!a && !b) return p.ticketId !== mapped.ticketId;
-          return a !== b;
-        })];
-
-        next.sort((a, b) => {
-          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
-          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
-          return db - da;
-        });
-
-        const deduped = dedupeByTicket(next);
-
-        // update discharged weight to reflect filtered list
-        setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(deduped) }));
+        // recompute filtered tickets using the centralized filter function (which includes truck filters)
+        const filtered = computeFilteredFromOriginal(deduped);
+        setSadTickets(filtered);
 
         return deduped;
       });
 
+      // update some meta fields
       setSadMeta((m) => ({
         ...m,
         dateRangeText: m.dateRangeText || (mapped.data.weighed_at ? new Date(mapped.data.weighed_at).toLocaleDateString() : m.dateRangeText),
+        dischargedWeight: computeTotalNetFromArray([mapped, ...sadOriginal]),
       }));
     };
 
@@ -612,7 +599,7 @@ export default function OutgateReports() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sadQuery, sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortStatus]);
+  }, [sadQuery, sadDateFrom, sadDateTo, sadTimeFrom, sadTimeTo, sadSortStatus, truckFilter, truckQuery]);
 
   const resetSearch = () => {
     setSadQuery('');
@@ -623,27 +610,28 @@ export default function OutgateReports() {
     setSadTimeFrom('');
     setSadTimeTo('');
     setSadMeta({});
+    setTruckFilter('');
+    setTruckQuery('');
   };
 
   return (
     <Box p={{ base: 4, md: 8 }}>
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Box>
-          <Text fontSize="2xl" fontWeight="bold">Outgate / SAD Report</Text>
-          <Text color="gray.500">Search outgate (confirmed exits) by SAD → filter by date/time → export or print.</Text>
+          <Text fontSize="2xl" fontWeight="bold">SAD Report - Agent Dashboard</Text>
+          <Text color="gray.500">Search outgate (confirmed exits) by SAD → filter by date/time/truck → export or print.</Text>
         </Box>
 
         <HStack spacing={4}>
-          <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <Stat bg="purple.50" p={3} borderRadius="md" boxShadow="sm">
             <StatLabel>Total Transactions</StatLabel>
             <StatNumber>{filteredSadTickets.length}</StatNumber>
             <StatHelpText>{sadOriginal.length > 0 ? `of ${sadOriginal.length} returned` : ''}</StatHelpText>
           </Stat>
 
-          <Stat bg="white" p={3} borderRadius="md" boxShadow="sm">
+          <Stat bg="cyan.50" p={3} borderRadius="md" boxShadow="sm">
             <StatLabel>Cumulative Net (kg)</StatLabel>
             <StatNumber>{Number(cumulativeNet || 0).toLocaleString()}</StatNumber>
-            <StatHelpText>From current filtered results</StatHelpText>
           </Stat>
         </HStack>
       </Flex>
@@ -670,6 +658,21 @@ export default function OutgateReports() {
 
         {sadOriginal.length > 0 && (
           <Box mt={2}>
+            {/* Truck filter - appears after SAD search */}
+            <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3} mb={3}>
+              <Box>
+                <FormLabel>Search / Filter by Truck No</FormLabel>
+                <Input placeholder="e.g. BJLO068Z or part of plate" size="sm" value={truckQuery} onChange={(e) => setTruckQuery(e.target.value)} />
+              </Box>
+              <Box>
+                <FormLabel>Pick Detected Truck</FormLabel>
+                <Select size="sm" value={truckFilter} onChange={(e) => setTruckFilter(e.target.value)}>
+                  <option value="">All Trucks</option>
+                  {truckOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+                </Select>
+              </Box>
+            </SimpleGrid>
+
             <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
               <Box>
                 <FormLabel>Date From</FormLabel>
@@ -689,16 +692,16 @@ export default function OutgateReports() {
               </Box>
             </SimpleGrid>
 
-            {/* SAD detail stats cards */}
+            {/* SAD detail stats cards - different bg colors for attractiveness */}
             {sadMeta?.sad && (
-              <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mt={3} mb={3}>
-                <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mt={3} mb={3}>
+                <Stat bg="blue.50" px={4} py={3} borderRadius="md" boxShadow="sm">
                   <StatLabel>Declared Weight</StatLabel>
                   <StatNumber>{formatWeight(sadMeta.declaredWeight)}</StatNumber>
                   <StatHelpText>From SAD Declaration</StatHelpText>
                 </Stat>
 
-                <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                <Stat bg="green.50" px={4} py={3} borderRadius="md" boxShadow="sm">
                   <StatLabel>Discharged Weight</StatLabel>
                   <StatNumber>{formatWeight(sadMeta.dischargedWeight != null ? sadMeta.dischargedWeight : computeTotalNetFromArray(sadOriginal))}</StatNumber>
                   <StatHelpText>Sum of nets (current results)</StatHelpText>
@@ -709,6 +712,24 @@ export default function OutgateReports() {
                   <StatNumber>{sadMeta.sadStatus || 'Unknown'}</StatNumber>
                   <StatHelpText>{sadMeta.sadExists ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
                 </Stat>
+
+                {/* Discrepancy card: appears only when dischargedWeight > declaredWeight */}
+                {(sadMeta.declaredWeight != null && sadMeta.dischargedWeight > sadMeta.declaredWeight) ? (
+                  <Stat bg="red.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                    <StatLabel>Discrepancy</StatLabel>
+                    <StatNumber>{formatWeight(sadMeta.dischargedWeight - sadMeta.declaredWeight)} KG</StatNumber>
+                    <StatHelpText>
+                      {sadMeta.discrepancyPercent != null ? `${sadMeta.discrepancyPercent.toFixed(1)}% over declared` : 'Over declared weight'}
+                    </StatHelpText>
+                  </Stat>
+                ) : (
+                  // Show a calming card when no discrepancy
+                  <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
+                    <StatLabel>Discrepancy</StatLabel>
+                    <StatNumber>{sadMeta.declaredWeight != null ? `${formatWeight(Math.max(0, (sadMeta.dischargedWeight || 0) - (sadMeta.declaredWeight || 0)))} KG` : '—'}</StatNumber>
+                    <StatHelpText>{sadMeta.declaredWeight != null ? 'Within declared limits' : 'No declared weight'}</StatHelpText>
+                  </Stat>
+                )}
               </SimpleGrid>
             )}
 
@@ -744,14 +765,19 @@ export default function OutgateReports() {
               </HStack>
             </Flex>
 
-            <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time to narrow results before exporting. New outgate rows for the current SAD appear automatically below.</Text>
+            <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time and truck filters to narrow results before exporting. New outgate rows for the current SAD appear automatically below.</Text>
           </Box>
         )}
       </Box>
 
       {filteredSadTickets.length > 0 && (
         <Box mb={6} bg="white" p={4} borderRadius="md" boxShadow="sm">
-          <Text fontWeight="semibold" mb={3}>SAD Results — {sadMeta.sad} ({filteredSadTickets.length} records)</Text>
+          <Flex align="center" mb={3}>
+            <Text fontWeight="semibold">SAD Results — {sadMeta.sad} ({filteredSadTickets.length} records)</Text>
+            <Spacer />
+            <Text fontSize="sm" color="gray.500">Truck filter: {truckFilter || truckQuery || 'None'}</Text>
+          </Flex>
+
           <Table variant="striped" size="sm">
             <Thead>
               <Tr>
