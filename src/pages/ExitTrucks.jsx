@@ -953,8 +953,6 @@ export default function ExitTrucks() {
                         navigator.clipboard?.writeText(text);
                         toast({ title: 'Copied', status: 'success' });
                       }}>Copy</Button>
-                      <Button size="sm" variant="ghost" leftIcon={<FaExternalLinkAlt />} onClick={() => window.open(`/tickets/${selectedTicket.ticketId}`, '_blank')}>Open Ticket</Button>
-                      <Button size="sm" colorScheme="green" onClick={handleConfirmExit}>Confirm Exit</Button>
                     </HStack>
                   </Box>
                 </Stack>
@@ -1012,15 +1010,9 @@ export default function ExitTrucks() {
             </div>
 
             <VStack spacing={4} mt={4} align="stretch">
-              <Box>
-                <Text fontWeight="semibold">Confirm Visible (Demo)</Text>
-                <Text fontSize="sm" color="gray.500">Pretend-mark the currently visible page items as Exited (demo only). To implement true bulk confirm, perform batch inserts to <code>outgate</code> and update <code>tickets</code> table accordingly.</Text>
-              </Box>
+              
 
-              <HStack>
-                <Button colorScheme="teal" onClick={handleOrbConfirmVisible}>Confirm Visible ({pageItems.length})</Button>
-                <Button variant="outline" onClick={() => { setSelectedSet(new Set()); toast({ title: 'Selection cleared', status: 'info' }); }}>Clear Selection</Button>
-              </HStack>
+              
             </VStack>
           </ModalBody>
           <ModalFooter>

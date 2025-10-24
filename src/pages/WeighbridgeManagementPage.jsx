@@ -1359,5 +1359,4 @@ return (
   </Box>
 );
 }
-
 export default WeighbridgeManagementPage;
