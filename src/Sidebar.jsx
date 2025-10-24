@@ -46,6 +46,7 @@ const adminNavItems = [
 // Weighbridge menu
 const weighbridgeNavItems = [
   { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
   { path: '/weighbridge', label: 'Upload Ticket', icon: FaUpload },
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
   { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
