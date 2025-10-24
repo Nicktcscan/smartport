@@ -36,6 +36,7 @@ import AgentDashboard from './pages/AgentDashboard';
 
 // NEW: SAD Declaration page (ensure this file exists)
 import SADDeclaration from './pages/SADDeclaration';
+import Settings from './pages/Settings';
 
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user } = useAuth();
@@ -265,6 +266,20 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <SADDeclaration />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+              {/* NEW: Settings route */}
+            <Route
+              path="/settings"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Settings />
                     </Box>
                   </Layout>
                 </ProtectedRoute>
