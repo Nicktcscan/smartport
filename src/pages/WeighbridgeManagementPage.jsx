@@ -1375,73 +1375,126 @@ function WeighbridgeManagementPage() {
       <Box mt={8}>
         <Heading size="md" mb={3}>Processed Tickets</Heading>
 
-        {loadingTickets ? (
-          <Text>Loading tickets...</Text>
-        ) : displayedTickets.length === 0 ? (
-          <Text>No tickets found.</Text>
-        ) : (
-          <>
-            {/* Always render table view (list form) */}
-            <Table variant="striped" colorScheme="teal" size="sm" bg={cardBg}>
-              <Thead>
-                <Tr>
-                  <Th>Ticket No</Th><Th>Truck No</Th><Th>SAD No</Th><Th>Gross (KG)</Th><Th>Tare (KG)</Th><Th>Net (KG)</Th><Th>Actions</Th>
-                </Tr>
-              </Thead>
-              <Tbody>
-                {displayedTickets.map((t) => {
-                  const computed = computeWeightsFromObj({ gross: t.gross, tare: t.tare, net: t.net });
-                  const rowId = t.id ?? t.ticket_id;
-                  const isEditing = editingRowId === rowId;
-                  return (
-                    <Tr key={rowId}>
-                      <Td>
-                        {isEditing ? <Input size="sm" value={editFormData.ticket_no || ""} onChange={(e) => setEditFormData(p => ({ ...p, ticket_no: e.target.value }))} width="120px" /> : <Text color={textColor}>{t.ticket_no ?? "-"}</Text>}
-                      </Td>
-                      <Td>
-                        {isEditing ? <Input size="sm" value={editFormData.gnsw_truck_no || ""} onChange={(e) => setEditFormData(p => ({ ...p, gnsw_truck_no: e.target.value }))} width="140px" /> : <Text color={textColor}>{t.gnsw_truck_no ?? "-"}</Text>}
-                      </Td>
-                      <Td>{isEditing ? <Input size="sm" value={editFormData.sad_no || ""} onChange={(e) => setEditFormData(p => ({ ...p, sad_no: e.target.value }))} width="100px" /> : <Text color={textColor}>{t.sad_no ?? "-"}</Text>}</Td>
-                      <Td>{isEditing ? <Input size="sm" value={editFormData.gross || ""} onChange={(e) => setEditFormData(p => ({ ...p, gross: e.target.value }))} width="110px" /> : <Text color={textColor}>{computed.grossDisplay || "—"}</Text>}</Td>
-                      <Td>{isEditing ? <Input size="sm" value={editFormData.tare || ""} onChange={(e) => setEditFormData(p => ({ ...p, tare: e.target.value }))} width="110px" /> : <Text color={textColor}>{computed.tareDisplay || "—"}</Text>}</Td>
-                      <Td>{isEditing ? <Input size="sm" value={editFormData.net || ""} onChange={(e) => setEditFormData(p => ({ ...p, net: e.target.value }))} width="110px" /> : <Text color={textColor}>{computed.netDisplay || "—"}</Text>}</Td>
-                      <Td>
-                        {isEditing ? (
-                          <HStack spacing={2}>
-                            <IconButton size="sm" colorScheme="green" icon={<CheckIcon />} aria-label="Save row" onClick={() => saveEditingRow(t)} />
-                            <IconButton size="sm" colorScheme="red" icon={<CloseIcon />} aria-label="Cancel" onClick={cancelEditingRow} />
-                          </HStack>
-                        ) : (
-                          <HStack spacing={2}>
-                            <IconButton size="sm" icon={<EditIcon />} aria-label="Edit row" onClick={() => startEditingRow(t)} />
-                            <IconButton icon={<ViewIcon />} aria-label={`View ${t.ticket_no}`} onClick={() => handleView(t)} size="sm" colorScheme="teal" />
-                          </HStack>
-                        )}
-                      </Td>
+        {loadingTickets ? <Text>Loading tickets...</Text> :
+          displayedTickets.length === 0 ? <Text>No tickets found.</Text> : (
+            <>
+              {/* Mobile cards */}
+              {isMobile ? (
+                <VStack2 spacing={3} align="stretch">
+                  {displayedTickets.map((t) => {
+                    const computed = computeWeightsFromObj({ gross: t.gross, tare: t.tare, net: t.net });
+                    return (
+                      <motion.div key={t.id ?? t.ticket_id} whileHover={{ y: -6 }} style={{ borderRadius: 12 }}>
+                        <Box p={3} borderRadius="md" border={`1px solid ${neonBorder}`} bg={panelBg}>
+                          <Flex align="center">
+                            <VStack2 align="start" spacing={0}>
+                              <Text fontWeight="bold" color="teal.200">{t.ticket_no ?? "-"}</Text>
+                              <Text fontSize="sm" color="gray.300">{t.gnsw_truck_no ?? "-"}</Text>
+                            </VStack2>
+                            <Spacer />
+                            <VStack2 align="end">
+                              <Text fontSize="sm" color="gray.200">{computed.grossDisplay || '—'}</Text>
+                              <Text fontSize="xs" color="gray.400">Gross</Text>
+                            </VStack2>
+                          </Flex>
+                          <Flex mt={3} gap={2} align="center">
+                            <Button size="sm" onClick={() => startEditingRow(t)}>Edit</Button>
+                            <Button size="sm" colorScheme="teal" onClick={() => handleView(t)}>View</Button>
+                          </Flex>
+                        </Box>
+                      </motion.div>
+                    );
+                  })}
+                </VStack2>
+              ) : isWide3D ? (
+                <Grid templateColumns="repeat(auto-fit, minmax(260px, 1fr))" gap={4}>
+                  {displayedTickets.map((t) => {
+                    const computed = computeWeightsFromObj({ gross: t.gross, tare: t.tare, net: t.net });
+                    return (
+                      <motion.div key={t.id ?? t.ticket_id} whileHover={{ rotateY: 8, scale: 1.02 }} style={{ perspective: 1200 }}>
+                        <Box p={4} borderRadius="lg" bg={panelBg} border={`1px solid ${neonBorder}`} boxShadow="lg">
+                          <Flex align="center">
+                            <VStack2 align="start">
+                              <Text fontWeight="bold" fontSize="lg" color="teal.200">{t.ticket_no ?? "-"}</Text>
+                              <Text fontSize="sm" color="gray.300">{t.gnsw_truck_no ?? "-"}</Text>
+                            </VStack2>
+                            <Spacer />
+                            <VStack2 align="end">
+                              <Text fontWeight="semibold">{computed.netDisplay || "—"}</Text>
+                              <Text fontSize="xs" color="gray.400">Net (kg)</Text>
+                            </VStack2>
+                          </Flex>
+                          <Flex mt={3} gap={2}>
+                            <Button size="sm" onClick={() => startEditingRow(t)}>Edit</Button>
+                            <Button size="sm" colorScheme="teal" onClick={() => handleView(t)}>View</Button>
+                          </Flex>
+                        </Box>
+                      </motion.div>
+                    );
+                  })}
+                </Grid>
+              ) : (
+                <Table variant="striped" colorScheme="teal" size="sm" bg={cardBg}>
+                  <Thead>
+                    <Tr>
+                      <Th>Ticket No</Th><Th>Truck No</Th><Th>SAD No</Th><Th>Gross (KG)</Th><Th>Tare (KG)</Th><Th>Net (KG)</Th><Th>Actions</Th>
                     </Tr>
-                  );
-                })}
-              </Tbody>
-            </Table>
+                  </Thead>
+                  <Tbody>
+                    {displayedTickets.map((t) => {
+                      const computed = computeWeightsFromObj({ gross: t.gross, tare: t.tare, net: t.net });
+                      const rowId = t.id ?? t.ticket_id;
+                      const isEditing = editingRowId === rowId;
+                      return (
+                        <Tr key={rowId}>
+                          <Td>
+                            {isEditing ? <Input size="sm" value={editFormData.ticket_no || ""} onChange={(e) => setEditFormData(p => ({ ...p, ticket_no: e.target.value }))} width="120px" /> : <Text color={textColor}>{t.ticket_no ?? "-"}</Text>}
+                          </Td>
+                          <Td>
+                            {isEditing ? <Input size="sm" value={editFormData.gnsw_truck_no || ""} onChange={(e) => setEditFormData(p => ({ ...p, gnsw_truck_no: e.target.value }))} width="140px" /> : <Text color={textColor}>{t.gnsw_truck_no ?? "-"}</Text>}
+                          </Td>
+                          <Td>{isEditing ? <Input size="sm" value={editFormData.sad_no || ""} onChange={(e) => setEditFormData(p => ({ ...p, sad_no: e.target.value }))} width="100px" /> : <Text color={textColor}>{t.sad_no ?? "-"}</Text>}</Td>
+                          <Td>{isEditing ? <Input size="sm" value={editFormData.gross || ""} onChange={(e) => setEditFormData(p => ({ ...p, gross: e.target.value }))} width="110px" /> : <Text color={textColor}>{computed.grossDisplay || "—"}</Text>}</Td>
+                          <Td>{isEditing ? <Input size="sm" value={editFormData.tare || ""} onChange={(e) => setEditFormData(p => ({ ...p, tare: e.target.value }))} width="110px" /> : <Text color={textColor}>{computed.tareDisplay || "—"}</Text>}</Td>
+                          <Td>{isEditing ? <Input size="sm" value={editFormData.net || ""} onChange={(e) => setEditFormData(p => ({ ...p, net: e.target.value }))} width="110px" /> : <Text color={textColor}>{computed.netDisplay || "—"}</Text>}</Td>
+                          <Td>
+                            {isEditing ? (
+                              <HStack spacing={2}>
+                                <IconButton size="sm" colorScheme="green" icon={<CheckIcon />} aria-label="Save row" onClick={() => saveEditingRow(t)} />
+                                <IconButton size="sm" colorScheme="red" icon={<CloseIcon />} aria-label="Cancel" onClick={cancelEditingRow} />
+                              </HStack>
+                            ) : (
+                              <HStack spacing={2}>
+                                <IconButton size="sm" icon={<EditIcon />} aria-label="Edit row" onClick={() => startEditingRow(t)} />
+                                <IconButton icon={<ViewIcon />} aria-label={`View ${t.ticket_no}`} onClick={() => handleView(t)} size="sm" colorScheme="teal" />
+                              </HStack>
+                            )}
+                          </Td>
+                        </Tr>
+                      );
+                    })}
+                  </Tbody>
+                </Table>
+              )}
 
-            {/* Pagination */}
-            <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
-              <Flex gap={2} align="center">
-                <Button size="sm" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} isDisabled={currentPage === 1}>Previous</Button>
-                <HStack spacing={1} ml={2}>
-                  {pageItems.map((it, idx) => (
-                    <Button key={`${it}-${idx}`} size="sm" onClick={() => { if (it === "...") return; setCurrentPage(it); }} colorScheme={it === currentPage ? "teal" : "gray"} variant={it === currentPage ? "solid" : "outline"} isDisabled={it === "..."}>{it}</Button>
-                  ))}
-                </HStack>
-                <Button size="sm" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} isDisabled={currentPage === totalPages}>Next</Button>
+              {/* Pagination */}
+              <Flex justify="space-between" align="center" mt={4} gap={3} flexWrap="wrap">
+                <Flex gap={2} align="center">
+                  <Button size="sm" onClick={() => setCurrentPage(p => Math.max(1, p - 1))} isDisabled={currentPage === 1}>Previous</Button>
+                  <HStack spacing={1} ml={2}>
+                    {pageItems.map((it, idx) => (
+                      <Button key={`${it}-${idx}`} size="sm" onClick={() => { if (it === "...") return; setCurrentPage(it); }} colorScheme={it === currentPage ? "teal" : "gray"} variant={it === currentPage ? "solid" : "outline"} isDisabled={it === "..."}>{it}</Button>
+                    ))}
+                  </HStack>
+                  <Button size="sm" onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} isDisabled={currentPage === totalPages}>Next</Button>
+                </Flex>
+                <Text>Page {currentPage} of {totalPages} ({totalTickets} tickets)</Text>
+                <Box>
+                  <Text fontSize="sm" color="gray.400">{useClientSidePagination ? "Client-side" : "Server-side"} pagination</Text>
+                </Box>
               </Flex>
-              <Text>Page {currentPage} of {totalPages} ({totalTickets} tickets)</Text>
-              <Box>
-                <Text fontSize="sm" color="gray.400">{useClientSidePagination ? "Client-side" : "Server-side"} pagination</Text>
-              </Box>
-            </Flex>
-          </>
-        )}
+            </>
+          )}
       </Box>
 
       {/* View Ticket Modal */}
@@ -1497,6 +1550,19 @@ function WeighbridgeManagementPage() {
             ) : <Text>No data to display.</Text>}
           </ModalBody>
           <ModalFooter>
+            {viewTicket?.file_url && (
+              <Button
+                as="a"
+                href={viewTicket.file_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                variant="outline"
+                mr={3}
+                size="sm"
+              >
+                Open PDF
+              </Button>
+            )}
             <Button onClick={onViewClose}>Close</Button>
           </ModalFooter>
         </ModalContent>
@@ -1571,4 +1637,5 @@ function WeighbridgeManagementPage() {
     </Box>
   );
 }
+
 export default WeighbridgeManagementPage;
