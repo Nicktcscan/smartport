@@ -975,7 +975,7 @@ export default function SADDeclaration() {
                 <Th>Regime</Th>
                 <Th isNumeric>Declared (kg)</Th>
                 <Th isNumeric>Discharged (kg)</Th>
-                <Th isNumeric>No. of Transacts</Th>
+                <Th isNumeric>No. of Transactions</Th>
                 <Th>Status</Th>
                 <Th>Discrepancy</Th>
                 <Th>Actions</Th>
