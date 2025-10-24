@@ -29,8 +29,8 @@ ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarEle
 
 function Dashboard() {
   const [tickets, setTickets] = useState([]);
-  const [, setFilteredTickets] = useState([]);
-  const [, setLoading] = useState(true);
+  const [filteredTickets, setFilteredTickets] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [filterStatus] = useState('');
   const [searchTerm] = useState('');
   const [dateFrom] = useState('');
@@ -123,10 +123,24 @@ function Dashboard() {
 
   // Stats
   const totalTickets = tickets.length;
-const totalSADs = tickets.filter(t => t.sad_no && t.sad_no.trim() !== '').length;
-  const exitedTickets = tickets.filter(t => t.status === 'Exited').length;
-const pendingTickets = tickets.filter(t => t.status === 'Pending').length;
 
+  // COUNT DISTINCT SAD numbers (non-empty, trimmed)
+  const totalSADs = (() => {
+    try {
+      const set = new Set(
+        tickets
+          .map(t => (t.sad_no || '').trim())
+          .filter(sad => sad !== '')
+      );
+      return set.size;
+    } catch (e) {
+      // fallback: if anything weird, return simple count of non-empty
+      return tickets.filter(t => t.sad_no && t.sad_no.trim() !== '').length;
+    }
+  })();
+
+  const exitedTickets = tickets.filter(t => t.status === 'Exited').length;
+  const pendingTickets = tickets.filter(t => t.status === 'Pending').length;
 
   // Manual entries count: ticket_no starting with 'M-'
   const manualEntries = tickets.filter(t => (t.ticket_no || '').startsWith('M-')).length;
@@ -137,8 +151,8 @@ const pendingTickets = tickets.filter(t => t.status === 'Pending').length;
     datasets: [
       {
         data: [pendingTickets, exitedTickets],
-        backgroundColor: ['#ECC94B', '#48BB78', '#F56565'],
-        hoverBackgroundColor: ['#D69E2E', '#38A169', '#C53030'],
+        backgroundColor: ['#ECC94B', '#48BB78'],
+        hoverBackgroundColor: ['#D69E2E', '#38A169'],
       },
     ],
   };
@@ -187,7 +201,7 @@ const pendingTickets = tickets.filter(t => t.status === 'Pending').length;
       {
         label: 'Tickets by Status',
         data: statusCounts,
-        backgroundColor: ['#ECC94B', '#48BB78', '#F56565', '#ED8936', '#38A169'],
+        backgroundColor: ['#ECC94B', '#48BB78'],
       },
     ],
   };
@@ -196,13 +210,13 @@ const pendingTickets = tickets.filter(t => t.status === 'Pending').length;
   return (
     <Box p={4}>
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
-  <StatCard icon={FaClipboardList} label="Total Tickets" value={totalTickets} color="gray.700" />
-  <StatCard icon={FaClock} label="Total SADs" value={totalSADs} color="yellow.600" />
-  <StatCard icon={FaSignOutAlt} label="Exited" value={exitedTickets} color="green.600" />
-  <StatCard icon={FaFlag} label="Manual Entries" value={manualEntries} color="purple.600" />
-</SimpleGrid>
+        <StatCard icon={FaClipboardList} label="Total Tickets" value={totalTickets} color="gray.700" />
+        <StatCard icon={FaClock} label="Total SADs" value={totalSADs} color="yellow.600" />
+        <StatCard icon={FaSignOutAlt} label="Exited" value={exitedTickets} color="green.600" />
+        <StatCard icon={FaFlag} label="Manual Entries" value={manualEntries} color="purple.600" />
+      </SimpleGrid>
 
-       {/* Charts */}
+      {/* Charts */}
       <SimpleGrid columns={{ base: 1, md: 2 }} spacing={6} mb={6}>
         <Box bg="white" p={4} borderRadius="md" boxShadow="sm">
           <Text fontSize="lg" mb={4} fontWeight="bold">Ticket Status Breakdown</Text>
@@ -221,8 +235,7 @@ const pendingTickets = tickets.filter(t => t.status === 'Pending').length;
         </Box>
       </SimpleGrid>
 
-      {/* Ticket Table */}
-      
+      {/* Ticket Table (omitted in this view) */}
     </Box>
   );
 }
