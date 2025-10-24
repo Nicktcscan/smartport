@@ -1,0 +1,3 @@
+[submodule "smartport"]
+	path = smartport
+	url = https://github.com/MadsoftTech/smartport.git
