@@ -436,11 +436,12 @@ export default function ManualEntry() {
     });
   };
 
-  /* Fetch tare for truck (debounced) */
+  /* Fetch tare for truck (debounced) - EXTENDED to fetch last ticket gross/tare as well */
   const fetchTareForTruck = useCallback(async (truckNo) => {
     if (!truckNo) return;
     setFetchingTare(true);
     try {
+      // 1) vehicle_tares summary + history (existing)
       const { data: summaryData, error: summaryErr } = await supabase
         .from('vehicle_tares')
         .select('truck_no, tare, avg_tare, entry_count, updated_at')
@@ -462,6 +463,26 @@ export default function ManualEntry() {
         console.warn('Error fetching vehicle_tare_history', histErr);
       }
 
+      // 2) last ticket for this vehicle (to fetch last gross & tare if present)
+      let lastTicket = null;
+      try {
+        // search either gnsw_truck_no or truck_on_wb
+        const orFilter = `gnsw_truck_no.eq.${truckNo},truck_on_wb.eq.${truckNo}`;
+        const { data: lastData, error: lastErr } = await supabase
+          .from('tickets')
+          .select('gross, tare, net, submitted_at')
+          .or(orFilter)
+          .order('submitted_at', { ascending: false })
+          .limit(1);
+        if (lastErr) {
+          console.warn('Error fetching last ticket for truck', lastErr);
+        } else if (Array.isArray(lastData) && lastData.length > 0) {
+          lastTicket = lastData[0];
+        }
+      } catch (e) {
+        console.warn('lookup last ticket failed', e);
+      }
+
       setVehicleSummary((prev) => {
         const newSummary = summaryData || null;
         if (JSON.stringify(prev) === JSON.stringify(newSummary)) return prev;
@@ -474,39 +495,78 @@ export default function ManualEntry() {
         return arr;
       });
 
-      if (summaryData && summaryData.tare !== undefined && summaryData.tare !== null) {
+      // Auto-fill logic (do not overwrite if user already entered a value)
+      // Only auto-fill once per truck value change (tracked via lastAutoFilledTruckRef)
+      if (lastTicket && (lastTicket.gross !== null || lastTicket.tare !== null)) {
         if (lastAutoFilledTruckRef.current !== truckNo) {
-          const newTareStr = String(summaryData.tare);
-
           setFormData((prev) => {
-            if (prev.tare === newTareStr) return prev;
-            const next = { ...prev, tare: newTareStr };
+            const next = { ...prev };
+            // only auto-fill gross if empty
+            if ((!prev.gross || String(prev.gross).trim() === '') && (lastTicket.gross !== null && lastTicket.gross !== undefined)) {
+              next.gross = String(lastTicket.gross);
+            }
+            // only auto-fill tare if empty
+            if ((!prev.tare || String(prev.tare).trim() === '') && (lastTicket.tare !== null && lastTicket.tare !== undefined)) {
+              next.tare = String(lastTicket.tare);
+            }
+            // compute net if possible
             const g = numericValue(next.gross);
             const t = numericValue(next.tare);
-            if (g !== null && t !== null) next.net = String(g - t);
-            setTimeout(() => validateAll(next), 0);
+            if (g !== null && t !== null) {
+              next.net = String(g - t);
+            }
             return next;
           });
 
+          // set states consistent with existing tare auto-fill UX
           setIsTareAuto(true);
           setTareRecordExists(true);
           setSaveTare(false);
           lastAutoFilledTruckRef.current = truckNo;
 
           toast({
-            title: 'Tare auto-filled',
-            description: `Last tare: ${formatNumber(String(summaryData.tare))} kg${summaryData.avg_tare ? ` | Avg: ${formatNumber(String(summaryData.avg_tare))} (${summaryData.entry_count || 1} entries)` : ''}`,
+            title: 'Auto-filled weights',
+            description: `Populated gross/tare from last record for ${truckNo}`,
             status: 'info',
-            duration: 4000,
+            duration: 4200,
             isClosable: true,
           });
         }
-      } else if (Array.isArray(histData) && histData.length > 0) {
-        setIsTareAuto(false);
-        setTareRecordExists(true);
       } else {
-        setIsTareAuto(false);
-        setTareRecordExists(false);
+        // if there is vehicleSummary (from vehicle_tares) but no lastTicket gross, we use the previous behavior
+        if (summaryData && summaryData.tare !== undefined && summaryData.tare !== null) {
+          if (lastAutoFilledTruckRef.current !== truckNo) {
+            const newTareStr = String(summaryData.tare);
+            setFormData((prev) => {
+              if (prev.tare === newTareStr) return prev;
+              const next = { ...prev, tare: newTareStr };
+              const g = numericValue(next.gross);
+              const t = numericValue(next.tare);
+              if (g !== null && t !== null) next.net = String(g - t);
+              setTimeout(() => validateAll(next), 0);
+              return next;
+            });
+
+            setIsTareAuto(true);
+            setTareRecordExists(true);
+            setSaveTare(false);
+            lastAutoFilledTruckRef.current = truckNo;
+
+            toast({
+              title: 'Tare auto-filled',
+              description: `Last tare: ${formatNumber(String(summaryData.tare))} kg${summaryData.avg_tare ? ` | Avg: ${formatNumber(String(summaryData.avg_tare))} (${summaryData.entry_count || 1} entries)` : ''}`,
+              status: 'info',
+              duration: 4000,
+              isClosable: true,
+            });
+          }
+        } else if (Array.isArray(histData) && histData.length > 0) {
+          setIsTareAuto(false);
+          setTareRecordExists(true);
+        } else {
+          setIsTareAuto(false);
+          setTareRecordExists(false);
+        }
       }
     } catch (err) {
       console.error('fetchTareForTruck error', err);
@@ -637,6 +697,11 @@ export default function ManualEntry() {
         const tareVal = (item.tare !== null && item.tare !== undefined) ? String(item.tare) : '';
         const netVal = (item.net !== null && item.net !== undefined) ? String(item.net) : '';
 
+        // manual should only be Yes when ticket_no starts with M-
+        const manualFlag = (item.manual !== undefined && item.manual !== null)
+          ? item.manual
+          : ((item.ticket_no && /^M-/i.test(String(item.ticket_no))) ? 'Yes' : 'No');
+
         return {
           ticketId,
           data: {
@@ -650,7 +715,7 @@ export default function ManualEntry() {
             gross: grossVal,
             tare: tareVal,
             net: netVal,
-            manual: item.manual ?? 'Yes',
+            manual: manualFlag,
             operator: item.operator ?? '',
             status: item.status ?? '',
             fileUrl: item.file_url ?? null,
@@ -745,7 +810,7 @@ export default function ManualEntry() {
         gross: computed.grossDisplay,
         tare: computed.tareDisplay,
         net: computed.netDisplay,
-        manual: 'Yes',
+        manual: null, // unknown until the final ticket_no is known
         operator: operatorName || '',
         status: 'Pending',
         fileUrl: null,
@@ -772,9 +837,11 @@ export default function ManualEntry() {
       date: new Date().toISOString(),
       scale_name: 'WBRIDGE1',
       weight: numericValue(formDataRef.current.gross) !== null ? numericValue(formDataRef.current.gross) : null,
-      manual: 'Yes',
+      // NOTE: do NOT force manual='Yes' here. We'll set manual after we know the ticket_no.
+      manual: null,
       operator: operatorName || null,
       operator_id: operatorId || null,
+      created_by: operatorId || null, // record who created the ticket (requested)
       gross: computed.grossValue !== null ? computed.grossValue : null,
       tare: computed.tareValue !== null ? computed.tareValue : null,
       net: computed.netValue !== null ? computed.netValue : null,
@@ -793,6 +860,18 @@ export default function ManualEntry() {
 
       const newTicketNo = ticketNo || (data && data[0] && data[0].ticket_no) || 'M-0001';
       const newTicketId = (data && data[0] && (data[0].ticket_id || data[0].id)) || newTicketNo;
+
+      // If the created ticket_no is M-*, set manual flag on the persisted row.
+      try {
+        if (/^M-/i.test(String(newTicketNo))) {
+          await supabase.from('tickets').update({ manual: 'Yes' }).eq('ticket_no', newTicketNo);
+        } else {
+          // ensure manual is not wrongly left as 'Yes' (defensive)
+          await supabase.from('tickets').update({ manual: null }).eq('ticket_no', newTicketNo);
+        }
+      } catch (mErr) {
+        console.warn('Could not set manual flag after insert', mErr);
+      }
 
       if (truck && computed.tareValue !== null && saveTare) {
         try {
@@ -2016,7 +2095,8 @@ export default function ManualEntry() {
                       isDisabled={isSubmitting}
                     />
                     <FormErrorMessage>{errors.net}</FormErrorMessage>
-                  </FormControl>
+                  </FormControl
+                  >
                 </SimpleGrid>
               </ModalBody>
 
@@ -2074,7 +2154,7 @@ export default function ManualEntry() {
                         ) : (
                           <Text>{value ?? 'N/A'}</Text>
                         )}
-                      </Box>
+                      </Box>  
                     );
                   })}
                 </SimpleGrid>
