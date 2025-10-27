@@ -93,7 +93,6 @@ const MotionModalContent = motion.create(ModalContent);
 
 // =======================================
 // PDF styles (with borders for vertical + horizontal lines)
-// Updated to include Created By column
 // =======================================
 const pdfStyles = StyleSheet.create({
   page: {
@@ -156,15 +155,15 @@ const pdfStyles = StyleSheet.create({
     borderRightColor: '#e6eef8',
   },
 
-  // columns widths updated to include Created By
+  // Adjusted columns to include Created By
   colTicket: { width: '12%', fontSize: 8 },
   colTruck: { width: '14%', fontSize: 8 },
   colDate: { width: '16%', fontSize: 8 },
   colGross: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
   colTare: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
   colNet: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
-  colCreatedBy: { width: '12%', fontSize: 8, paddingLeft: 4 },
-  colDriver: { width: '16%', fontSize: 8, paddingLeft: 4 },
+  colDriver: { width: '14%', fontSize: 8, paddingLeft: 4 },
+  colCreated: { width: '14%', fontSize: 8, paddingLeft: 4 },
 
   footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
   logo: { width: 64, height: 64, objectFit: 'contain' },
@@ -285,7 +284,7 @@ function removeDuplicatesByTicketNo(tickets = []) {
 }
 
 // =======================================
-// PDF components (updated to include Created By column)
+// PDF components (SAD column removed)
 function PdfTicketRow({ ticket }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
@@ -309,8 +308,8 @@ function PdfTicketRow({ ticket }) {
       {cell(pdfStyles.colGross, computed.grossDisplay || '0', true)}
       {cell(pdfStyles.colTare, computed.tareDisplay || '0', true)}
       {cell(pdfStyles.colNet, computed.netDisplay || '0', true)}
-      {cell(pdfStyles.colCreatedBy, createdByText)}
       {cell(pdfStyles.colDriver, driverText)}
+      {cell(pdfStyles.colCreated, createdByText)}
     </PdfView>
   );
 }
@@ -397,8 +396,8 @@ function CombinedDocument({ tickets = [], reportMeta = {}, generatedBy = 'N/A' }
               {headerCell(pdfStyles.colGross, 'Gross')}
               {headerCell(pdfStyles.colTare, 'Tare')}
               {headerCell(pdfStyles.colNet, 'Net')}
-              {headerCell(pdfStyles.colCreatedBy, 'Created By')}
               {headerCell(pdfStyles.colDriver, 'Driver')}
+              {headerCell(pdfStyles.colCreated, 'Created By')}
             </PdfView>
 
             {pageTickets.map((t) => <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} />)}
@@ -706,8 +705,9 @@ export default function WeightReports() {
           gross: ticket.gross ?? null,
           driver: ticket.driver || 'N/A',
           consignee: ticket.consignee,
-          operator: ticket.operator || '', // operator preserved
-          createdBy: ticket.created_by ?? ticket.operator ?? '', // NEW: createdBy sourced from created_by or fallback to operator
+          operator: ticket.operator || '',
+          createdBy: ticket.created_by || null, // prefer created_by (text) if present
+          user_id: ticket.user_id || null, // we'll fetch username for user_id if present
           status: ticket.status,
           consolidated: ticket.consolidated,
           containerNo: ticket.container_no,
@@ -726,7 +726,39 @@ export default function WeightReports() {
         toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
       }
 
-      const sortedOriginal = sortTicketsByDateDesc(dedupedTickets);
+      // If any tickets have user_id, fetch usernames to display createdBy
+      const userIds = Array.from(new Set(dedupedTickets.map((t) => t.data.user_id).filter(Boolean)));
+      let userMap = {};
+      if (userIds.length > 0) {
+        try {
+          const { data: usersData, error: usersErr } = await supabase.from('users').select('id, username').in('id', userIds);
+          if (!usersErr && Array.isArray(usersData)) {
+            userMap = usersData.reduce((acc, u) => {
+              if (u && u.id) acc[u.id] = u.username || u.email || String(u.id);
+              return acc;
+            }, {});
+          }
+        } catch (e) {
+          console.debug('Failed to fetch users for created_by mapping', e);
+        }
+      }
+
+      // Attach createdBy usernames (prefer createdBy text field, then userMap, then operator)
+      const enriched = dedupedTickets.map((t) => {
+        const d = t.data || {};
+        const createdByFromText = d.createdBy ? String(d.createdBy).trim() : null;
+        const createdByFromUser = d.user_id && userMap[d.user_id] ? userMap[d.user_id] : null;
+        const finalCreatedBy = createdByFromText || createdByFromUser || (d.operator ? String(d.operator).trim() : '') || (d.user_id ? String(d.user_id) : '');
+        return {
+          ...t,
+          data: {
+            ...d,
+            createdBy: finalCreatedBy,
+          },
+        };
+      });
+
+      const sortedOriginal = sortTicketsByDateDesc(enriched);
       setOriginalTickets(sortedOriginal);
 
       const totalNet = (sortedOriginal || []).reduce((sum, t) => {
@@ -1024,12 +1056,13 @@ export default function WeightReports() {
     }
   };
 
-  // ----------------- CSV export (includes createdBy) -----------------
+  // ----------------- CSV export (unchanged columns; operator included if present) -----------------
   const exportCsv = async () => {
     if (!filteredTickets || filteredTickets.length === 0) {
       toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
       return;
     }
+    // include createdBy column
     const header = ['sadNo', 'ticketNo', 'date', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'createdBy', 'containerNo', 'passNumber', 'scaleName'];
     const rows = filteredTickets.map((t) => {
       const d = t.data || {};
@@ -1085,13 +1118,13 @@ export default function WeightReports() {
 
   function exportToCSV(rows = [], filename = 'export.csv') {
     if (!rows || rows.length === 0) return;
-    const headers = ['sadNo','ticketNo','date','truck','driver','gross','tare','net','consignee','operator','createdBy','containerNo','passNumber','scaleName'];
+    const headers = Object.keys(rows[0]);
     const csv = [
       headers.join(','),
       ...rows.map((r) =>
         headers
-          .map((h, idx) => {
-            const v = r[idx] ?? '';
+          .map((h) => {
+            const v = r[h] ?? '';
             const s = typeof v === 'string' ? v : String(v);
             return `"${s.replace(/"/g, '""')}"`;
           })
@@ -1774,7 +1807,7 @@ export default function WeightReports() {
                   const computed = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
                   const displayTruck = t.data.gnswTruckNo || t.data.truckOnWb || t.data.anpr || t.data.truckNo || 'N/A';
                   const displayDriver = t.data.driver || 'N/A';
-                  const createdBy = t.data.createdBy || t.data.operator || 'N/A';
+                  const displayCreated = t.data.createdBy || t.data.operator || 'N/A';
                   return (
                     <Box key={t.ticketId} className="glass-card" p={3}>
                       <Flex justify="space-between" align="start" gap={3} wrap="wrap">
@@ -1795,8 +1828,10 @@ export default function WeightReports() {
                           <HStack justify="flex-end">
                             <Text>{displayDriver}</Text>
                           </HStack>
-                          <Text fontSize="sm" color="gray.500" mt={2}>Created By</Text>
-                          <Text fontSize="sm" fontWeight="semibold">{createdBy}</Text>
+                          <Text fontSize="sm" color="gray.500">Operator</Text>
+                          <HStack justify="flex-end">
+                            <Text>{displayCreated}</Text>
+                          </HStack>
                         </Box>
                       </Flex>
 
@@ -1856,8 +1891,8 @@ export default function WeightReports() {
                       <Th isNumeric onClick={() => toggleSort('net')} cursor="pointer">
                         <HStack spacing={2} justify="flex-end"><Text>Net (kg)</Text> {sortBy === 'net' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
                       </Th>
-                      <Th>Created By</Th>
                       <Th>Driver</Th>
+                      <Th>Operator</Th>
                       <Th>Actions</Th>
                     </Tr>
                   </Thead>
@@ -1871,7 +1906,7 @@ export default function WeightReports() {
                       });
                       const displayDriver = ticket.data.driver || 'N/A';
                       const displayTruck = ticket.data.gnswTruckNo || ticket.data.truckOnWb || ticket.data.anpr || ticket.data.truckNo || 'N/A';
-                      const createdBy = ticket.data.createdBy || ticket.data.operator || 'N/A';
+                      const displayCreated = ticket.data.createdBy || ticket.data.operator || 'N/A';
 
                       return (
                         <Tr key={ticket.ticketId}>
@@ -1881,8 +1916,8 @@ export default function WeightReports() {
                           <Td isNumeric>{computed.grossDisplay || '0'}</Td>
                           <Td isNumeric>{computed.tareDisplay || '0'}</Td>
                           <Td isNumeric>{computed.netDisplay || '0'}</Td>
-                          <Td>{createdBy}</Td>
                           <Td>{displayDriver}</Td>
+                          <Td>{displayCreated}</Td>
                           <Td>
                             <HStack spacing={2} flexWrap="wrap">
                               <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
@@ -2040,14 +2075,14 @@ export default function WeightReports() {
                         </HStack>
 
                         <HStack>
-                          <Icon as={FaBox} />
-                          <Text><b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}</Text>
-                          {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit consignee" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                          <Icon as={FaUserTie} />
+                          <Text><b>Operator:</b> {selectedTicket.data.createdBy || selectedTicket.data.operator || 'N/A'}</Text>
                         </HStack>
 
                         <HStack>
-                          <Icon as={FaUserTie} />
-                          <Text><b>Created By:</b> {selectedTicket.data.createdBy || selectedTicket.data.operator || 'N/A'}</Text>
+                          <Icon as={FaBox} />
+                          <Text><b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}</Text>
+                          {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit consignee" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
                         </HStack>
 
                         {(() => {
