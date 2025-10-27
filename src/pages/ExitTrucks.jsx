@@ -435,16 +435,19 @@ export default function ExitTrucks() {
     }
   };
 
-  /* Open detail modal and attempt driver extraction for PDFs (best-effort) */
+  /* Open detail modal and attempt driver extraction for PDFs (best-effort)
+     Also fetch outgate.edited_by -> resolve to users.username/full_name/email for human display */
   const openDetailModal = async (r) => {
     const row = { ...r };
+
+    // Attempt driver extraction from PDF if missing (unchanged)
     if ((!row.driver || row.driver === '') && row.fileUrl && /\.pdf(\?.*)?$/i.test(row.fileUrl)) {
       try {
         const txt = await extractTextFromPdfUrl(row.fileUrl);
         const parsed = parseDriverNameFromText(txt);
         if (parsed) {
           row.driver = parsed;
-          // persist best-effort
+          // persist best-effort (non-blocking)
           try {
             await supabase.from('tickets').update({ driver: parsed }).eq('ticket_id', row.ticketId);
           } catch (e) {
@@ -455,6 +458,51 @@ export default function ExitTrucks() {
         console.warn('pdf parse error', e);
       }
     }
+
+    // NEW: fetch outgate.edited_by and resolve to a human name
+    try {
+      const { data: outgateRow, error: outErr } = await supabase
+        .from('outgate')
+        .select('edited_by')
+        .eq('ticket_id', row.ticketId)
+        .maybeSingle();
+
+      if (!outErr && outgateRow) {
+        row.edited_by = outgateRow.edited_by ?? null;
+
+        if (row.edited_by) {
+          // Try to resolve to a users table row (prefer full_name -> username -> email)
+          try {
+            const { data: userRow, error: userErr } = await supabase
+              .from('users')
+              .select('id, username, full_name, email')
+              .eq('id', row.edited_by)
+              .maybeSingle();
+
+            if (!userErr && userRow) {
+              row.exitedByName = userRow.full_name || userRow.username || userRow.email || String(row.edited_by);
+            } else {
+              // If no user row matched, use edited_by raw value
+              row.exitedByName = String(row.edited_by);
+            }
+          } catch (e) {
+            console.warn('failed to resolve edited_by user', e);
+            row.exitedByName = String(row.edited_by);
+          }
+        } else {
+          row.exitedByName = null;
+        }
+      } else {
+        // no outgate row found or error - just set null
+        row.edited_by = row.edited_by ?? null;
+        row.exitedByName = row.exitedByName ?? null;
+      }
+    } catch (e) {
+      console.warn('outgate fetch failed', e);
+      row.edited_by = row.edited_by ?? null;
+      row.exitedByName = row.exitedByName ?? null;
+    }
+
     setSelectedTicket(row);
     onOpen();
   };
@@ -924,6 +972,16 @@ export default function ExitTrucks() {
                       <Box><Text fontSize="sm" color="gray.600">Driver</Text><Text>{selectedTicket.driver || '-'}</Text></Box>
                       <Box><Text fontSize="sm" color="gray.600">Entry</Text><Text>{selectedTicket.date ? new Date(selectedTicket.date).toLocaleString() : '-'}</Text></Box>
                       <Box><Text fontSize="sm" color="gray.600">Exit</Text><Text>{selectedTicket.exitTime ? new Date(selectedTicket.exitTime).toLocaleString() : '-'}</Text></Box>
+
+                      {/* NEW: Exited By (from outgate.edited_by resolved via users table if available) */}
+                      <Box>
+                        <Text fontSize="sm" color="gray.600">Exited By</Text>
+                        <Text>{selectedTicket.exitedByName ?? selectedTicket.edited_by ?? '-'}</Text>
+                      </Box>
+                      <Box>
+                        <Text fontSize="sm" color="gray.600">Container</Text>
+                        <Text>{selectedTicket.containerNo ?? '-'}</Text>
+                      </Box>
                     </SimpleGrid>
                   </Box>
 
