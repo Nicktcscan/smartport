@@ -33,7 +33,6 @@ import {
   Td,
   VStack,
   useBreakpointValue,
-  Stack,
   InputGroup,
   InputRightElement,
   Spacer,
@@ -436,12 +435,12 @@ export default function ManualEntry() {
     });
   };
 
-  /* Fetch tare for truck (debounced) - EXTENDED to fetch last ticket gross/tare as well */
+  /* Fetch tare for truck (debounced) - extended to fetch last ticket gross/tare as well */
   const fetchTareForTruck = useCallback(async (truckNo) => {
     if (!truckNo) return;
     setFetchingTare(true);
     try {
-      // 1) vehicle_tares summary + history (existing)
+      // 1) vehicle_tares summary + history
       const { data: summaryData, error: summaryErr } = await supabase
         .from('vehicle_tares')
         .select('truck_no, tare, avg_tare, entry_count, updated_at')
@@ -496,7 +495,6 @@ export default function ManualEntry() {
       });
 
       // Auto-fill logic (do not overwrite if user already entered a value)
-      // Only auto-fill once per truck value change (tracked via lastAutoFilledTruckRef)
       if (lastTicket && (lastTicket.gross !== null || lastTicket.tare !== null)) {
         if (lastAutoFilledTruckRef.current !== truckNo) {
           setFormData((prev) => {
@@ -515,10 +513,10 @@ export default function ManualEntry() {
             if (g !== null && t !== null) {
               next.net = String(g - t);
             }
+            setTimeout(() => validateAll(next), 0);
             return next;
           });
 
-          // set states consistent with existing tare auto-fill UX
           setIsTareAuto(true);
           setTareRecordExists(true);
           setSaveTare(false);
@@ -533,7 +531,6 @@ export default function ManualEntry() {
           });
         }
       } else {
-        // if there is vehicleSummary (from vehicle_tares) but no lastTicket gross, we use the previous behavior
         if (summaryData && summaryData.tare !== undefined && summaryData.tare !== null) {
           if (lastAutoFilledTruckRef.current !== truckNo) {
             const newTareStr = String(summaryData.tare);
@@ -719,6 +716,8 @@ export default function ManualEntry() {
             operator: item.operator ?? '',
             status: item.status ?? '',
             fileUrl: item.file_url ?? null,
+            created_by: item.created_by ?? null,
+            created_at: item.created_at ?? item.submitted_at ?? null,
           },
           submittedAt: item.submitted_at ?? new Date().toISOString(),
         };
@@ -810,7 +809,7 @@ export default function ManualEntry() {
         gross: computed.grossDisplay,
         tare: computed.tareDisplay,
         net: computed.netDisplay,
-        manual: null, // unknown until the final ticket_no is known
+        manual: null, // unknown until final ticket_no
         operator: operatorName || '',
         status: 'Pending',
         fileUrl: null,
@@ -837,11 +836,11 @@ export default function ManualEntry() {
       date: new Date().toISOString(),
       scale_name: 'WBRIDGE1',
       weight: numericValue(formDataRef.current.gross) !== null ? numericValue(formDataRef.current.gross) : null,
-      // NOTE: do NOT force manual='Yes' here. We'll set manual after we know the ticket_no.
       manual: null,
       operator: operatorName || null,
       operator_id: operatorId || null,
-      created_by: operatorId || null, // record who created the ticket (requested)
+      created_by: operatorId || null, // record who created the ticket
+      created_at: new Date().toISOString(), // ensure created_at timestamp is recorded
       gross: computed.grossValue !== null ? computed.grossValue : null,
       tare: computed.tareValue !== null ? computed.tareValue : null,
       net: computed.netValue !== null ? computed.netValue : null,
@@ -866,7 +865,6 @@ export default function ManualEntry() {
         if (/^M-/i.test(String(newTicketNo))) {
           await supabase.from('tickets').update({ manual: 'Yes' }).eq('ticket_no', newTicketNo);
         } else {
-          // ensure manual is not wrongly left as 'Yes' (defensive)
           await supabase.from('tickets').update({ manual: null }).eq('ticket_no', newTicketNo);
         }
       } catch (mErr) {
@@ -1029,15 +1027,16 @@ export default function ManualEntry() {
     setPage(n);
   };
 
+  // Stats: TOTAL GROSS and TOTAL NET for manual tickets
   const stats = useMemo(() => {
     const manualOnly = history.filter((h) => h.data.manual && String(h.data.manual).toLowerCase() === 'yes');
     const count = manualOnly.length;
-    if (count === 0) return { count: 0, avgGross: null, avgNet: null };
+    if (count === 0) return { count: 0, totalGross: null, totalNet: null };
     const grossVals = manualOnly.map((m) => numericValue(m.data.gross)).filter((n) => n !== null);
     const netVals = manualOnly.map((m) => numericValue(m.data.net)).filter((n) => n !== null);
-    const avgGross = grossVals.length ? grossVals.reduce((a, b) => a + b, 0) / grossVals.length : null;
-    const avgNet = netVals.length ? netVals.reduce((a, b) => a + b, 0) / netVals.length : null;
-    return { count, avgGross, avgNet };
+    const totalGross = grossVals.length ? grossVals.reduce((a, b) => a + b, 0) : null;
+    const totalNet = netVals.length ? netVals.reduce((a, b) => a + b, 0) : null;
+    return { count, totalGross, totalNet };
   }, [history]);
 
   const isMobile = useBreakpointValue({ base: true, md: false });
@@ -1639,9 +1638,9 @@ export default function ManualEntry() {
             backdropFilter: 'blur(6px)',
           }}
         >
-          <StatLabel>Average Gross</StatLabel>
-          <StatNumber>{stats.avgGross ? `${formatNumber(String(stats.avgGross))} kg` : '—'}</StatNumber>
-          <StatHelpText>Recent average gross</StatHelpText>
+          <StatLabel>Total Gross</StatLabel>
+          <StatNumber>{stats.totalGross ? `${formatNumber(String(stats.totalGross))} kg` : '—'}</StatNumber>
+          <StatHelpText>Sum of gross weights for manual tickets</StatHelpText>
         </Stat>
 
         <Stat
@@ -1654,9 +1653,9 @@ export default function ManualEntry() {
             backdropFilter: 'blur(6px)',
           }}
         >
-          <StatLabel>Average Net</StatLabel>
-          <StatNumber>{stats.avgNet ? `${formatNumber(String(stats.avgNet))} kg` : '—'}</StatNumber>
-          <StatHelpText>Recent average net</StatHelpText>
+          <StatLabel>Total Net</StatLabel>
+          <StatNumber>{stats.totalNet ? `${formatNumber(String(stats.totalNet))} kg` : '—'}</StatNumber>
+          <StatHelpText>Sum of net weights for manual tickets</StatHelpText>
         </Stat>
       </SimpleGrid>
 
@@ -2095,8 +2094,7 @@ export default function ManualEntry() {
                       isDisabled={isSubmitting}
                     />
                     <FormErrorMessage>{errors.net}</FormErrorMessage>
-                  </FormControl
-                  >
+                  </FormControl>
                 </SimpleGrid>
               </ModalBody>
 
@@ -2154,7 +2152,7 @@ export default function ManualEntry() {
                         ) : (
                           <Text>{value ?? 'N/A'}</Text>
                         )}
-                      </Box>  
+                      </Box>
                     );
                   })}
                 </SimpleGrid>
