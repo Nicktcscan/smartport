@@ -726,29 +726,100 @@ export default function WeightReports() {
         toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
       }
 
-      // If any tickets have user_id, fetch usernames to display createdBy
-      const userIds = Array.from(new Set(dedupedTickets.map((t) => t.data.user_id).filter(Boolean)));
-      let userMap = {};
-      if (userIds.length > 0) {
-        try {
-          const { data: usersData, error: usersErr } = await supabase.from('users').select('id, username').in('id', userIds);
-          if (!usersErr && Array.isArray(usersData)) {
-            userMap = usersData.reduce((acc, u) => {
-              if (u && u.id) acc[u.id] = u.username || u.email || String(u.id);
-              return acc;
-            }, {});
-          }
-        } catch (e) {
-          console.debug('Failed to fetch users for created_by mapping', e);
+      // --- NEW: Build list of candidate user ids and emails to resolve to usernames ---
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const userIdsSet = new Set();
+      const emailsSet = new Set();
+
+      dedupedTickets.forEach((t) => {
+        const d = t.data || {};
+        if (d.user_id && typeof d.user_id === 'string' && uuidRegex.test(d.user_id)) {
+          userIdsSet.add(d.user_id);
         }
+        // createdBy could be uuid, email, username, or text
+        const cb = d.createdBy;
+        if (cb && typeof cb === 'string') {
+          const v = cb.trim();
+          if (uuidRegex.test(v)) {
+            userIdsSet.add(v);
+          } else if (v.includes('@')) {
+            // simple email detection
+            emailsSet.add(v.toLowerCase());
+          }
+        }
+      });
+
+      const userIds = Array.from(userIdsSet);
+      const emails = Array.from(emailsSet);
+
+      // Fetch users by id and by email (if any)
+      let userMap = {};   // id -> displayName
+      let emailMap = {};  // email -> displayName
+
+      try {
+        if (userIds.length > 0) {
+          const { data: usersById, error: usersByIdErr } = await supabase
+            .from('users')
+            .select('id, username, email, full_name')
+            .in('id', userIds);
+          if (!usersByIdErr && Array.isArray(usersById)) {
+            usersById.forEach((u) => {
+              const display = u.username || u.full_name || u.email || u.id;
+              if (u.id) userMap[u.id] = display;
+              if (u.email) emailMap[u.email.toLowerCase()] = display;
+            });
+          } else if (usersByIdErr) {
+            console.debug('usersByIdErr', usersByIdErr);
+          }
+        }
+
+        if (emails.length > 0) {
+          const { data: usersByEmail, error: usersByEmailErr } = await supabase
+            .from('users')
+            .select('id, username, email, full_name')
+            .in('email', emails);
+          if (!usersByEmailErr && Array.isArray(usersByEmail)) {
+            usersByEmail.forEach((u) => {
+              const display = u.username || u.full_name || u.email || u.id;
+              if (u.id) userMap[u.id] = display;
+              if (u.email) emailMap[u.email.toLowerCase()] = display;
+            });
+          } else if (usersByEmailErr) {
+            console.debug('usersByEmailErr', usersByEmailErr);
+          }
+        }
+      } catch (e) {
+        console.debug('Failed to fetch users for created_by mapping', e);
       }
 
-      // Attach createdBy usernames (prefer createdBy text field, then userMap, then operator)
+      // Attach createdBy usernames (prefer createdBy text field, but map UUID/email where possible)
       const enriched = dedupedTickets.map((t) => {
         const d = t.data || {};
-        const createdByFromText = d.createdBy ? String(d.createdBy).trim() : null;
+        const rawCreatedByText = d.createdBy ? String(d.createdBy).trim() : null;
+
+        // If rawCreatedByText is a UUID and exists in userMap, use mapped display
+        let createdByFromText = null;
+        if (rawCreatedByText) {
+          if (uuidRegex.test(rawCreatedByText) && userMap[rawCreatedByText]) {
+            createdByFromText = userMap[rawCreatedByText];
+          } else if (rawCreatedByText.includes('@') && emailMap[rawCreatedByText.toLowerCase()]) {
+            createdByFromText = emailMap[rawCreatedByText.toLowerCase()];
+          } else {
+            // If the text looks like a UUID but we couldn't map, show a shortened UUID for readability
+            if (uuidRegex.test(rawCreatedByText)) {
+              createdByFromText = `${rawCreatedByText.slice(0, 8)}...`;
+            } else {
+              createdByFromText = rawCreatedByText; // probably a username or operator name; keep as-is
+            }
+          }
+        }
+
+        // createdBy from user_id (if present)
         const createdByFromUser = d.user_id && userMap[d.user_id] ? userMap[d.user_id] : null;
+
+        // final preference: explicit createdBy text (mapped), then user_id mapping, then operator, then fallback to raw user_id or empty
         const finalCreatedBy = createdByFromText || createdByFromUser || (d.operator ? String(d.operator).trim() : '') || (d.user_id ? String(d.user_id) : '');
+
         return {
           ...t,
           data: {
