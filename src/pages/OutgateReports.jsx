@@ -106,7 +106,7 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   ].join('\n');
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
+  const url = window.URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -114,7 +114,7 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  window.URL.revokeObjectURL(url);
 }
 
 function openPrintableWindow(html, title = 'Report') {
@@ -208,6 +208,12 @@ export default function OutgateReports() {
   const recognitionRef = useRef(null);
   const [listening, setListening] = useState(false);
 
+  // NEW stats values
+  const [totalSADs, setTotalSADs] = useState(null);
+  const [exitedCount, setExitedCount] = useState(0);
+  const [totalTickets, setTotalTickets] = useState(null);
+  const [totalDeclaredWeight, setTotalDeclaredWeight] = useState(null);
+
   // helper: convert date + time to Date
   const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
     if (!dateStr) return null;
@@ -223,6 +229,7 @@ export default function OutgateReports() {
       try {
         setLoading(true);
 
+        // fetch outgate reports
         const { data: outData, error: outErr } = await supabase
           .from('outgate')
           .select('*')
@@ -255,6 +262,7 @@ export default function OutgateReports() {
         if (!mounted) return;
         setReports(mapped);
 
+        // --- fetch ticket statuses for summary & compute exitedCount and totalTransactions via map
         const { data: ticketsData, error: ticketsErr } = await supabase
           .from('tickets')
           .select('ticket_no,status');
@@ -271,6 +279,7 @@ export default function OutgateReports() {
             map[tn] = t.status ?? map[tn] ?? 'Pending';
           });
 
+          // ensure outgate rows are reflected too
           for (const r of mapped) {
             if (r.ticketNo && !map[r.ticketNo]) map[r.ticketNo] = r.rawRow?.status ?? 'Exited';
           }
@@ -278,7 +287,58 @@ export default function OutgateReports() {
           if (!mounted) return;
           setTicketStatusMap(map);
           setTotalTransactions(Object.keys(map).length);
+
+          // compute exitedCount from map
+          const exited = Object.values(map).filter((s) => String(s).toLowerCase() === 'exited').length;
+          setExitedCount(exited);
         }
+
+        // --- fetch total tickets count (exact)
+        try {
+          const { count: ticketsCount, error: countErr } = await supabase
+            .from('tickets')
+            .select('id', { count: 'exact', head: true });
+          if (countErr) {
+            console.warn('total tickets count failed', countErr);
+            setTotalTickets(null);
+          } else {
+            setTotalTickets(typeof ticketsCount === 'number' ? ticketsCount : null);
+          }
+        } catch (e) {
+          console.debug('tickets count fetch failed', e);
+          setTotalTickets(null);
+        }
+
+        // --- fetch all sad_declarations and compute total count + total declared weight (include all statuses)
+        try {
+          const { data: sadRows, error: sadErr } = await supabase
+            .from('sad_declarations')
+            .select('sad_no,declared_weight');
+
+          if (sadErr) {
+            console.warn('failed to fetch sad declarations', sadErr);
+            setTotalSADs(null);
+            setTotalDeclaredWeight(null);
+          } else if (Array.isArray(sadRows)) {
+            // total number of declaration rows
+            setTotalSADs(sadRows.length);
+
+            // sum declared weights (coerce to Number; ignore null/non-numeric)
+            const sum = sadRows.reduce((acc, r) => {
+              const n = r && (r.declared_weight !== null && r.declared_weight !== undefined) ? Number(r.declared_weight) : 0;
+              return acc + (Number.isFinite(n) ? n : 0);
+            }, 0);
+            setTotalDeclaredWeight(sum);
+          } else {
+            setTotalSADs(null);
+            setTotalDeclaredWeight(null);
+          }
+        } catch (e) {
+          console.debug('sad declarations fetch failed', e);
+          setTotalSADs(null);
+          setTotalDeclaredWeight(null);
+        }
+
       } catch (err) {
         toast({
           title: 'Error loading reports',
@@ -899,7 +959,9 @@ export default function OutgateReports() {
     d: { bg: 'linear-gradient(135deg,#f5f3ff 0%, #dbeafe 100%)', border: '1px solid rgba(124,58,237,0.08)' },
   };
 
+  // -------------------------
   // Render
+  // -------------------------
   return (
     <Box p={{ base: 4, md: 8 }} style={{ fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial' }}>
       {/* Header */}
@@ -926,30 +988,34 @@ export default function OutgateReports() {
         </HStack>
       </Flex>
 
-      {/* Stats — vivid colored cards */}
+      {/* Stats — match ConfirmExit layout but replace Unique Tickets with Total Declared Weight */}
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
-        <Stat sx={{ ...statCardStyle, ...vividCards.a }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.a.bg, color: '#041124', border: vividCards.a.border }}>
           <StatLabel>Total SADs</StatLabel>
-          <StatNumber>{(new Set(reports.filter(Boolean).map(r => r.sadNo).filter(Boolean))).size}</StatNumber>
-          <StatHelpText>Distinct SAD numbers</StatHelpText>
+          <StatNumber>{totalSADs != null ? totalSADs : '—'}</StatNumber>
+          <StatHelpText>Total registered SADs</StatHelpText>
         </Stat>
 
-        <Stat sx={{ ...statCardStyle, ...vividCards.b }}>
-          <StatLabel>Total Transactions</StatLabel>
-          <StatNumber>{totalTransactions}</StatNumber>
-          <StatHelpText>Unique ticket numbers</StatHelpText>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.b.bg, color: '#041124', border: vividCards.b.border }}>
+          <StatLabel>Confirmed Exits</StatLabel>
+          <StatNumber>{exitedCount}</StatNumber>
+          <StatHelpText>All tickets with status Exited</StatHelpText>
         </Stat>
 
-        <Stat sx={{ ...statCardStyle, ...vividCards.c }}>
-          <StatLabel>Unique Tickets in View</StatLabel>
-          <StatNumber>{statsUniqueTickets}</StatNumber>
-          <StatHelpText>{searchTerm ? 'Tickets from SAD search' : 'Unique tickets after filters'}</StatHelpText>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.c.bg, color: '#041124', border: vividCards.c.border }}>
+          <StatLabel>Total Declared Weight</StatLabel>
+          <StatNumber>{totalDeclaredWeight != null ? `${formatWeight(totalDeclaredWeight)} kg` : '—'}</StatNumber>
+          <StatHelpText>Sum of all Weights declared</StatHelpText>
         </Stat>
 
-        <Stat sx={{ ...statCardStyle, ...vividCards.d }}>
-          <StatLabel>Total Discharged (view)</StatLabel>
-          <StatNumber>{statsTotals.cumulativeNet ? `${formatWeight(statsTotals.cumulativeNet)} kg` : '—'}</StatNumber>
-          <StatHelpText>From current filtered results</StatHelpText>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.d.bg, color: '#041124', border: vividCards.d.border }}>
+          <StatLabel>Page Size</StatLabel>
+          <StatNumber>{itemsPerPage}</StatNumber>
+          <StatHelpText>
+            <Select size="sm" value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}>
+              {[5, 10, 20, 50].map((n) => <option key={n} value={n}>{n} / page</option>)}
+            </Select>
+          </StatHelpText>
         </Stat>
       </SimpleGrid>
 
