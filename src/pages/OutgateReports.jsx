@@ -106,7 +106,7 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   ].join('\n');
 
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = window.URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
@@ -114,7 +114,7 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  window.URL.revokeObjectURL(url);
+  URL.revokeObjectURL(url);
 }
 
 function openPrintableWindow(html, title = 'Report') {
@@ -210,9 +210,10 @@ export default function OutgateReports() {
 
   // NEW stats values
   const [totalSADs, setTotalSADs] = useState(null);
-  const [exitedCount, setExitedCount] = useState(0);
+  const [exitedCount, setExitedCount] = useState(0); // will be total rows in outgate
   const [totalTickets, setTotalTickets] = useState(null);
   const [totalDeclaredWeight, setTotalDeclaredWeight] = useState(null);
+  const [totalDischargedWeight, setTotalDischargedWeight] = useState(null); // sum of total_recorded_weight
 
   // helper: convert date + time to Date
   const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
@@ -229,7 +230,7 @@ export default function OutgateReports() {
       try {
         setLoading(true);
 
-        // fetch outgate reports
+        // fetch outgate reports (all rows)
         const { data: outData, error: outErr } = await supabase
           .from('outgate')
           .select('*')
@@ -255,6 +256,7 @@ export default function OutgateReports() {
             fileUrl: og.file_url || null,
             containerId: og.container_id ?? null,
             sadNo: og.sad_no ?? null,
+            exitedBy: og.edited_by ?? og.editedBy ?? null,
             rawRow: og,
           };
         });
@@ -262,7 +264,10 @@ export default function OutgateReports() {
         if (!mounted) return;
         setReports(mapped);
 
-        // --- fetch ticket statuses for summary & compute exitedCount and totalTransactions via map
+        // Confirmed Exits = total rows in outgate
+        setExitedCount(Array.isArray(outData) ? outData.length : mapped.length);
+
+        // --- fetch ticket statuses for summary & compute totalTransactions via map
         const { data: ticketsData, error: ticketsErr } = await supabase
           .from('tickets')
           .select('ticket_no,status');
@@ -287,10 +292,6 @@ export default function OutgateReports() {
           if (!mounted) return;
           setTicketStatusMap(map);
           setTotalTransactions(Object.keys(map).length);
-
-          // compute exitedCount from map
-          const exited = Object.values(map).filter((s) => String(s).toLowerCase() === 'exited').length;
-          setExitedCount(exited);
         }
 
         // --- fetch total tickets count (exact)
@@ -309,34 +310,44 @@ export default function OutgateReports() {
           setTotalTickets(null);
         }
 
-        // --- fetch all sad_declarations and compute total count + total declared weight (include all statuses)
+        // --- fetch all sad_declarations and compute total count + total declared weight + total recorded (discharged) weight
         try {
           const { data: sadRows, error: sadErr } = await supabase
             .from('sad_declarations')
-            .select('sad_no,declared_weight');
+            .select('sad_no,declared_weight,total_recorded_weight');
 
           if (sadErr) {
             console.warn('failed to fetch sad declarations', sadErr);
             setTotalSADs(null);
             setTotalDeclaredWeight(null);
+            setTotalDischargedWeight(null);
           } else if (Array.isArray(sadRows)) {
             // total number of declaration rows
             setTotalSADs(sadRows.length);
 
             // sum declared weights (coerce to Number; ignore null/non-numeric)
-            const sum = sadRows.reduce((acc, r) => {
+            const sumDeclared = sadRows.reduce((acc, r) => {
               const n = r && (r.declared_weight !== null && r.declared_weight !== undefined) ? Number(r.declared_weight) : 0;
               return acc + (Number.isFinite(n) ? n : 0);
             }, 0);
-            setTotalDeclaredWeight(sum);
+            setTotalDeclaredWeight(sumDeclared);
+
+            // sum total_recorded_weight (discharged)
+            const sumDischarged = sadRows.reduce((acc, r) => {
+              const n = r && (r.total_recorded_weight !== null && r.total_recorded_weight !== undefined) ? Number(r.total_recorded_weight) : 0;
+              return acc + (Number.isFinite(n) ? n : 0);
+            }, 0);
+            setTotalDischargedWeight(sumDischarged);
           } else {
             setTotalSADs(null);
             setTotalDeclaredWeight(null);
+            setTotalDischargedWeight(null);
           }
         } catch (e) {
           console.debug('sad declarations fetch failed', e);
           setTotalSADs(null);
           setTotalDeclaredWeight(null);
+          setTotalDischargedWeight(null);
         }
 
       } catch (err) {
@@ -670,6 +681,7 @@ export default function OutgateReports() {
         'Tare (kg)': r.tare ?? '',
         'Net (kg)': r.net ?? '',
         'Driver': r.driverName ?? '',
+        'Exited By': r.exitedBy ?? r.rawRow?.edited_by ?? (r.outgateRef?.rawRow?.edited_by ?? '') ?? '',
         'Status': (r.ticketNo && ticketStatusMap[r.ticketNo]) ? ticketStatusMap[r.ticketNo] : (r.rawRow?.status ?? ''),
       };
     });
@@ -691,6 +703,7 @@ export default function OutgateReports() {
     }
 
     const rowsHtml = sadFilteredResults.map((t) => {
+      const exitedBy = t.outgateRef?.rawRow?.edited_by ?? t.outgateRef?.exitedBy ?? '';
       return `<tr>
         <td>${t.sadNo ?? ''}</td>
         <td>${t.ticketNo ?? ''}</td>
@@ -700,6 +713,7 @@ export default function OutgateReports() {
         <td style="text-align:right">${t.tare != null ? formatWeight(t.tare) : ''}</td>
         <td style="text-align:right">${t.net != null ? formatWeight(t.net) : ''}</td>
         <td>${t.driver ?? ''}</td>
+        <td>${exitedBy ?? ''}</td>
       </tr>`;
     }).join('');
 
@@ -721,7 +735,7 @@ export default function OutgateReports() {
       <table>
         <thead>
           <tr>
-            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Driver</th>
+            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Driver</th><th>Exited By</th>
           </tr>
         </thead>
         <tbody>
@@ -749,6 +763,7 @@ export default function OutgateReports() {
       'Tare (kg)': t.tare ?? '',
       'Net (kg)': t.net ?? '',
       'Driver': t.driver ?? '',
+      'Exited By': t.outgateRef?.rawRow?.edited_by ?? '',
     }));
     exportToCSV(rows, `SAD-${searchTerm || 'report'}.csv`);
     toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
@@ -988,34 +1003,30 @@ export default function OutgateReports() {
         </HStack>
       </Flex>
 
-      {/* Stats — match ConfirmExit layout but replace Unique Tickets with Total Declared Weight */}
+      {/* Stats — match ConfirmExit layout but replaced/updated */}
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
         <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.a.bg, color: '#041124', border: vividCards.a.border }}>
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{totalSADs != null ? totalSADs : '—'}</StatNumber>
-          <StatHelpText>Total registered SADs</StatHelpText>
+          <StatHelpText>Total registered SAD declarations</StatHelpText>
         </Stat>
 
         <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.b.bg, color: '#041124', border: vividCards.b.border }}>
           <StatLabel>Confirmed Exits</StatLabel>
           <StatNumber>{exitedCount}</StatNumber>
-          <StatHelpText>All tickets with status Exited</StatHelpText>
+          <StatHelpText>Total Exited Trucks</StatHelpText>
         </Stat>
 
         <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.c.bg, color: '#041124', border: vividCards.c.border }}>
           <StatLabel>Total Declared Weight</StatLabel>
           <StatNumber>{totalDeclaredWeight != null ? `${formatWeight(totalDeclaredWeight)} kg` : '—'}</StatNumber>
-          <StatHelpText>Sum of all Weights declared</StatHelpText>
+          <StatHelpText>Sum of all declared weights</StatHelpText>
         </Stat>
 
         <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.d.bg, color: '#041124', border: vividCards.d.border }}>
-          <StatLabel>Page Size</StatLabel>
-          <StatNumber>{itemsPerPage}</StatNumber>
-          <StatHelpText>
-            <Select size="sm" value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}>
-              {[5, 10, 20, 50].map((n) => <option key={n} value={n}>{n} / page</option>)}
-            </Select>
-          </StatHelpText>
+          <StatLabel>Total Discharged Weight</StatLabel>
+          <StatNumber>{totalDischargedWeight != null ? `${formatWeight(totalDischargedWeight)} kg` : '—'}</StatNumber>
+          <StatHelpText>Sum of all discharged (Nets)</StatHelpText>
         </Stat>
       </SimpleGrid>
 
@@ -1031,7 +1042,7 @@ export default function OutgateReports() {
           <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(6,182,212,0.06)', bg: 'linear-gradient(135deg,#f0f9ff 0%, #ecfeff 100%)' }}>
             <StatLabel>Discharged Weight</StatLabel>
             <StatNumber>{formatWeight(sadTotalsMemo.cumulativeNet)} kg</StatNumber>
-            <StatHelpText>Sum of nets (respecting date/time filters)</StatHelpText>
+            <StatHelpText>Sum of Nets from all transactions</StatHelpText>
           </Stat>
 
           <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(16,185,129,0.06)', bg: 'linear-gradient(135deg,#f0fff4 0%, #e6ffef 100%)' }}>
@@ -1072,9 +1083,7 @@ export default function OutgateReports() {
               <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); setCurrentPage(1); }} />
               <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>
-              Time From applies to Date From; Time To applies to Date To.
-            </Text>
+          
           </Box>
 
           <Box>
@@ -1096,7 +1105,7 @@ export default function OutgateReports() {
           <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
             <Box>
               <Text fontWeight="semibold">SAD Search: <Text as="span" fontWeight="bold">{searchTerm}</Text></Text>
-              <Text fontSize="sm" color="gray.600">Transactions for this SAD (respecting date/time filters)</Text>
+              <Text fontSize="sm" color="gray.600"></Text>
             </Box>
 
             <HStack spacing={4}>
@@ -1251,7 +1260,7 @@ export default function OutgateReports() {
                 <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
                   <Box>
                     <Text fontWeight="semibold">Driver</Text>
-                    <Text>{selectedReport.driverName ?? '—'}</Text>
+                    <Text>{selectedReport.driverName ?? selectedReport.driver ?? '—'}</Text>
                     <Text mt={3} fontWeight="semibold">Consignee</Text>
                     <Text>{selectedReport.destination ?? '—'}</Text>
                   </Box>
@@ -1280,6 +1289,25 @@ export default function OutgateReports() {
                     );
                   })()}
                 </Box>
+
+                <Divider />
+
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3}>
+                  <Box>
+                    <Text fontWeight="semibold">Exited By</Text>
+                    <Text>
+                      {selectedReport.exitedBy
+                        ?? selectedReport.outgateRef?.rawRow?.edited_by
+                        ?? selectedReport.rawRow?.edited_by
+                        ?? '—'}
+                    </Text>
+                  </Box>
+
+                  <Box>
+                    <Text fontWeight="semibold">Exit Time</Text>
+                    <Text>{selectedReport.outgateDateTime ? new Date(selectedReport.outgateDateTime).toLocaleString() : '—'}</Text>
+                  </Box>
+                </SimpleGrid>
 
                 {selectedReport.fileUrl && (
                   <>
