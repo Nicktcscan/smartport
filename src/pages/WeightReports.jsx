@@ -203,7 +203,7 @@ function computeWeightsFromObj({ gross, tare, net }) {
 }
 
 /**
- * parseTicketDate (robust)
+ * parseTicketDate (robust) - accepts ISO, timestamps, date-only, or Date objects
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -240,8 +240,8 @@ function parseTicketDate(raw) {
 
 function sortTicketsByDateDesc(arr) {
   return (arr || []).slice().sort((a, b) => {
-    const da = parseTicketDate(a?.data?.date);
-    const db = parseTicketDate(b?.data?.date);
+    const da = parseTicketDate(a?.data?.submitted_at);
+    const db = parseTicketDate(b?.data?.submitted_at);
     if (!da && !db) return 0;
     if (!da) return 1;
     if (!db) return -1;
@@ -268,8 +268,8 @@ function removeDuplicatesByTicketNo(tickets = []) {
       map.set(key, t);
       continue;
     }
-    const da = parseTicketDate(existing.data?.date);
-    const db = parseTicketDate(t.data?.date);
+    const da = parseTicketDate(existing.data?.submitted_at);
+    const db = parseTicketDate(t.data?.submitted_at);
     if (db && (!da || db.getTime() > da.getTime())) {
       map.set(key, t);
       continue;
@@ -284,13 +284,13 @@ function removeDuplicatesByTicketNo(tickets = []) {
 }
 
 // =======================================
-// PDF components (SAD column removed)
+// PDF components
 function PdfTicketRow({ ticket }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
   const ticketNo = d.ticketNo ?? ticket.ticketId ?? 'N/A';
   const truckText = d.gnswTruckNo ?? d.anpr ?? d.truckOnWb ?? d.truckNo ?? 'N/A';
-  const dateText = d.date ? new Date(d.date).toLocaleString() : 'N/A';
+  const dateText = d.submitted_at ? new Date(d.submitted_at).toLocaleString() : 'N/A';
   const driverText = d.driver ?? 'N/A';
   const createdByText = d.createdBy ?? d.operator ?? 'N/A';
 
@@ -603,7 +603,7 @@ export default function WeightReports() {
     const ttMinutes = parseTimeToMinutes(timeTo);
 
     arr = arr.filter((ticket) => {
-      const raw = ticket.data.date;
+      const raw = ticket.data.submitted_at;
       const ticketDate = parseTicketDate(raw);
       if (!ticketDate) return false;
 
@@ -630,8 +630,8 @@ export default function WeightReports() {
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
-        const da = parseTicketDate(a?.data?.date);
-        const db = parseTicketDate(b?.data?.date);
+        const da = parseTicketDate(a?.data?.submitted_at);
+        const db = parseTicketDate(b?.data?.submitted_at);
         if (!da && !db) return 0;
         if (!da) return 1;
         if (!db) return -1;
@@ -665,7 +665,7 @@ export default function WeightReports() {
 
     setReportMeta((prev) => ({
       ...prev,
-      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.date ? new Date(originalTickets[0].data.date).toLocaleDateString() : ''),
+      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.submitted_at ? new Date(originalTickets[0].data.submitted_at).toLocaleDateString() : ''),
       startTimeLabel: startLabel || prev.startTimeLabel || '',
       endTimeLabel: endLabel || prev.endTimeLabel || '',
     }));
@@ -697,7 +697,7 @@ export default function WeightReports() {
         data: {
           sadNo: ticket.sad_no,
           ticketNo: ticket.ticket_no,
-          date: ticket.date,
+          submitted_at: ticket.submitted_at ?? ticket.submittedAt ?? ticket.created_at ?? ticket.date ?? null,
           gnswTruckNo: ticket.gnsw_truck_no,
           truckOnWb: ticket.truck_on_wb,
           net: ticket.net ?? ticket.net_weight ?? null,
@@ -851,7 +851,7 @@ export default function WeightReports() {
       }
 
       setReportMeta({
-        dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.date ? new Date(sortedOriginal[0].data.date).toLocaleDateString() : '') : '',
+        dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.submitted_at ? new Date(sortedOriginal[0].data.submitted_at).toLocaleDateString() : '') : '',
         startTimeLabel: '',
         endTimeLabel: '',
         sad: `${searchSAD.trim()}`,
@@ -1133,15 +1133,15 @@ export default function WeightReports() {
       toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
       return;
     }
-    // include createdBy column
-    const header = ['sadNo', 'ticketNo', 'date', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'createdBy', 'containerNo', 'passNumber', 'scaleName'];
+    // include createdBy column — use submitted_at column name for date
+    const header = ['sadNo', 'ticketNo', 'submitted_at', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'createdBy', 'containerNo', 'passNumber', 'scaleName'];
     const rows = filteredTickets.map((t) => {
       const d = t.data || {};
       const truck = d.gnswTruckNo || d.truckOnWb || d.anpr || d.truckNo || '';
       return [
         d.sadNo ?? '',
         d.ticketNo ?? t.ticketId ?? '',
-        d.date ? new Date(d.date).toISOString() : '',
+        d.submitted_at ? new Date(d.submitted_at).toISOString() : '',
         truck,
         d.driver ?? '',
         d.gross ?? '',
@@ -1887,7 +1887,7 @@ export default function WeightReports() {
                           <HStack>
                             <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
                           </HStack>
-                          <Text fontSize="sm" color="gray.500">{t.data.date ? new Date(t.data.date).toLocaleString() : 'N/A'}</Text>
+                          <Text fontSize="sm" color="gray.500">{t.data.submitted_at ? new Date(t.data.submitted_at).toLocaleString() : 'N/A'}</Text>
                         </Box>
 
                         <Box textAlign="right">
@@ -1982,7 +1982,7 @@ export default function WeightReports() {
                       return (
                         <Tr key={ticket.ticketId}>
                           <Td>{ticket.data.ticketNo}</Td>
-                          <Td>{ticket.data.date ? new Date(ticket.data.date).toLocaleString() : 'N/A'}</Td>
+                          <Td>{ticket.data.submitted_at ? new Date(ticket.data.submitted_at).toLocaleString() : 'N/A'}</Td>
                           <Td>{displayTruck}</Td>
                           <Td isNumeric>{computed.grossDisplay || '0'}</Td>
                           <Td isNumeric>{computed.tareDisplay || '0'}</Td>
@@ -2086,7 +2086,7 @@ export default function WeightReports() {
                   <Box>
                     <Text fontWeight="bold">Ticket Details</Text>
                     <Text fontSize="sm" color="gray.500">
-                      {selectedTicket?.ticketId} • {selectedTicket?.data?.date ? new Date(selectedTicket.data.date).toLocaleDateString() : ''}
+                      {selectedTicket?.ticketId} • {selectedTicket?.data?.submitted_at ? new Date(selectedTicket.data.submitted_at).toLocaleDateString() : ''}
                     </Text>
                   </Box>
                 </Flex>
