@@ -203,7 +203,7 @@ function computeWeightsFromObj({ gross, tare, net }) {
 }
 
 /**
- * parseTicketDate (robust) - accepts ISO, timestamps, date-only, or Date objects
+ * parseTicketDate (robust)
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -220,7 +220,7 @@ function parseTicketDate(raw) {
     return isNaN(d.getTime()) ? null : d;
   }
 
-  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?/.test(s0)) {
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
     const iso = s0.replace(' ', 'T');
     const d = new Date(iso);
     if (!isNaN(d.getTime())) return d;
@@ -284,7 +284,7 @@ function removeDuplicatesByTicketNo(tickets = []) {
 }
 
 // =======================================
-// PDF components
+// PDF components (SAD column removed)
 function PdfTicketRow({ ticket }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
@@ -597,6 +597,20 @@ export default function WeightReports() {
     if (dateTo) {
       const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
       end = new Date(`${dateTo}T${fullTime}`);
+    }
+
+    // If both start and end exist but end is before or equal to start (wrap-around/time overlap),
+    // advance end forward by whole days until it is after start.
+    if (start && end && end.getTime() <= start.getTime()) {
+      let e = new Date(end);
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      // Avoid infinite loops; limit to adding up to 7 days just in case user input was wildly off.
+      let attempts = 0;
+      while (e.getTime() <= start.getTime() && attempts < 7) {
+        e = new Date(e.getTime() + DAY_MS);
+        attempts += 1;
+      }
+      end = e;
     }
 
     const tfMinutes = parseTimeToMinutes(timeFrom);
