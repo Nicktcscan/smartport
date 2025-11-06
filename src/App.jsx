@@ -88,17 +88,8 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
 
-          {/* Public Appointment route: accessible without login */}
-          <Route
-            path="/appointment"
-            element={
-              <Layout>
-                <Box as="main" p={4} bg="gray.50">
-                  <Appointment />
-                </Box>
-              </Layout>
-            }
-          />
+          {/* Public Appointment route: accessible without login, rendered standalone (no Layout/Header) */}
+          <Route path="/appointment" element={<Appointment />} />
 
           <Route
             path="/register"
@@ -118,7 +109,9 @@ function App() {
         </Routes>
       ) : (
         <>
-          <Header />
+          {/* Hide global Header when viewing the public-style appointment page */}
+          {location.pathname !== '/appointment' && <Header />}
+
           <Routes>
             <Route
               path="/"
@@ -139,17 +132,8 @@ function App() {
               }
             />
 
-            {/* Make Appointment accessible to logged-in users too */}
-            <Route
-              path="/appointment"
-              element={
-                <Layout>
-                  <Box as="main" p={4} bg="gray.50">
-                    <Appointment />
-                  </Box>
-                </Layout>
-              }
-            />
+            {/* Make Appointment accessible to logged-in users too (standalone, no Layout/Header) */}
+            <Route path="/appointment" element={<Appointment />} />
 
             {/* Weighbridge */}
             <Route
@@ -301,7 +285,7 @@ function App() {
               }
             />
 
-              {/* NEW: Settings route */}
+            {/* NEW: Settings route */}
             <Route
               path="/settings"
               element={
