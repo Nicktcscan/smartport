@@ -266,6 +266,22 @@ function Login() {
             Log in
           </Button>
 
+          {/* Public appointment link (no login required) */}
+          <Box textAlign="center" mt={2}>
+            <Text fontSize="sm" color={useColorModeValue("gray.600", "gray.300")}>
+              Need to create an appointment?
+              {" "}
+              <Link
+                as={RouterLink}
+                to="/appointment"
+                color="teal.500"
+                fontWeight="semibold"
+                aria-label="Create appointment (no login required)"
+              >
+                Create appointment (no login required)
+              </Link>
+            </Text>
+          </Box>
         </VStack>
       </MotionBox>
     </Box>

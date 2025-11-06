@@ -38,6 +38,9 @@ import AgentDashboard from './pages/AgentDashboard';
 import SADDeclaration from './pages/SADDeclaration';
 import Settings from './pages/Settings';
 
+// NEW: Appointment page (public route)
+import Appointment from './pages/appointment';
+
 const ProtectedRoute = ({ children, allowedRoles }) => {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
@@ -84,6 +87,19 @@ function App() {
       {!user ? (
         <Routes>
           <Route path="/login" element={<Login />} />
+
+          {/* Public Appointment route: accessible without login */}
+          <Route
+            path="/appointment"
+            element={
+              <Layout>
+                <Box as="main" p={4} bg="gray.50">
+                  <Appointment />
+                </Box>
+              </Layout>
+            }
+          />
+
           <Route
             path="/register"
             element={
@@ -94,6 +110,7 @@ function App() {
               </Layout>
             }
           />
+
           <Route
             path="*"
             element={isStaticAsset ? null : <Navigate to="/login" replace />}
@@ -119,6 +136,18 @@ function App() {
                 ) : (
                   <Navigate to="/dashboard" replace />
                 )
+              }
+            />
+
+            {/* Make Appointment accessible to logged-in users too */}
+            <Route
+              path="/appointment"
+              element={
+                <Layout>
+                  <Box as="main" p={4} bg="gray.50">
+                    <Appointment />
+                  </Box>
+                </Layout>
               }
             />
 
