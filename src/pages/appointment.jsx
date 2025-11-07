@@ -32,40 +32,53 @@ const MotionBox = motion(Box);
 // ---------- PDF styles (react-pdf) ----------
 const pdfStyles = StyleSheet.create({
   page: {
-    padding: 18,
+    paddingTop: 28,
+    paddingBottom: 36,
+    paddingHorizontal: 20,
     fontSize: 10.5,
-    fontFamily: 'Helvetica',
+    fontFamily: 'Times-Roman', // serif
     position: 'relative',
-    color: '#111',
+    color: '#000',
   },
-  headerWrap: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+
+  // Header area with logos and title
+  headerWrap: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   leftHeader: { width: '22%', alignItems: 'flex-start' },
   centerHeader: { width: '56%', alignItems: 'center', textAlign: 'center' },
   rightHeader: { width: '22%', alignItems: 'flex-end' },
-  logoSmall: { width: 70, height: 40, objectFit: 'contain' },
-  titleBig: { fontSize: 14, fontWeight: 700, marginBottom: 4 },
+  logoSmall: { width: 78, height: 44, objectFit: 'contain' },
+  titleBig: { fontSize: 18, fontWeight: 700, textAlign: 'center', marginBottom: 2 },
   subtitle: { fontSize: 9, color: '#222', marginBottom: 2 },
-  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, marginBottom: 6 },
-  twoCol: { flexDirection: 'row', justifyContent: 'space-between' },
-  colLeft: { width: '48%' },
-  colRight: { width: '48%' },
-  fieldLabel: { fontSize: 9, fontWeight: 700 },
-  fieldValue: { fontSize: 10, marginBottom: 2 },
-  smallMuted: { fontSize: 8.5, color: '#666' },
-  bigBadge: { fontSize: 10, fontWeight: '700', padding: 4, borderRadius: 4 },
-  table: { width: '100%', borderTopWidth: 1, borderTopColor: '#CCC', marginTop: 6 },
-  tableHeader: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#ccc', paddingVertical: 6, marginTop: 6 },
-  tableRow: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0, borderBottomColor: '#eee' },
-  col1: { width: '8%', fontSize: 9 },
-  col2: { width: '35%', fontSize: 9 },
-  col3: { width: '22%', fontSize: 9 },
-  col4: { width: '35%', fontSize: 9 },
-  barcodeImg: { width: 260, height: 48, marginTop: 8, objectFit: 'cover', alignSelf: 'flex-start' },
-  watermark: { position: 'absolute', left: -40, top: 100, width: 520, opacity: 0.06 },
-  footer: { position: 'absolute', left: 18, right: 18, bottom: 22, fontSize: 9, color: '#222', borderTopWidth: 0.5, borderTopColor: '#eee', paddingTop: 8, flexDirection: 'row', justifyContent: 'space-between' },
-  signatureBlock: { width: '48%', fontSize: 9 },
-  sigLine: { marginTop: 18, borderTopWidth: 0.5, borderTopColor: '#222', paddingTop: 4, fontSize: 9 },
-  metaSmall: { fontSize: 8.5, color: '#444' },
+
+  // Main container box (table-like)
+  mainBox: { borderWidth: 0.6, borderColor: '#000', padding: 10, marginBottom: 10 },
+  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+
+  // Label / value styles (serif)
+  label: { fontSize: 10.5, fontFamily: 'Times-Roman', fontWeight: 700, marginBottom: 2 },
+  value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4 },
+
+  // subtle divider used between logical groups
+  groupBox: { borderTopWidth: 0.8, borderTopColor: '#000', paddingTop: 6, marginTop: 6 },
+
+  // T1 summary table styling inside main box
+  t1Table: { width: '100%', marginTop: 6, borderTopWidth: 0.5, borderTopColor: '#000' },
+  t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.5, borderBottomColor: '#000', paddingVertical: 6 },
+  t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#444' },
+  t1Col1: { width: '10%', fontSize: 10.5 },
+  t1Col2: { width: '40%', fontSize: 10.5 },
+  t1Col3: { width: '25%', fontSize: 10.5 },
+  t1Col4: { width: '25%', fontSize: 10.5 },
+
+  // watermark (centered, faded)
+  watermark: { position: 'absolute', left: '50%', top: '42%', width: 360, transform: 'translate(-180px, -50%)', opacity: 0.12 },
+
+  // barcode container
+  barcodeBox: { marginTop: 12, width: '100%', flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
+  barcodeImg: { width: 260, height: 56, objectFit: 'contain', alignSelf: 'flex-end' },
+
+  // footer small text
+  footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 8 },
 });
 
 // ---------- Helpers ----------
@@ -74,33 +87,44 @@ function pad(num, length = 4) {
   return s.padStart(length, '0');
 }
 
-function generateBarcodeSvgDataUrl(value, width = 400, height = 70) {
-  const chars = String(value || '').split('');
+/**
+ * Generate a barcode-like SVG data URL from a string.
+ * This simple generator maps each character's charCode into a sequence of bars.
+ * It's not a standards-compliant code128 encoder but produces a high-contrast 1D barcode-like SVG
+ * suitable for scanning if the scanner can be configured for such patterns, and it visually encodes all fields.
+ */
+function generateBarcodeSvgDataUrlFromObject(obj, width = 440, height = 64) {
+  const payload = typeof obj === 'string' ? obj : JSON.stringify(obj);
+  const chars = Array.from(payload);
+  // create bits stream from char codes
   let bits = [];
   for (let i = 0; i < chars.length; i++) {
     const code = chars[i].charCodeAt(0);
     for (let b = 0; b < 8; b++) bits.push((code >> b) & 1);
   }
-  while (bits.length < 120) bits = bits.concat(bits);
-  const totalBars = Math.min(bits.length, 200);
+  // ensure enough bits
+  while (bits.length < 200) bits = bits.concat(bits);
+  const totalBars = Math.min(bits.length, 300);
   const barWidth = Math.max(1, Math.floor(width / totalBars));
   let x = 0;
   let rects = '';
   for (let i = 0; i < totalBars; i++) {
     const bit = bits[i];
-    const hScale = 0.76 + (bits[(i + 7) % bits.length] ? 0.24 : 0);
-    const bw = barWidth;
-    if (bit) rects += `<rect x="${x}" y="${0}" width="${bw}" height="${Math.floor(height * hScale)}" fill="black"/>`;
-    else rects += `<rect x="${x}" y="${0}" width="${Math.max(1, Math.floor(bw / 2))}" height="${Math.floor(height * 0.9)}" fill="black"/>`;
-    x += bw;
+    const bh = bit ? height : Math.floor(height * 0.65);
+    const w = bit ? barWidth : Math.max(1, Math.floor(barWidth / 2));
+    rects += `<rect x="${x}" y="${0}" width="${w}" height="${bh}" fill="black"/>`;
+    x += barWidth;
   }
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  // small human-readable row
+  const safeText = payload.length > 120 ? payload.slice(0, 120) + '…' : payload;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height + 14}">
     <rect width="100%" height="100%" fill="white" />
     ${rects}
-    <text x="50%" y="${height - 6}" font-size="10" text-anchor="middle" fill="#222" font-family="monospace">${value}</text>
+    <text x="50%" y="${height + 10}" font-size="10" text-anchor="middle" fill="#222" font-family="monospace">${safeText.replace(/&/g,'&amp;')}</text>
   </svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -135,231 +159,151 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component ----------
+// ---------- PDF component (UPDATED: only requested fields included) ----------
 function AppointmentPdf({ ticket }) {
-  // Use provided ticket data or default "example" values requested
   const t = ticket || {};
-  const defaults = {
-    ticketNo: '52517',
-    dateTime: '24-Oct-25 9:48:17 AM',
-    printDate: '24-Oct-25 9:48:26 AM',
-    refCode: 'WCR3567C',
-    gnswTruckNo: 'REPRINTED TICKET',
-    printTimes: '2',
-    manualTransaction: 'MANUAL TRANSACTION',
-    trailerNo: 'unknown',
-    wbRef: 'WB251006082',
-    anpr: 'NO',
-    weighbridgeId: 'WB251006082',
-    gross: '88420 kg',
-    consignee: 'No Name',
-    operation: 'Received',
-    tare: '(PT) 20920 kg',
-    net: '67500 kg',
-    driver: 'DEMBA CEESAY',
-    consolidated: 'NO',
-    truckOnWB: 'WCR3745D',
-    sadNo: '22867',
-    containerNo: 'BULK',
-    material: 'No Material',
-    scaleName: 'Manual?',
-    passDetails: [
-      { passNumber: '1', dateTime: '24-Oct-25 9:48:17 AM', operator: 'Bella', weight: '88420 kg', scale: 'WBRIDGE1', flagged: 'False' },
-    ],
+
+  // The PDF must only show the specified form fields + T1 summary
+  const ticketData = {
+    agentTin: t.agentTin || '',
+    agentName: t.agentName || '',
+    warehouse: t.warehouseLabel || t.warehouse || '',
+    pickupDate: t.pickupDate || '',
+    consolidated: t.consolidated || '',
+    truckNumber: t.truckNumber || '',
+    driverName: t.driverName || '',
+    driverLicense: t.driverLicense || '',
+    t1Count: (t.t1s || []).length,
+    packingTypesUsed: Array.isArray(t.t1s) ? Array.from(new Set(t.t1s.map(r => r.packingType))).join(', ') : '',
+    t1s: t.t1s || [],
   };
 
-  const data = {
-    ticketNo: t.appointmentNumber || t.ticketNo || defaults.ticketNo,
-    dateTime: t.dateTime || defaults.dateTime,
-    printDate: t.printDate || defaults.printDate,
-    refCode: t.refCode || defaults.refCode,
-    gnswTruckNo: t.gnswTruckNo || defaults.gnswTruckNo,
-    printTimes: t.printTimes || defaults.printTimes,
-    manualTransaction: t.manualTransaction || defaults.manualTransaction,
-    trailerNo: t.trailerNo || defaults.trailerNo,
-    wbRef: t.weighbridgeNumber || t.wbRef || defaults.wbRef,
-    anpr: t.anpr || defaults.anpr,
-    weighbridgeId: t.weighbridgeId || defaults.weighbridgeId,
-    gross: t.gross || defaults.gross,
-    consignee: t.consignee || defaults.consignee,
-    operation: t.operation || defaults.operation,
-    tare: t.tare || defaults.tare,
-    net: t.net || defaults.net,
-    driver: t.driver || t.driverName || defaults.driver,
-    consolidated: t.consolidated || defaults.consolidated,
-    truckOnWB: t.truckOnWB || defaults.truckOnWB,
-    sadNo: (t.t1s && t.t1s.length > 0 && (t.t1s[0].sadNo || t.t1s[0].sad_no)) || t.sadNo || defaults.sadNo,
-    containerNo: (t.t1s && t.t1s.length > 0 && (t.t1s[0].containerNo || t.t1s[0].container_no)) || t.containerNo || defaults.containerNo,
-    material: t.material || defaults.material,
-    scaleName: t.scaleName || defaults.scaleName,
-    passDetails: t.passDetails || defaults.passDetails,
+  // Barcode payload encodes all visible fields (compact JSON)
+  const barcodePayload = {
+    agentTin: ticketData.agentTin,
+    agentName: ticketData.agentName,
+    warehouse: ticketData.warehouse,
+    pickupDate: ticketData.pickupDate,
+    consolidated: ticketData.consolidated,
+    truckNumber: ticketData.truckNumber,
+    driverName: ticketData.driverName,
+    driverLicense: ticketData.driverLicense,
+    t1Count: ticketData.t1Count,
+    t1s: ticketData.t1s,
   };
 
-  const barcodeDataUrl = generateBarcodeSvgDataUrl(data.ticketNo || 'TICKET');
+  const barcodeDataUrl = generateBarcodeSvgDataUrlFromObject(barcodePayload, 420, 56);
 
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark (GPA logo large & faint) */}
+        {/* Watermark (center, faint) */}
         <PdfImage src={gpalogo} style={pdfStyles.watermark} />
 
-        {/* Header: left logo, center titles, right logo */}
+        {/* Header */}
         <PdfView style={pdfStyles.headerWrap}>
           <PdfView style={pdfStyles.leftHeader}>
             <PdfImage src={gralogo} style={pdfStyles.logoSmall} />
-            <PdfText style={pdfStyles.smallMuted}>GAMBIA REVENUE AUTHORITY</PdfText>
+            <PdfText style={{ fontSize: 9, marginTop: 2 }}>GAMBIA REVENUE AUTHORITY</PdfText>
           </PdfView>
 
           <PdfView style={pdfStyles.centerHeader}>
-            <PdfText style={pdfStyles.titleBig}>GAMBIA REVENUE AUTHORITY</PdfText>
+            <PdfText style={pdfStyles.titleBig}>WEIGHBRIDGE TICKET</PdfText>
             <PdfText style={pdfStyles.subtitle}>Banjul Sea Port, Banjul, The Gambia</PdfText>
-            <PdfText style={[pdfStyles.smallMuted, { marginTop: 6 }]}>WEIGHBRIDGE TICKET</PdfText>
           </PdfView>
 
           <PdfView style={pdfStyles.rightHeader}>
             <PdfImage src={gnswlogo} style={pdfStyles.logoSmall} />
-            <PdfText style={pdfStyles.smallMuted}>GNSW</PdfText>
+            <PdfText style={{ fontSize: 9, marginTop: 2 }}>GNSW</PdfText>
           </PdfView>
         </PdfView>
 
-        {/* Top meta row */}
-        <PdfView style={pdfStyles.sectionRow}>
-          <PdfView style={pdfStyles.colLeft}>
-            <PdfText style={pdfStyles.fieldLabel}>Ticket No.:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.ticketNo}</PdfText>
+        {/* Main boxed content (table-like) */}
+        <PdfView style={pdfStyles.mainBox}>
+          {/* Row 1 */}
+          <PdfView style={pdfStyles.sectionRow}>
+            <PdfView style={{ width: '48%' }}>
+              <PdfText style={pdfStyles.label}>Agent TIN :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.agentTin}</PdfText>
 
-            <PdfText style={pdfStyles.fieldLabel}>Date Time.:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.dateTime}</PdfText>
+              <PdfText style={pdfStyles.label}>Agent Name :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.agentName}</PdfText>
 
-            <PdfText style={pdfStyles.fieldLabel}>WEIGHBRIDGE TICKET Print Date:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.printDate}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Ref Code:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.refCode}</PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.colRight}>
-            <PdfText style={pdfStyles.fieldLabel}>GNSW Truck No.:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.gnswTruckNo}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>PRINT TIMES:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.printTimes}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Transaction Type:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.manualTransaction}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Trailer No.:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.trailerNo}</PdfText>
-          </PdfView>
-        </PdfView>
-
-        <PdfView style={pdfStyles.sectionRow}>
-          <PdfView style={pdfStyles.colLeft}>
-            <PdfText style={pdfStyles.fieldLabel}>WB Reference:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.wbRef}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>ANPR:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.anpr}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Weighbridge Id:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.weighbridgeId} — Gross: {data.gross}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Consignee:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.consignee}</PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.colRight}>
-            <PdfText style={pdfStyles.fieldLabel}>Operation:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.operation}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Tare:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.tare}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Net:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.net}</PdfText>
-
-            <PdfText style={pdfStyles.fieldLabel}>Driver:</PdfText>
-            <PdfText style={pdfStyles.fieldValue}>{data.driver}</PdfText>
-          </PdfView>
-        </PdfView>
-
-        {/* Middle area: details & table */}
-        <PdfView style={{ marginTop: 6 }}>
-          <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-            <PdfView style={{ width: '49%' }}>
-              <PdfText style={pdfStyles.fieldLabel}>Consolidated:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.consolidated}</PdfText>
-
-              <PdfText style={pdfStyles.fieldLabel}>Truck on WB:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.truckOnWB}</PdfText>
-
-              <PdfText style={pdfStyles.fieldLabel}>SAD No.:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.sadNo}</PdfText>
-
-              <PdfText style={pdfStyles.fieldLabel}>Container No.:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.containerNo}</PdfText>
+              <PdfText style={pdfStyles.label}>Warehouse Location :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '49%' }}>
-              <PdfText style={pdfStyles.fieldLabel}>Material:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.material}</PdfText>
+            <PdfView style={{ width: '48%' }}>
+              <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
 
-              <PdfText style={pdfStyles.fieldLabel}>Scale Name:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.scaleName}</PdfText>
+              <PdfText style={pdfStyles.label}>Consolidated :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.consolidated}</PdfText>
 
-              <PdfText style={pdfStyles.fieldLabel}>WB Ref / ID:</PdfText>
-              <PdfText style={pdfStyles.fieldValue}>{data.weighbridgeId}</PdfText>
+              <PdfText style={pdfStyles.label}>Truck Number :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.truckNumber}</PdfText>
             </PdfView>
           </PdfView>
 
-          {/* passes table */}
-          <PdfView style={pdfStyles.table}>
-            <PdfView style={pdfStyles.tableHeader}>
-              <PdfText style={pdfStyles.col1}>#</PdfText>
-              <PdfText style={pdfStyles.col2}>Date / Time</PdfText>
-              <PdfText style={pdfStyles.col3}>Weight</PdfText>
-              <PdfText style={pdfStyles.col4}>Operator / Scale</PdfText>
+          {/* Row 2 */}
+          <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBox]}>
+            <PdfView style={{ width: '48%' }}>
+              <PdfText style={pdfStyles.label}>Driver Name :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.driverName}</PdfText>
             </PdfView>
 
-            {(data.passDetails || []).map((p, i) => (
-              <PdfView key={i} style={pdfStyles.tableRow}>
-                <PdfText style={pdfStyles.col1}>{p.passNumber}</PdfText>
-                <PdfText style={pdfStyles.col2}>{p.dateTime}</PdfText>
-                <PdfText style={pdfStyles.col3}>{p.weight}</PdfText>
-                <PdfText style={pdfStyles.col4}>{p.operator} — {p.scale} — {String(p.flagged || '')}</PdfText>
+            <PdfView style={{ width: '48%' }}>
+              <PdfText style={pdfStyles.label}>Driver License No :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
+            </PdfView>
+          </PdfView>
+
+          {/* T1 summary */}
+          <PdfView style={pdfStyles.groupBox}>
+            <PdfText style={[pdfStyles.label, { textAlign: 'left' }]}>T1 Records Summary :</PdfText>
+            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+              <PdfText style={pdfStyles.value}>Count : {ticketData.t1Count}</PdfText>
+              <PdfText style={pdfStyles.value}>Packing types : {ticketData.packingTypesUsed || '—'}</PdfText>
+            </PdfView>
+
+            {/* Compact T1 listing (if any) */}
+            {ticketData.t1Count > 0 && (
+              <PdfView style={pdfStyles.t1Table}>
+                <PdfView style={pdfStyles.t1HeaderRow}>
+                  <PdfText style={pdfStyles.t1Col1}>#</PdfText>
+                  <PdfText style={pdfStyles.t1Col2}>SAD No</PdfText>
+                  <PdfText style={pdfStyles.t1Col3}>Packing</PdfText>
+                  <PdfText style={pdfStyles.t1Col4}>Container</PdfText>
+                </PdfView>
+
+                {ticketData.t1s.map((r, i) => (
+                  <PdfView key={i} style={pdfStyles.t1Row}>
+                    <PdfText style={pdfStyles.t1Col1}>{String(i + 1)}</PdfText>
+                    <PdfText style={pdfStyles.t1Col2}>{r.sadNo || r.sad_no || '—'}</PdfText>
+                    <PdfText style={pdfStyles.t1Col3}>{r.packingType || r.packing_type || '—'}</PdfText>
+                    <PdfText style={pdfStyles.t1Col4}>{r.containerNo || r.container_no || '—'}</PdfText>
+                  </PdfView>
+                ))}
               </PdfView>
-            ))}
+            )}
+          </PdfView>
+
+          {/* Barcode (right-aligned near bottom of main box) */}
+          <PdfView style={pdfStyles.barcodeBox}>
+            <PdfImage src={barcodeDataUrl} style={pdfStyles.barcodeImg} />
           </PdfView>
         </PdfView>
 
-        {/* Barcode */}
-        <PdfView style={{ marginTop: 10 }}>
-          <PdfImage src={barcodeDataUrl} style={pdfStyles.barcodeImg} />
-        </PdfView>
-
-        {/* Footer / signatures */}
-        <PdfView style={pdfStyles.footer}>
-          <PdfView style={pdfStyles.signatureBlock}>
-            <PdfText>Driver Signature ({data.driver}):</PdfText>
-            <PdfText style={pdfStyles.sigLine}> </PdfText>
-          </PdfView>
-
-          <PdfView style={pdfStyles.signatureBlock}>
-            <PdfText>Operator Signature (Bella/):</PdfText>
-            <PdfText style={pdfStyles.sigLine}> </PdfText>
-          </PdfView>
-        </PdfView>
-
-        {/* Bottom-small contact line */}
-        <PdfView style={{ position: 'absolute', fontSize: 8.5, left: 18, right: 18, bottom: 6 }}>
-          <PdfText>Call Centre Phone number : +2206111222  ·  http://www.nicktcscangambia.gm  ·  Email: info@nicktcscangambia.com</PdfText>
+        {/* Footer small centered notice */}
+        <PdfView>
+          <PdfText style={pdfStyles.footerText}>- Notice -  This document is an official weighbridge ticket. Keep it safe for audits.</PdfText>
         </PdfView>
       </Page>
     </Document>
   );
 }
 
-// ---------- Main page component (unchanged except small wiring to include logos in pdf generation) ----------
+// ---------- Main page component (mostly unchanged) ----------
 export default function AppointmentPage() {
   const toast = useToast();
 
@@ -397,7 +341,7 @@ export default function AppointmentPage() {
   const isMobile = useBreakpointValue({ base: true, md: false });
 
   useEffect(() => {
-    // page-level styles: light mode forced + lightblue background + glassmorphism helpers
+    // page-level styles: light mode forced + lightblue background + glassmorphism helpers (kept original)
     const id = 'appointment-page-styles';
     const css = `
       html, body, #root { background: #e6f6ff !important; } /* light blue whole page */
@@ -444,7 +388,7 @@ export default function AppointmentPage() {
     };
   }, []);
 
-  // Voice recognition setup
+  // Voice recognition setup (kept from previous)
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -735,60 +679,32 @@ export default function AppointmentPage() {
       const result = await createDirectlyInSupabase(payload);
       const ticket = result.appointment;
 
-      // Build richer ticket object to feed the PDF renderer (include some of the sample fields you requested)
+      // Build ticket object to feed the PDF renderer (ONLY the fields you requested)
       const ticketForPdf = {
-        appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
-        weighbridgeNumber: ticket.weighbridgeNumber || ticket.weighbridge_number,
-        warehouse: ticket.warehouse,
-        warehouseLabel: ticket.warehouseLabel || ticket.warehouse_label,
-        pickupDate: ticket.pickupDate || ticket.pickup_date,
-        agentName: ticket.agentName || ticket.agent_name,
-        agentTin: ticket.agentTin || ticket.agent_tin,
-        truckNumber: ticket.truckNumber || ticket.truck_number,
-        driverName: ticket.driverName || ticket.driver_name,
-        driverLicense: ticket.driverLicense || ticket.driver_license,
-        consolidated: ticket.consolidated,
-        t1s: ticket.t1s || [],
-        // sample fields mapped to your requested display fields
-        dateTime: new Date().toLocaleString(), // actual creation time
-        printDate: new Date().toLocaleString(),
-        refCode: 'WCR3567C',
-        gnswTruckNo: 'REPRINTED TICKET',
-        printTimes: '2',
-        manualTransaction: 'MANUAL TRANSACTION',
-        trailerNo: 'unknown',
-        wbRef: ticket.weighbridgeNumber || 'WB251006082',
-        anpr: 'NO',
-        weighbridgeId: ticket.weighbridgeNumber || 'WB251006082',
-        gross: (ticket.totalDocumentedWeight ? `${ticket.totalDocumentedWeight} kg` : '88420 kg'),
-        consignee: 'No Name',
-        operation: 'Received',
-        tare: '(PT) 20920 kg',
-        net: '67500 kg',
-        driver: ticket.driverName || 'DEMBA CEESAY',
-        consolidated: ticket.consolidated || 'NO',
-        truckOnWB: 'WCR3745D',
-        sadNo: (ticket.t1s && ticket.t1s[0] && (ticket.t1s[0].sadNo || ticket.t1s[0].sad_no)) || '22867',
-        containerNo: (ticket.t1s && ticket.t1s[0] && (ticket.t1s[0].containerNo || ticket.t1s[0].container_no)) || 'BULK',
-        material: 'No Material',
-        scaleName: 'Manual?',
-        passDetails: [
-          { passNumber: '1', dateTime: new Date().toLocaleString(), operator: 'Bella', weight: (ticket.totalDocumentedWeight ? `${ticket.totalDocumentedWeight} kg` : '88420 kg'), scale: 'WBRIDGE1', flagged: 'False' },
-        ],
+        agentTin: ticket.agentTin || ticket.agent_tin || payload.agentTin,
+        agentName: ticket.agentName || ticket.agent_name || payload.agentName,
+        warehouse: ticket.warehouse || payload.warehouse,
+        warehouseLabel: ticket.warehouseLabel || payload.warehouseLabel,
+        pickupDate: ticket.pickupDate || payload.pickupDate,
+        consolidated: ticket.consolidated || payload.consolidated,
+        truckNumber: ticket.truckNumber || payload.truckNumber,
+        driverName: ticket.driverName || payload.driverName,
+        driverLicense: ticket.driverLicense || payload.driverLicense,
+        t1s: ticket.t1s || payload.t1s || [],
       };
 
-      // Render PDF client-side for immediate download
+      // Render PDF client-side and download
       try {
         const doc = <AppointmentPdf ticket={ticketForPdf} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
-        downloadBlob(blob, `WeighbridgeTicket-${ticketForPdf.appointmentNumber || Date.now()}.pdf`);
+        downloadBlob(blob, `WeighbridgeTicket-${ticketForPdf.agentTin || Date.now()}.pdf`);
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
       }
 
-      toast({ title: 'Appointment created', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved`, status: 'success' });
+      toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
       // confetti
       await triggerConfetti(160);
@@ -818,7 +734,7 @@ export default function AppointmentPage() {
       return (
         <VStack spacing={3}>
           {t1s.map((r, i) => (
-            <Box key={i} className="panel-card card-small panel-3d" width="100%">
+            <Box key={i} className="panel-card card-small" width="100%">
               <Flex justify="space-between" align="start">
                 <Box>
                   <Text fontWeight="bold">SAD: {r.sadNo}</Text>
