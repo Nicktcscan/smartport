@@ -6,9 +6,10 @@ import {
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   IconButton, Badge, Divider, VStack, useBreakpointValue, Flex
 } from '@chakra-ui/react';
-import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon, InfoIcon } from '@chakra-ui/icons';
+import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import { pdf as pdfRender, Document, Page, Text as PdfText, View as PdfView, StyleSheet, Image as PdfImage } from '@react-pdf/renderer';
+import { supabase } from '../supabaseClient'; // fallback direct DB option (ensure this file exists and exports supabase client)
 
 // ---------- Config ----------
 const API_URL = 'https://smartport-api.vercel.app/api/appointments';
@@ -36,6 +37,11 @@ const pdfStyles = StyleSheet.create({
 });
 
 // ---------- Helpers ----------
+function pad(num, length = 4) {
+  const s = String(num || 0);
+  return s.padStart(length, '0');
+}
+
 function generateBarcodeSvgDataUrl(value, width = 400, height = 80) {
   const chars = String(value || '').split('');
   let bits = [];
@@ -368,7 +374,145 @@ export default function AppointmentPage() {
   };
   const closeConfirm = () => setConfirmOpen(false);
 
-  // Create appointment — POST to external API
+  // --- Helper: generate appointment numbers using pickupDate and existing count (avoids relying on numeric DB id) ---
+  async function generateNumbersUsingSupabase(pickupDateValue) {
+    try {
+      // count existing appointments for pickup_date
+      const { count, error: countErr } = await supabase
+        .from('appointments')
+        .select('id', { head: true, count: 'exact' })
+        .eq('pickup_date', pickupDateValue);
+
+      const existing = count || 0;
+      const seq = existing + 1;
+      const d = new Date(pickupDateValue);
+      const YY = String(d.getFullYear()).slice(-2);
+      const MM = String(d.getMonth() + 1).padStart(2, '0');
+      const DD = String(d.getDate()).padStart(2, '0');
+      const appointmentNumber = `${YY}${MM}${DD}${pad(seq, 4)}`;
+      const weighbridgeNumber = `WB${YY}${MM}${pad(seq, 5)}`;
+      return { appointmentNumber, weighbridgeNumber };
+    } catch (e) {
+      // fallback to random
+      const d = new Date(pickupDateValue);
+      const YY = String(d.getFullYear()).slice(-2);
+      const MM = String(d.getMonth() + 1).padStart(2, '0');
+      const DD = String(d.getDate()).padStart(2, '0');
+      const rand = Math.floor(Math.random() * 9999) + 1;
+      return { appointmentNumber: `${YY}${MM}${DD}${pad(rand, 4)}`, weighbridgeNumber: `WB${YY}${MM}${pad(rand, 5)}` };
+    }
+  }
+
+  // Direct Supabase fallback create (used when external API fails / CORS)
+  const createDirectlyInSupabase = async (payload) => {
+    // payload fields: warehouse, warehouseLabel, pickupDate, agentName, agentTin, consolidated, truckNumber, driverName, driverLicense, t1s[]
+    if (!supabase) {
+      throw new Error('Supabase client not available for direct insert.');
+    }
+
+    // generate numbers using pickupDate
+    const { appointmentNumber, weighbridgeNumber } = await generateNumbersUsingSupabase(payload.pickupDate || new Date().toISOString().slice(0,10));
+
+    const appointmentInsert = {
+      appointment_number: appointmentNumber,
+      weighbridge_number: weighbridgeNumber,
+      agent_tin: payload.agentTin,
+      agent_name: payload.agentName,
+      warehouse_location: payload.warehouse,
+      pickup_date: payload.pickupDate,
+      consolidated: payload.consolidated || 'N',
+      truck_number: payload.truckNumber,
+      driver_name: payload.driverName,
+      driver_license_no: payload.driverLicense,
+      total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
+      total_documented_weight: payload.totalDocumentedWeight || null,
+      regime: payload.regime || null,
+      barcode: null,
+      pdf_url: null,
+    };
+
+    const { data: inserted, error: insertErr } = await supabase
+      .from('appointments')
+      .insert([appointmentInsert])
+      .select()
+      .maybeSingle();
+
+    if (insertErr || !inserted) {
+      throw insertErr || new Error('Failed to insert appointment (no inserted row returned).');
+    }
+
+    const appointmentId = inserted.id;
+
+    const t1Rows = (payload.t1s || []).map((r) => ({
+      appointment_id: appointmentId,
+      sad_no: r.sadNo,
+      packing_type: r.packingType,
+      container_no: r.containerNo || null,
+    }));
+
+    if (t1Rows.length > 0) {
+      const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
+      if (t1Err) {
+        // cleanup
+        try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
+        throw t1Err;
+      }
+    }
+
+    // Read back joined data
+    const { data: fullAppointment, error: fetchErr } = await supabase
+      .from('appointments')
+      .select('*, t1_records(*)')
+      .eq('id', appointmentId)
+      .maybeSingle();
+
+    if (fetchErr) {
+      // still return created data
+      return {
+        appointment: {
+          id: appointmentId,
+          appointmentNumber,
+          weighbridgeNumber,
+          warehouse: appointmentInsert.warehouse_location,
+          warehouseLabel: payload.warehouseLabel || appointmentInsert.warehouse_location,
+          pickupDate: appointmentInsert.pickup_date,
+          agentName: appointmentInsert.agent_name,
+          agentTin: appointmentInsert.agent_tin,
+          consolidated: appointmentInsert.consolidated,
+          truckNumber: appointmentInsert.truck_number,
+          driverName: appointmentInsert.driver_name,
+          driverLicense: appointmentInsert.driver_license_no,
+          regime: appointmentInsert.regime,
+          totalDocumentedWeight: appointmentInsert.total_documented_weight,
+          t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
+          createdAt: inserted.created_at,
+        }
+      };
+    }
+
+    return {
+      appointment: {
+        id: fullAppointment.id,
+        appointmentNumber: fullAppointment.appointment_number,
+        weighbridgeNumber: fullAppointment.weighbridge_number,
+        warehouse: fullAppointment.warehouse_location,
+        warehouseLabel: payload.warehouseLabel || fullAppointment.warehouse_location,
+        pickupDate: fullAppointment.pickup_date,
+        agentName: fullAppointment.agent_name,
+        agentTin: fullAppointment.agent_tin,
+        consolidated: fullAppointment.consolidated,
+        truckNumber: fullAppointment.truck_number,
+        driverName: fullAppointment.driver_name,
+        driverLicense: fullAppointment.driver_license_no,
+        regime: fullAppointment.regime,
+        totalDocumentedWeight: fullAppointment.total_documented_weight,
+        t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
+        createdAt: fullAppointment.created_at,
+      }
+    };
+  };
+
+  // Create appointment — POST to external API with Supabase fallback
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
     setLoadingCreate(true);
@@ -389,6 +533,7 @@ export default function AppointmentPage() {
     };
 
     try {
+      // Try external API first
       const resp = await fetch(API_URL, {
         method: 'POST',
         mode: 'cors',
@@ -397,24 +542,88 @@ export default function AppointmentPage() {
       });
 
       if (!resp.ok) {
-        // try to parse JSON error, fallback to text
+        // Non-2xx -> attempt parse for debugging, but fallback to direct DB if possible
         let err = null;
-        try { err = await resp.json(); } catch (e) { err = { error: await resp.text() }; }
-        console.error('API error', resp.status, err);
-        toast({ title: 'Failed', description: err?.error || err?.message || `Server returned ${resp.status}`, status: 'error' });
-        setLoadingCreate(false);
+        try { err = await resp.json(); } catch (e) { err = { status: resp.status, text: await resp.text().catch(() => '') }; }
+        console.warn('API returned non-OK. Falling back to direct DB. API response:', err);
+        // Try direct supabase fallback
+        const fallbackResult = await createDirectlyInSupabase(payload);
+        const ticket = fallbackResult.appointment;
+        // generate PDF
+        const doc = <AppointmentPdf ticket={{
+          appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
+          weighbridgeNumber: ticket.weighbridgeNumber || ticket.weighbridge_number,
+          warehouse: ticket.warehouse,
+          warehouseLabel: ticket.warehouseLabel || ticket.warehouse_label,
+          pickupDate: ticket.pickupDate || ticket.pickup_date,
+          agentName: ticket.agentName || ticket.agent_name,
+          agentTin: ticket.agentTin || ticket.agent_tin,
+          truckNumber: ticket.truckNumber || ticket.truck_number,
+          driverName: ticket.driverName || ticket.driver_name,
+          driverLicense: ticket.driverLicense || ticket.driver_license,
+          regime: ticket.regime || '',
+          totalDocumentedWeight: ticket.totalDocumentedWeight || ticket.total_documented_weight,
+          t1s: ticket.t1s || ticket.t1_records || [],
+        }} />;
+        try {
+          const asPdf = pdfRender(doc);
+          const blob = await asPdf.toBlob();
+          downloadBlob(blob, `Appointment-${ticket.appointmentNumber || ticket.appointment_number || Date.now()}.pdf`);
+        } catch (pdfErr) {
+          console.error('PDF generation failed after fallback create', pdfErr);
+          toast({ title: 'Created (fallback)', description: 'Appointment saved but PDF generation failed', status: 'warning' });
+        }
+        toast({ title: 'Appointment created (fallback)', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved via direct DB`, status: 'success' });
+        await triggerConfetti(160);
+        // Reset
+        setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
+        setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
+        setConfirmOpen(false);
+        setOrbOpen(false);
         return;
       }
 
+      // If response OK:
       const body = await resp.json();
       const ticket = body?.appointment || body?.data || body?.appointment_data || null;
       if (!ticket) {
-        toast({ title: 'API returned no appointment', status: 'error' });
-        setLoadingCreate(false);
+        // If server returned OK but no appointment object, try fallback
+        console.warn('API OK but no appointment object returned — falling back to direct DB.');
+        const fallbackResult = await createDirectlyInSupabase(payload);
+        const ticket2 = fallbackResult.appointment;
+        const doc2 = <AppointmentPdf ticket={{
+          appointmentNumber: ticket2.appointmentNumber || ticket2.appointment_number,
+          weighbridgeNumber: ticket2.weighbridgeNumber || ticket2.weighbridge_number,
+          warehouse: ticket2.warehouse,
+          warehouseLabel: ticket2.warehouseLabel || ticket2.warehouse_label,
+          pickupDate: ticket2.pickupDate || ticket2.pickup_date,
+          agentName: ticket2.agentName || ticket2.agent_name,
+          agentTin: ticket2.agentTin || ticket2.agent_tin,
+          truckNumber: ticket2.truckNumber || ticket2.truck_number,
+          driverName: ticket2.driverName || ticket2.driver_name,
+          driverLicense: ticket2.driverLicense || ticket2.driver_license,
+          regime: ticket2.regime || '',
+          totalDocumentedWeight: ticket2.totalDocumentedWeight || ticket2.total_documented_weight,
+          t1s: ticket2.t1s || ticket2.t1_records || [],
+        }} />;
+        try {
+          const asPdf = pdfRender(doc2);
+          const blob = await asPdf.toBlob();
+          downloadBlob(blob, `Appointment-${ticket2.appointmentNumber || ticket2.appointment_number || Date.now()}.pdf`);
+        } catch (pdfErr) {
+          console.error('PDF generation failed after fallback create', pdfErr);
+          toast({ title: 'Created (fallback)', description: 'Appointment saved but PDF generation failed', status: 'warning' });
+        }
+        toast({ title: 'Appointment created (fallback)', description: `Appointment ${ticket2.appointmentNumber || ticket2.appointment_number} saved via direct DB`, status: 'success' });
+        await triggerConfetti(160);
+        setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
+        setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
+        setConfirmOpen(false);
+        setOrbOpen(false);
         return;
       }
 
-      // Render PDF client-side for immediate download
+      // Normal path: API returned ticket
       try {
         const doc = <AppointmentPdf ticket={{
           appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
@@ -441,8 +650,6 @@ export default function AppointmentPage() {
       }
 
       toast({ title: 'Appointment created', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved`, status: 'success' });
-
-      // light stardust/confetti
       await triggerConfetti(160);
 
       // Reset form
@@ -452,7 +659,44 @@ export default function AppointmentPage() {
       setOrbOpen(false);
     } catch (err) {
       console.error('Create appointment failed', err);
-      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error' });
+      // network/CORS error or unexpected: try direct supabase (best-effort)
+      try {
+        toast({ title: 'Primary API failed — attempting direct DB write', status: 'warning' });
+        const fallbackResult = await createDirectlyInSupabase(payload);
+        const ticket = fallbackResult.appointment;
+        const doc = <AppointmentPdf ticket={{
+          appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
+          weighbridgeNumber: ticket.weighbridgeNumber || ticket.weighbridge_number,
+          warehouse: ticket.warehouse,
+          warehouseLabel: ticket.warehouseLabel || ticket.warehouse_label,
+          pickupDate: ticket.pickupDate || ticket.pickup_date,
+          agentName: ticket.agentName || ticket.agent_name,
+          agentTin: ticket.agentTin || ticket.agent_tin,
+          truckNumber: ticket.truckNumber || ticket.truck_number,
+          driverName: ticket.driverName || ticket.driver_name,
+          driverLicense: ticket.driverLicense || ticket.driver_license,
+          regime: ticket.regime || '',
+          totalDocumentedWeight: ticket.totalDocumentedWeight || ticket.total_documented_weight,
+          t1s: ticket.t1s || ticket.t1_records || [],
+        }} />;
+        try {
+          const asPdf = pdfRender(doc);
+          const blob = await asPdf.toBlob();
+          downloadBlob(blob, `Appointment-${ticket.appointmentNumber || ticket.appointment_number || Date.now()}.pdf`);
+        } catch (pdfErr) {
+          console.error('PDF generation failed after fallback create', pdfErr);
+          toast({ title: 'Created (fallback)', description: 'Appointment saved but PDF generation failed', status: 'warning' });
+        }
+        toast({ title: 'Appointment created (fallback)', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved via direct DB`, status: 'success' });
+        await triggerConfetti(160);
+        setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
+        setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
+        setConfirmOpen(false);
+        setOrbOpen(false);
+      } catch (fallbackErr) {
+        console.error('Fallback direct DB create also failed', fallbackErr);
+        toast({ title: 'Failed', description: fallbackErr?.message || 'Unexpected error', status: 'error' });
+      }
     } finally {
       setLoadingCreate(false);
     }
@@ -578,6 +822,7 @@ export default function AppointmentPage() {
         <Divider my={4} />
 
         <HStack spacing={3} mb={3}>
+          <Button leftIcon={<AddIcon />} colorScheme="teal" onClick={() => { setT1ModalOpen(true); }}>Add T1 Record</Button>
           <Badge colorScheme="purple">{t1s.length} T1(s) added</Badge>
           {consolidated === 'Y' && (
             <Text fontSize="sm" color="gray.600">Packing types used: {packingTypesUsed.join(', ') || '—'}</Text>
