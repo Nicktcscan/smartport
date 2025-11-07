@@ -18,7 +18,20 @@ import logoUrl from '../assets/logo.png';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
+// Keep DB-friendly regime values here. We'll display codes in the UI.
 const REGIME_OPTIONS = ['import', 'export', 'warehousing'];
+
+// Map DB regime -> display code
+const REGIME_CODE_MAP = {
+  import: 'IM4',
+  export: 'EX1',
+  warehousing: 'IM7',
+};
+// Inverse map for searching by code
+const CODE_TO_REGIME = Object.entries(REGIME_CODE_MAP).reduce((acc, [k, v]) => {
+  acc[v.toUpperCase()] = k;
+  return acc;
+}, {});
 
 /* ---------- helpers ---------- */
 const formatNumber = (v) => {
@@ -344,7 +357,7 @@ export default function SADDeclaration() {
       const trimmedSad = String(sadNo).trim();
       const payload = {
         sad_no: trimmedSad,
-        regime: regime || null,
+        regime: regime || null, // store DB-friendly value
         declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
         status: 'In Progress',
@@ -571,6 +584,7 @@ export default function SADDeclaration() {
       const rows = [{
         sad_no: s.sad_no,
         regime: s.regime,
+        regime_code: REGIME_CODE_MAP[s.regime] || '',
         declared_weight: s.declared_weight,
         total_recorded_weight: s.total_recorded_weight,
         status: s.status,
@@ -599,7 +613,17 @@ export default function SADDeclaration() {
       else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
-      if (!filter.sad_no && !filter.status) filter.regime = nlQuery;
+
+      // If user typed the regime code (e.g. IM4), translate to DB regime
+      if (!filter.sad_no && !filter.status) {
+        const up = nlQuery.trim().toUpperCase();
+        if (CODE_TO_REGIME[up]) {
+          filter.regime = CODE_TO_REGIME[up];
+        } else {
+          filter.regime = nlQuery;
+        }
+      }
+
       await fetchSADs(filter);
       await pushActivity(`Search: "${nlQuery}"`, filter);
     } catch (e) {
@@ -639,6 +663,7 @@ export default function SADDeclaration() {
       if (error) console.warn('Could not fetch tickets for PDF', error);
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
+      const regimeCode = REGIME_CODE_MAP[s.regime] || s.regime || '—';
       const html = `
       <!doctype html>
       <html>
@@ -669,7 +694,7 @@ export default function SADDeclaration() {
           </header>
 
           <div class="meta">
-            <p><strong>Regime:</strong> ${s.regime || '—'}</p>
+            <p><strong>Regime:</strong> ${regimeCode}</p>
             <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
             <p><strong>Discharged weight:</strong> ${recorded.toLocaleString()} kg</p>
             <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Created by: ${s.created_by ? (createdByMap[s.created_by] || '') : '—'}</p>
@@ -802,6 +827,7 @@ export default function SADDeclaration() {
     const rows = filteredSads.map(s => ({
       sad_no: s.sad_no,
       regime: s.regime,
+      regime_code: REGIME_CODE_MAP[s.regime] || '',
       declared_weight: s.declared_weight,
       total_recorded_weight: s.total_recorded_weight,
       status: s.status,
@@ -817,6 +843,7 @@ export default function SADDeclaration() {
       const rows = sads.map(s => ({
         sad_no: s.sad_no,
         regime: s.regime,
+        regime_code: REGIME_CODE_MAP[s.regime] || '',
         declared_weight: s.declared_weight,
         total_recorded_weight: s.total_recorded_weight,
         status: s.status,
@@ -922,7 +949,11 @@ export default function SADDeclaration() {
           <FormControl>
             <FormLabel>Regime</FormLabel>
             <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
-              {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+              {REGIME_OPTIONS.map(opt => (
+                <option key={opt} value={opt}>
+                  {opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}
+                </option>
+              ))}
             </Select>
           </FormControl>
 
@@ -963,7 +994,11 @@ export default function SADDeclaration() {
 
           <Select placeholder="Filter by regime" size="sm" value={regimeFilter} onChange={(e) => setRegimeFilter(e.target.value)} maxW="200px">
             <option value="">All</option>
-            {REGIME_OPTIONS.map(r => <option key={r} value={r}>{r}</option>)}
+            {REGIME_OPTIONS.map(opt => (
+              <option key={opt} value={opt}>
+                {opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}
+              </option>
+            ))}
           </Select>
 
           <Select size="sm" value={sortBy} onChange={(e) => setSortBy(e.target.value)} maxW="200px">
@@ -1015,11 +1050,12 @@ export default function SADDeclaration() {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
                   const color = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
+                  const regimeCode = REGIME_CODE_MAP[s.regime] || '—';
 
                   return (
                     <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
                       <Td data-label="SAD"><Text fontWeight="bold">{s.sad_no}</Text></Td>
-                      <Td data-label="Regime"><Text>{s.regime || '—'}</Text></Td>
+                      <Td data-label="Regime"><Text>{regimeCode}</Text></Td>
                       <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
@@ -1168,7 +1204,11 @@ export default function SADDeclaration() {
                   <FormLabel>Regime</FormLabel>
                   <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
                     <option value="">Select regime</option>
-                    {REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                    {REGIME_OPTIONS.map(opt => (
+                      <option key={opt} value={opt}>
+                        {opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}
+                      </option>
+                    ))}
                   </Select>
                 </FormControl>
 
@@ -1307,7 +1347,7 @@ export default function SADDeclaration() {
           <ModalBody>
             <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
               <FormControl><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
-              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt}</option>)}</Select></FormControl>
+              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}</option>)}</Select></FormControl>
               <FormControl><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
               <FormControl><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
             </SimpleGrid>
