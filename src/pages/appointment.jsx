@@ -9,11 +9,9 @@ import {
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import { pdf as pdfRender, Document, Page, Text as PdfText, View as PdfView, StyleSheet, Image as PdfImage } from '@react-pdf/renderer';
-import { supabase } from '../supabaseClient'; // fallback direct DB option (ensure this file exists and exports supabase client)
+import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
 // ---------- Config ----------
-const API_URL = 'https://smartport-api.vercel.app/api/appointments';
-
 const WAREHOUSES = [
   { value: 'WTGMBJLCON', label: 'WTGMBJLCON - GAMBIA PORTS AUTHORITY - P.O BOX 617 BANJUL BJ' },
 ];
@@ -323,7 +321,7 @@ export default function AppointmentPage() {
     return true;
   };
 
-  // T1 modal
+  // T1 modal functions
   const openAddT1 = () => {
     setEditingIndex(null);
     setT1Sad('');
@@ -377,8 +375,7 @@ export default function AppointmentPage() {
   // --- Helper: generate appointment numbers using pickupDate and existing count (avoids relying on numeric DB id) ---
   async function generateNumbersUsingSupabase(pickupDateValue) {
     try {
-      // count existing appointments for pickup_date
-      const { count, error: countErr } = await supabase
+      const { count } = await supabase
         .from('appointments')
         .select('id', { head: true, count: 'exact' })
         .eq('pickup_date', pickupDateValue);
@@ -403,15 +400,11 @@ export default function AppointmentPage() {
     }
   }
 
-  // Direct Supabase fallback create (used when external API fails / CORS)
+  // Direct Supabase create (DB-only saving)
   const createDirectlyInSupabase = async (payload) => {
-    // payload fields: warehouse, warehouseLabel, pickupDate, agentName, agentTin, consolidated, truckNumber, driverName, driverLicense, t1s[]
-    if (!supabase) {
-      throw new Error('Supabase client not available for direct insert.');
-    }
+    if (!supabase) throw new Error('Supabase client not available.');
 
-    // generate numbers using pickupDate
-    const { appointmentNumber, weighbridgeNumber } = await generateNumbersUsingSupabase(payload.pickupDate || new Date().toISOString().slice(0,10));
+    const { appointmentNumber, weighbridgeNumber } = await generateNumbersUsingSupabase(payload.pickupDate || new Date().toISOString().slice(0, 10));
 
     const appointmentInsert = {
       appointment_number: appointmentNumber,
@@ -438,7 +431,7 @@ export default function AppointmentPage() {
       .maybeSingle();
 
     if (insertErr || !inserted) {
-      throw insertErr || new Error('Failed to insert appointment (no inserted row returned).');
+      throw insertErr || new Error('Failed to insert appointment.');
     }
 
     const appointmentId = inserted.id;
@@ -453,21 +446,18 @@ export default function AppointmentPage() {
     if (t1Rows.length > 0) {
       const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
       if (t1Err) {
-        // cleanup
         try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
         throw t1Err;
       }
     }
 
-    // Read back joined data
     const { data: fullAppointment, error: fetchErr } = await supabase
       .from('appointments')
       .select('*, t1_records(*)')
       .eq('id', appointmentId)
       .maybeSingle();
 
-    if (fetchErr) {
-      // still return created data
+    if (fetchErr || !fullAppointment) {
       return {
         appointment: {
           id: appointmentId,
@@ -512,7 +502,7 @@ export default function AppointmentPage() {
     };
   };
 
-  // Create appointment — POST to external API with Supabase fallback
+  // Create appointment — DB-only (no external API)
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
     setLoadingCreate(true);
@@ -533,97 +523,11 @@ export default function AppointmentPage() {
     };
 
     try {
-      // Try external API first
-      const resp = await fetch(API_URL, {
-        method: 'POST',
-        mode: 'cors',
-        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      // Direct DB write only
+      const result = await createDirectlyInSupabase(payload);
+      const ticket = result.appointment;
 
-      if (!resp.ok) {
-        // Non-2xx -> attempt parse for debugging, but fallback to direct DB if possible
-        let err = null;
-        try { err = await resp.json(); } catch (e) { err = { status: resp.status, text: await resp.text().catch(() => '') }; }
-        console.warn('API returned non-OK. Falling back to direct DB. API response:', err);
-        // Try direct supabase fallback
-        const fallbackResult = await createDirectlyInSupabase(payload);
-        const ticket = fallbackResult.appointment;
-        // generate PDF
-        const doc = <AppointmentPdf ticket={{
-          appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
-          weighbridgeNumber: ticket.weighbridgeNumber || ticket.weighbridge_number,
-          warehouse: ticket.warehouse,
-          warehouseLabel: ticket.warehouseLabel || ticket.warehouse_label,
-          pickupDate: ticket.pickupDate || ticket.pickup_date,
-          agentName: ticket.agentName || ticket.agent_name,
-          agentTin: ticket.agentTin || ticket.agent_tin,
-          truckNumber: ticket.truckNumber || ticket.truck_number,
-          driverName: ticket.driverName || ticket.driver_name,
-          driverLicense: ticket.driverLicense || ticket.driver_license,
-          regime: ticket.regime || '',
-          totalDocumentedWeight: ticket.totalDocumentedWeight || ticket.total_documented_weight,
-          t1s: ticket.t1s || ticket.t1_records || [],
-        }} />;
-        try {
-          const asPdf = pdfRender(doc);
-          const blob = await asPdf.toBlob();
-          downloadBlob(blob, `Appointment-${ticket.appointmentNumber || ticket.appointment_number || Date.now()}.pdf`);
-        } catch (pdfErr) {
-          console.error('PDF generation failed after fallback create', pdfErr);
-          toast({ title: 'Created (fallback)', description: 'Appointment saved but PDF generation failed', status: 'warning' });
-        }
-        toast({ title: 'Appointment created (fallback)', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved via direct DB`, status: 'success' });
-        await triggerConfetti(160);
-        // Reset
-        setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
-        setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
-        setConfirmOpen(false);
-        setOrbOpen(false);
-        return;
-      }
-
-      // If response OK:
-      const body = await resp.json();
-      const ticket = body?.appointment || body?.data || body?.appointment_data || null;
-      if (!ticket) {
-        // If server returned OK but no appointment object, try fallback
-        console.warn('API OK but no appointment object returned — falling back to direct DB.');
-        const fallbackResult = await createDirectlyInSupabase(payload);
-        const ticket2 = fallbackResult.appointment;
-        const doc2 = <AppointmentPdf ticket={{
-          appointmentNumber: ticket2.appointmentNumber || ticket2.appointment_number,
-          weighbridgeNumber: ticket2.weighbridgeNumber || ticket2.weighbridge_number,
-          warehouse: ticket2.warehouse,
-          warehouseLabel: ticket2.warehouseLabel || ticket2.warehouse_label,
-          pickupDate: ticket2.pickupDate || ticket2.pickup_date,
-          agentName: ticket2.agentName || ticket2.agent_name,
-          agentTin: ticket2.agentTin || ticket2.agent_tin,
-          truckNumber: ticket2.truckNumber || ticket2.truck_number,
-          driverName: ticket2.driverName || ticket2.driver_name,
-          driverLicense: ticket2.driverLicense || ticket2.driver_license,
-          regime: ticket2.regime || '',
-          totalDocumentedWeight: ticket2.totalDocumentedWeight || ticket2.total_documented_weight,
-          t1s: ticket2.t1s || ticket2.t1_records || [],
-        }} />;
-        try {
-          const asPdf = pdfRender(doc2);
-          const blob = await asPdf.toBlob();
-          downloadBlob(blob, `Appointment-${ticket2.appointmentNumber || ticket2.appointment_number || Date.now()}.pdf`);
-        } catch (pdfErr) {
-          console.error('PDF generation failed after fallback create', pdfErr);
-          toast({ title: 'Created (fallback)', description: 'Appointment saved but PDF generation failed', status: 'warning' });
-        }
-        toast({ title: 'Appointment created (fallback)', description: `Appointment ${ticket2.appointmentNumber || ticket2.appointment_number} saved via direct DB`, status: 'success' });
-        await triggerConfetti(160);
-        setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
-        setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
-        setConfirmOpen(false);
-        setOrbOpen(false);
-        return;
-      }
-
-      // Normal path: API returned ticket
+      // Render PDF client-side for immediate download
       try {
         const doc = <AppointmentPdf ticket={{
           appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
@@ -645,11 +549,13 @@ export default function AppointmentPage() {
         const blob = await asPdf.toBlob();
         downloadBlob(blob, `Appointment-${ticket.appointmentNumber || ticket.appointment_number || Date.now()}.pdf`);
       } catch (pdfErr) {
-        console.error('PDF generation after API create failed', pdfErr);
+        console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
       }
 
       toast({ title: 'Appointment created', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved`, status: 'success' });
+
+      // confetti
       await triggerConfetti(160);
 
       // Reset form
@@ -658,45 +564,8 @@ export default function AppointmentPage() {
       setConfirmOpen(false);
       setOrbOpen(false);
     } catch (err) {
-      console.error('Create appointment failed', err);
-      // network/CORS error or unexpected: try direct supabase (best-effort)
-      try {
-        toast({ title: 'Primary API failed — attempting direct DB write', status: 'warning' });
-        const fallbackResult = await createDirectlyInSupabase(payload);
-        const ticket = fallbackResult.appointment;
-        const doc = <AppointmentPdf ticket={{
-          appointmentNumber: ticket.appointmentNumber || ticket.appointment_number,
-          weighbridgeNumber: ticket.weighbridgeNumber || ticket.weighbridge_number,
-          warehouse: ticket.warehouse,
-          warehouseLabel: ticket.warehouseLabel || ticket.warehouse_label,
-          pickupDate: ticket.pickupDate || ticket.pickup_date,
-          agentName: ticket.agentName || ticket.agent_name,
-          agentTin: ticket.agentTin || ticket.agent_tin,
-          truckNumber: ticket.truckNumber || ticket.truck_number,
-          driverName: ticket.driverName || ticket.driver_name,
-          driverLicense: ticket.driverLicense || ticket.driver_license,
-          regime: ticket.regime || '',
-          totalDocumentedWeight: ticket.totalDocumentedWeight || ticket.total_documented_weight,
-          t1s: ticket.t1s || ticket.t1_records || [],
-        }} />;
-        try {
-          const asPdf = pdfRender(doc);
-          const blob = await asPdf.toBlob();
-          downloadBlob(blob, `Appointment-${ticket.appointmentNumber || ticket.appointment_number || Date.now()}.pdf`);
-        } catch (pdfErr) {
-          console.error('PDF generation failed after fallback create', pdfErr);
-          toast({ title: 'Created (fallback)', description: 'Appointment saved but PDF generation failed', status: 'warning' });
-        }
-        toast({ title: 'Appointment created (fallback)', description: `Appointment ${ticket.appointmentNumber || ticket.appointment_number} saved via direct DB`, status: 'success' });
-        await triggerConfetti(160);
-        setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
-        setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
-        setConfirmOpen(false);
-        setOrbOpen(false);
-      } catch (fallbackErr) {
-        console.error('Fallback direct DB create also failed', fallbackErr);
-        toast({ title: 'Failed', description: fallbackErr?.message || 'Unexpected error', status: 'error' });
-      }
+      console.error('Create appointment (DB) failed', err);
+      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error' });
     } finally {
       setLoadingCreate(false);
     }
