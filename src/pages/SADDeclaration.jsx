@@ -20,7 +20,7 @@ const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 const REGIME_OPTIONS = ['import', 'export', 'warehousing'];
 
-// helpers
+// --- Helpers: number formatting + SAD normalization
 const formatNumber = (v) => {
   if (v === null || v === undefined || v === '') return '';
   const n = Number(String(v).replace(/,/g, ''));
@@ -33,6 +33,44 @@ const parseNumberString = (s) => {
   if (cleaned === '') return '';
   return cleaned;
 };
+
+/**
+ * Normalize SAD number for internal matching:
+ * - convert to string if not null
+ * - remove zero-width/invisible characters
+ * - trim whitespace
+ * - remove thousands commas (e.g. "22,477" -> "22477")
+ *
+ * We intentionally **do not** strip letters; alphanumeric SADs (e.g. "GPA2025100701") remain.
+ */
+function normalizeSadNo(raw) {
+  if (raw === null || raw === undefined) return '';
+  let s = String(raw);
+  // remove zero width and BOM chars
+  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '');
+  s = s.trim();
+  // remove thousands-separator commas and normal spaces inside numeric-looking strings
+  // keep alphanumeric content intact except commas
+  s = s.replace(/,/g, '');
+  // collapse multiple spaces
+  s = s.replace(/\s+/g, ' ');
+  return s;
+}
+
+/**
+ * For building a query that tries to match variant forms (we'll use ilike fallback with this).
+ * For numeric-like SADs, return the digits-only form to help matching.
+ */
+function cleanedForQuery(raw) {
+  const n = normalizeSadNo(raw);
+  // if purely digits after removing commas -> return digits-only
+  const digitsOnly = n.replace(/[^\d]/g, '');
+  if (digitsOnly && digitsOnly.length > 0 && digitsOnly.length === n.replace(/\s/g, '').length) {
+    return digitsOnly;
+  }
+  return n;
+}
+
 function exportToCSV(rows = [], filename = 'export.csv') {
   if (!rows || rows.length === 0) return;
   const headers = Object.keys(rows[0]);
@@ -139,13 +177,14 @@ export default function SADDeclaration() {
       const { data, error } = await q;
       if (error) throw error;
 
-      // normalize rows (including trimmed sad_no)
+      // normalize rows (including trimmed/cleaned sad_no)
       const normalized = (data || []).map((r) => {
-        const trimmedSadNo = r.sad_no != null ? String(r.sad_no).trim() : r.sad_no;
+        const raw = r.sad_no;
+        const normalizedSad = normalizeSadNo(raw);
         return {
           ...r,
-          sad_no: trimmedSadNo,
-          _raw_sad_no: r.sad_no, // keep original if needed
+          sad_no: normalizedSad,
+          _raw_sad_no: raw, // keep original raw if needed
           docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
           total_recorded_weight: Number(r.total_recorded_weight ?? 0),
           ticket_count: 0,
@@ -153,37 +192,68 @@ export default function SADDeclaration() {
         };
       });
 
-      // tickets totals & counts (robust keys: string-trim)
-      const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
-      if (sadNos.length) {
-        const { data: tickets, error: tErr } = await supabase
-          .from('tickets')
-          .select('sad_no, net, weight')
-          .in('sad_no', sadNos);
+      // Build list of SAD keys to query tickets for (cleaned)
+      const sadNosForQuery = Array.from(new Set(
+        normalized
+          .map((s) => cleanedForQuery(s.sad_no))
+          .filter(Boolean)
+      ));
 
-        if (!tErr && tickets) {
-          const totals = {};
-          const counts = {};
-          for (const t of tickets) {
-            const key = t.sad_no != null ? String(t.sad_no).trim() : '';
-            const n = Number(t.net ?? t.weight ?? 0);
-            totals[key] = (totals[key] || 0) + (Number.isFinite(n) ? n : 0);
-            counts[key] = (counts[key] || 0) + 1;
-          }
+      // If we have SADs, query tickets and aggregate by normalized key
+      if (sadNosForQuery.length) {
+        // Primary attempt: query with .in using the cleaned values
+        let tickets = [];
+        try {
+          const { data: tData, error: tErr } = await supabase
+            .from('tickets')
+            .select('sad_no, net, weight')
+            .in('sad_no', sadNosForQuery)
+            .limit(10000); // reasonable safety
+          if (!tErr && tData) tickets = tData;
+        } catch (e) {
+          console.warn('tickets .in query failed, will fallback to broader fetch', e);
+        }
 
-          for (let i = 0; i < normalized.length; i++) {
-            const s = normalized[i];
-            const key = s.sad_no != null ? String(s.sad_no).trim() : '';
-            const totalForKey = totals[key];
-            const countForKey = counts[key] || 0;
-            normalized[i] = {
-              ...s,
-              total_recorded_weight: typeof totalForKey !== 'undefined' ? totalForKey : s.total_recorded_weight || 0,
-              ticket_count: countForKey,
-            };
+        // Fallback: if we got nothing, attempt a broader fetch where sad_no is not null but will filter in JS
+        if (!tickets || tickets.length === 0) {
+          try {
+            const { data: allT, error: allErr } = await supabase
+              .from('tickets')
+              .select('sad_no, net, weight')
+              .limit(10000);
+            if (!allErr && Array.isArray(allT)) {
+              // We'll only keep tickets that match our normalized keys when normalized
+              tickets = allT.filter(t => {
+                const key = normalizeSadNo(t.sad_no);
+                // match if normalized key equals any normalized SAD in our list
+                return sadNosForQuery.includes(cleanedForQuery(key));
+              });
+            }
+          } catch (e) {
+            console.warn('fallback tickets fetch failed', e);
           }
-        } else if (tErr) {
-          console.warn('fetch tickets for sad counts error', tErr);
+        }
+
+        // aggregate totals and counts using normalized keys
+        const totals = {};
+        const counts = {};
+        for (const t of tickets || []) {
+          const key = cleanedForQuery(normalizeSadNo(t.sad_no));
+          const n = Number(t.net ?? t.weight ?? 0);
+          totals[key] = (totals[key] || 0) + (Number.isFinite(n) ? n : 0);
+          counts[key] = (counts[key] || 0) + 1;
+        }
+
+        for (let i = 0; i < normalized.length; i++) {
+          const s = normalized[i];
+          const key = cleanedForQuery(s.sad_no);
+          const totalForKey = totals[key];
+          const countForKey = counts[key] || 0;
+          normalized[i] = {
+            ...s,
+            total_recorded_weight: typeof totalForKey !== 'undefined' ? totalForKey : s.total_recorded_weight || 0,
+            ticket_count: countForKey,
+          };
         }
       }
 
@@ -251,6 +321,8 @@ export default function SADDeclaration() {
           .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => fetchSADs())
           .subscribe();
         ticketsSubRef.current = tch;
+      } else {
+        // older client fallback (no-op if not supported)
       }
     } catch (e) { /* ignore */ }
 
@@ -316,7 +388,7 @@ export default function SADDeclaration() {
       const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
       const docRecords = await uploadDocs(sadNo, docs);
       const payload = {
-        sad_no: String(sadNo).trim(),
+        sad_no: normalizeSadNo(sadNo),
         regime: regime || null,
         declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
@@ -354,15 +426,24 @@ export default function SADDeclaration() {
     }
   };
 
-  // open SAD detail (existing)
+  // open SAD detail (existing) - robust fetching using normalized key and ilike fallback
   const openSadDetail = async (sad) => {
     setSelectedSad(sad);
     setIsModalOpen(true);
     setDetailLoading(true);
     try {
-      const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
-      const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (error) throw error;
+      const normalizedKey = normalizeSadNo(sad.sad_no);
+      // first try exact match
+      let result = await supabase.from('tickets').select('*').eq('sad_no', normalizedKey).order('date', { ascending: false });
+      if ((result?.data?.length || 0) === 0) {
+        // fallback: try ilike with cleaned digits or normalized form
+        const cleaned = cleanedForQuery(normalizedKey);
+        if (cleaned) {
+          const { data: fallbackData } = await supabase.from('tickets').select('*').ilike('sad_no', `%${cleaned}%`).order('date', { ascending: false });
+          if (fallbackData && fallbackData.length) result = { data: fallbackData, error: null };
+        }
+      }
+      const data = result?.data ?? [];
       setDetailTickets(data || []);
       const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
       setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)), ticket_count: (data || []).length }));
@@ -381,23 +462,28 @@ export default function SADDeclaration() {
     setDetailsData({ sad, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
     setDetailsOpen(true);
     try {
-      const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
-      const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (!error) {
-        let createdByUsername = sad.created_by_username || null;
-        if (!createdByUsername && sad.created_by) {
-          try {
-            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
-            if (u) {
-              createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
-              createdByUsername = u.username || u.email || null;
-            }
-          } catch (e) { /* ignore */ }
+      const normalizedKey = normalizeSadNo(sad.sad_no);
+      let ticketsRes = await supabase.from('tickets').select('*').eq('sad_no', normalizedKey).order('date', { ascending: false });
+      if ((ticketsRes?.data?.length || 0) === 0) {
+        const cleaned = cleanedForQuery(normalizedKey);
+        if (cleaned) {
+          const { data: fb } = await supabase.from('tickets').select('*').ilike('sad_no', `%${cleaned}%`).order('date', { ascending: false });
+          if (fb && fb.length) ticketsRes = { data: fb, error: null };
         }
-        setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
-      } else {
-        setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
       }
+
+      const tickets = ticketsRes?.data || [];
+      let createdByUsername = sad.created_by_username || null;
+      if (!createdByUsername && sad.created_by) {
+        try {
+          const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
+          if (u) {
+            createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
+            createdByUsername = u.username || u.email || null;
+          }
+        } catch (e) { /* ignore */ }
+      }
+      setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
     } catch (err) {
       console.error('openDetailsModal', err);
       setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
@@ -422,7 +508,7 @@ export default function SADDeclaration() {
   const saveEditModal = async () => {
     if (!editModalData || !editModalData.original_sad_no) return;
     const originalSad = editModalData.original_sad_no;
-    const newSad = String(editModalData.sad_no ?? '').trim();
+    const newSad = normalizeSadNo(editModalData.sad_no ?? '');
     const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
     const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
 
@@ -432,10 +518,8 @@ export default function SADDeclaration() {
     closeEditModal();
 
     try {
-      // If renaming to the same, just update simple fields
       if (!newSad) throw new Error('SAD Number cannot be empty');
 
-      // if renaming to a new sad_no that exists already => abort
       if (newSad !== originalSad) {
         const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
         if (conflict) {
@@ -524,12 +608,19 @@ export default function SADDeclaration() {
 
   const recalcTotalForSad = async (sad_no) => {
     try {
-      const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
-      const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
-      if (error) throw error;
+      const normalizedKey = normalizeSadNo(sad_no);
+      let res = await supabase.from('tickets').select('net, weight').eq('sad_no', normalizedKey);
+      if ((res?.data?.length || 0) === 0) {
+        const cleaned = cleanedForQuery(normalizedKey);
+        if (cleaned) {
+          const { data: fb } = await supabase.from('tickets').select('net, weight').ilike('sad_no', `%${cleaned}%`);
+          if (fb && fb.length) res = { data: fb, error: null };
+        }
+      }
+      const tickets = res?.data || [];
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
-      await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
+      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', normalizedKey);
+      await pushActivity(`Recalculated total for ${normalizedKey}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
     } catch (err) {
@@ -621,9 +712,16 @@ export default function SADDeclaration() {
   // generate printable report (iframe-based)
   const generatePdfReport = async (s) => {
     try {
-      const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
-      const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (error) console.warn('Could not fetch tickets for PDF', error);
+      const normalizedKey = normalizeSadNo(s.sad_no);
+      let res = await supabase.from('tickets').select('*').eq('sad_no', normalizedKey).order('date', { ascending: false });
+      if ((res?.data?.length || 0) === 0) {
+        const cleaned = cleanedForQuery(normalizedKey);
+        if (cleaned) {
+          const { data: fb } = await supabase.from('tickets').select('*').ilike('sad_no', `%${cleaned}%`).order('date', { ascending: false });
+          if (fb && fb.length) res = { data: fb, error: null };
+        }
+      }
+      const tickets = res?.data || [];
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
       const html = `
@@ -864,7 +962,7 @@ export default function SADDeclaration() {
 
       <Heading mb={4}>SAD Declaration Panel</Heading>
 
-      {/* Stats with different backgrounds */}
+      {/* Stats */}
       <div className="stat-group-custom">
         <Stat bg="linear-gradient(90deg,#7b61ff,#3ef4d0)" color="white" p={3} borderRadius="md" boxShadow="sm" style={{ minWidth: 180 }}>
           <StatLabel style={{ color: 'rgba(255,255,255,0.95)' }}>Total SADs</StatLabel>
