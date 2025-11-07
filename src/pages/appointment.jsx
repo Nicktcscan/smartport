@@ -18,14 +18,18 @@ import {
   Image as PdfImage,
   Svg,
   Rect,
-  Text as SvgText
+  Font
 } from '@react-pdf/renderer';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
-// ----- Logos & coat (ensure these files are in src/assets/) -----
+// ---------- Assets (ensure these exist in src/assets/) ----------
 import gralogo from '../assets/gralogo.png';
-import coat from '../assets/coat.png'; // watermark
+import coat from '../assets/coat.png';
 import gnswlogo from '../assets/gnswlogo.png';
+
+// ---------- Monospace font registration (update path if you use a different font file) ----------
+import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists or change to your preferred monospace file
+Font.register({ family: 'Mono', src: MonoFont });
 
 // ---------- Config ----------
 const WAREHOUSES = [
@@ -47,12 +51,11 @@ const pdfStyles = StyleSheet.create({
     paddingBottom: 36,
     paddingHorizontal: 20,
     fontSize: 10.5,
-    fontFamily: 'Times-Roman', // serif
+    fontFamily: 'Times-Roman', // main serif
     position: 'relative',
     color: '#000',
   },
 
-  // Header area with logos and title
   headerWrap: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   leftHeader: { width: '22%', alignItems: 'flex-start' },
   centerHeader: { width: '56%', alignItems: 'center', textAlign: 'center' },
@@ -61,18 +64,15 @@ const pdfStyles = StyleSheet.create({
   titleBig: { fontSize: 18, fontWeight: 700, textAlign: 'center', marginBottom: 2 },
   subtitle: { fontSize: 9, color: '#222', marginBottom: 2 },
 
-  // Main container box (table-like)
   mainBox: { borderWidth: 0.6, borderColor: '#000', padding: 14, marginBottom: 10, position: 'relative' },
   sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
 
-  // Label / value styles (serif)
-  label: { fontSize: 10.5, fontFamily: 'Times-Roman', fontWeight: 700, marginBottom: 2 },
+  // label uses registered monospace font
+  label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2 },
   value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4 },
 
-  // subtle divider used between logical groups
   groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#000', paddingTop: 6, marginTop: 6 },
 
-  // T1 summary table styling inside main box
   t1Table: { width: '100%', marginTop: 6, borderTopWidth: 0.5, borderTopColor: '#000' },
   t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.5, borderBottomColor: '#000', paddingVertical: 6 },
   t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#444' },
@@ -81,126 +81,149 @@ const pdfStyles = StyleSheet.create({
   t1Col3: { width: '25%', fontSize: 10.5 },
   t1Col4: { width: '25%', fontSize: 10.5 },
 
-  // watermark inside the mainBox (100% width)
-  watermarkInline: { width: '100%', opacity: 0.12, position: 'absolute', left: 14, top: 18, zIndex: 0 },
+  // watermark at 50% opacity
+  watermarkInline: { width: '100%', opacity: 0.5, position: 'absolute', left: 14, top: 18, zIndex: 0 },
 
-  // barcode area (right-aligned inside main box)
   barcodeBox: { marginTop: 12, width: '100%', flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
 
-  // footer small text
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 8 },
 });
 
-// ---------- Helpers ----------
-function pad(num, length = 4) {
-  const s = String(num || 0);
-  return s.padStart(length, '0');
+// ---------- Code128 patterns (widths) sourced from the Code 128 specification / Wikipedia
+// The array maps code value (0..106) => widths string (six digits representing run lengths).
+// Implementation follows Code128 subset B encoding (start code 104). Stop pattern appended separately.
+// Source table: Code 128 specification / Wikipedia. :contentReference[oaicite:1]{index=1}
+const CODE128_WIDTHS = [
+  "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
+  "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
+  "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
+  "212123","212321","232121","111323","131123","131321","112313","132113","132311","211313",
+  "231113","231311","112133","112331","132131","113123","113321","133121","313121","211331",
+  "231131","213113","213311","213131","311123","311321","331121","312113","312311","332111",
+  "314111","221411","431111","111224","111422","121224","121422","141122","141221","112214",
+  "112412","122114","122411","142112","142211","241211","221114","413111","241112","134111",
+  "111242","121142","121241","114212","124112","124211","411212","421112","421211","212141",
+  "214121","412121","111143","111341","131141","114113","114311","411113","411311","113141",
+  "114131","311141","411131","211412"
+];
+
+// stop pattern (special — 7 modules in some descriptions). We'll use the widely used stop widths:
+const CODE128_STOP = "2331112"; // standard stop pattern
+
+// ---------- Helpers for Code128 encoder ----------
+function charCodeForCode128B(ch) {
+  // Code 128 B maps ascii 32..127 to code values 0..95
+  const code = ch.charCodeAt(0);
+  if (code >= 32 && code <= 127) return code - 32;
+  // fallback: for characters outside range, try substituting '?'
+  return '?'.charCodeAt(0) - 32;
 }
 
 /**
- * Convert an object/string to a deterministic bit stream (array of 0/1)
- * Then return number of bars and for each bar whether it's tall (1) or short (0).
+ * Build Code128 (subset B) code array for a given text:
+ * - start code B = 104
+ * - data codes: charCode - 32 for each char (for ASCII 32..127)
+ * - checksum: (start + sum(i * codeValue)) % 103 where i starts at 1
+ * - stop (106)
+ *
+ * Returns array of code values (integers).
  */
-function payloadToBits(payload) {
-  const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
-  const chars = Array.from(text);
-  let bits = [];
-  for (let i = 0; i < chars.length; i++) {
-    const code = chars[i].charCodeAt(0);
-    for (let b = 0; b < 8; b++) bits.push((code >> b) & 1);
+function buildCode128CodesB(text) {
+  const codes = [];
+  const START_B = 104;
+  codes.push(START_B);
+  for (let i = 0; i < text.length; i++) {
+    const cv = charCodeForCode128B(text[i]);
+    codes.push(cv);
   }
-  // expand to at least 240 bits
-  while (bits.length < 240) bits = bits.concat(bits);
-  return bits;
+  // checksum
+  let sum = START_B;
+  for (let i = 0; i < text.length; i++) {
+    sum += (i + 1) * charCodeForCode128B(text[i]);
+  }
+  const check = sum % 103;
+  codes.push(check);
+  // stop (code value 106)
+  codes.push(106);
+  return codes;
 }
 
 /**
- * Render a barcode as an inline SVG (React-PDF Svg component)
- * - width: desired pixel width
- * - height: desired height
- * The algorithm maps bits to narrow/wide bars. The payload is the ticket data object.
+ * Convert the code array into a sequence of module widths (alternating bar/space), including quiet zones.
+ * Returns { widths: number[], totalModules: number }.
  */
-function BarcodeSvg({ payload, width = 420, height = 56 }) {
-  const bits = payloadToBits(payload);
-  const totalBars = Math.min(bits.length, 300);
-  const barWidth = Math.max(1, Math.floor(width / totalBars));
-  // build rects
-  const rects = [];
+function codesToModuleWidths(codes) {
+  const widths = [];
+  // quiet zone of 10 modules on left (recommended)
+  const quiet = 10;
+  widths.push(quiet); // We'll treat this as a leading space (non-drawn), but for simplicity keep as modules offset
+  // For each code value, get widths string (except code 106 which is stop pattern).
+  for (let i = 0; i < codes.length; i++) {
+    const cv = codes[i];
+    let wstr;
+    if (cv === 106) {
+      wstr = CODE128_STOP; // stop pattern (7 digits)
+    } else {
+      wstr = CODE128_WIDTHS[cv];
+      if (!wstr) {
+        // fallback: encode as space if missing (shouldn't happen)
+        wstr = "111111";
+      }
+    }
+    // each digit is a run width
+    for (let j = 0; j < wstr.length; j++) {
+      widths.push(Number(wstr.charAt(j)));
+    }
+  }
+  // trailing quiet zone
+  widths.push(10);
+  const total = widths.reduce((s, v) => s + v, 0);
+  return { widths, totalModules: total };
+}
+
+/**
+ * Draw Code128 as an Svg element (react-pdf Svg + Rect).
+ * payloadStr: the string we encode (text). We'll use the JSON-serialized ticket details.
+ */
+function Code128Svg({ payloadStr, width = 420, height = 56 }) {
+  // Build codes
+  const codes = buildCode128CodesB(payloadStr);
+  const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
+
+  // compute module pixel width (floating ok)
+  const modulePx = width / totalModules;
+  const bars = [];
   let x = 0;
-  for (let i = 0; i < totalBars; i++) {
-    const bit = bits[i];
-    const bh = bit ? height : Math.floor(height * 0.62);
-    const w = bit ? barWidth : Math.max(1, Math.floor(barWidth / 2));
-    rects.push({ x, y: 0, width: w, height: bh });
-    x += barWidth;
+  // moduleWidths starts with quiet zone (treated as space), and alternates space/bar starting from that first entry.
+  // We want to draw bars where the run index (starting 0) corresponds to a bar run.
+  // However: we pushed quiet zone first (a space), so runIndex 0 -> space, runIndex 1 -> bar, etc.
+  for (let i = 0; i < moduleWidths.length; i++) {
+    const runUnits = moduleWidths[i];
+    const runPx = runUnits * modulePx;
+    const isBar = (i % 2) === 1; // because index 0 = quiet/space
+    if (isBar) {
+      // draw bar rect
+      bars.push({ x, w: runPx, h: height });
+    }
+    x += runPx;
   }
 
-  // human readable label (shortened)
-  const label = (typeof payload === 'string' ? payload : JSON.stringify(payload));
-  const safeLabel = label.length > 120 ? label.slice(0, 120) + '…' : label;
-
+  // render just bars (no human-readable text)
   return (
-    <Svg width={width} height={height + 14} style={{ display: 'block' }}>
-      {/* background */}
-      <Rect x={0} y={0} width={width} height={height + 14} fill="white" />
-      {/* bars */}
-      {rects.map((r, i) => (
-        <Rect key={i} x={r.x} y={r.y} width={r.width} height={r.height} fill="black" />
+    <Svg width={width} height={height} style={{ display: 'block' }}>
+      {/* white background */}
+      <Rect x={0} y={0} width={width} height={height} fill="white" />
+      {bars.map((b, idx) => (
+        <Rect key={idx} x={b.x} y={0} width={b.w} height={b.h} fill="black" />
       ))}
-      {/* human text -- use built-in Courier font to avoid registration error */}
-      <SvgText
-        x={width / 2}
-        y={height + 11}
-        fontSize={9}
-        textAnchor="middle"
-        fill="#222"
-        fontFamily="Courier"
-      >
-        {safeLabel.replace(/&/g, '&amp;')}
-      </SvgText>
     </Svg>
   );
 }
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-async function triggerConfetti(count = 140) {
-  try {
-    if (typeof window !== 'undefined' && !window.confetti) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
-        s.onload = () => resolve();
-        s.onerror = reject;
-        document.head.appendChild(s);
-      });
-    }
-    if (window.confetti) {
-      window.confetti({
-        particleCount: Math.min(count, 400),
-        spread: 160,
-        origin: { y: 0.6 },
-      });
-    }
-  } catch (e) {
-    // silent
-  }
-}
-
-// ---------- PDF component (fixed font usage) ----------
+// ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
 
-  // Only show the requested fields + T1 summary
   const ticketData = {
     agentTin: t.agentTin || '',
     agentName: t.agentName || '',
@@ -215,8 +238,8 @@ function AppointmentPdf({ ticket }) {
     t1s: t.t1s || [],
   };
 
-  // Barcode payload encodes all visible fields (compact JSON)
-  const barcodePayload = {
+  // barcode payload: only ticket details (compact JSON)
+  const barcodePayloadObj = {
     agentTin: ticketData.agentTin,
     agentName: ticketData.agentName,
     warehouse: ticketData.warehouse,
@@ -225,9 +248,9 @@ function AppointmentPdf({ ticket }) {
     truckNumber: ticketData.truckNumber,
     driverName: ticketData.driverName,
     driverLicense: ticketData.driverLicense,
-    t1Count: ticketData.t1Count,
     t1s: ticketData.t1s,
   };
+  const barcodePayloadStr = JSON.stringify(barcodePayloadObj);
 
   return (
     <Document>
@@ -250,12 +273,12 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
         </PdfView>
 
-        {/* Main boxed content (watermark embedded inside this box, rendered first so text overlays it) */}
+        {/* Main boxed content */}
         <PdfView style={pdfStyles.mainBox}>
-          {/* Watermark: coat.png — sized to 100% width of the main box. Render first so other content is on top */}
+          {/* Watermark (coat) 50% opacity, embedded inside main box and rendered first */}
           <PdfImage src={coat} style={pdfStyles.watermarkInline} />
 
-          {/* Row 1 */}
+          {/* top rows */}
           <PdfView style={pdfStyles.sectionRow}>
             <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Agent TIN :</PdfText>
@@ -280,13 +303,12 @@ function AppointmentPdf({ ticket }) {
             </PdfView>
           </PdfView>
 
-          {/* Row 2 */}
+          {/* driver row */}
           <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBoxTopBorder]}>
             <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Driver Name :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverName}</PdfText>
             </PdfView>
-
             <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Driver License No :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
@@ -322,13 +344,13 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
-          {/* Barcode (render inline using Svg — right-aligned within the main box) */}
+          {/* Barcode — right aligned; only encodes JSON ticket details (no human-readable text) */}
           <PdfView style={pdfStyles.barcodeBox}>
-            <BarcodeSvg payload={barcodePayload} width={420} height={56} />
+            <Code128Svg payloadStr={barcodePayloadStr} width={420} height={56} />
           </PdfView>
         </PdfView>
 
-        {/* Footer small centered notice */}
+        {/* Footer notice */}
         <PdfView>
           <PdfText style={pdfStyles.footerText}>- Notice -  This document is an official weighbridge ticket. Keep it safe for audits.</PdfText>
         </PdfView>
@@ -337,7 +359,7 @@ function AppointmentPdf({ ticket }) {
   );
 }
 
-// ---------- Main page component (mostly unchanged) ----------
+// ---------- Main page component (unchanged UI apart from PDF generation usage) ----------
 export default function AppointmentPage() {
   const toast = useToast();
 
@@ -361,21 +383,16 @@ export default function AppointmentPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
-  // UI state for orb modal / holographic
   const [isOrbOpen, setOrbOpen] = useState(false);
 
-  // voice recognition
   const recognitionRef = useRef(null);
   const [voiceActive, setVoiceActive] = useState(false);
 
-  // confetti and panel interactions
   const containerRef = useRef(null);
-
-  // responsiveness
   const isMobile = useBreakpointValue({ base: true, md: false });
 
   useEffect(() => {
-    // page-level styles: light mode forced + lightblue background + glassmorphism helpers (kept original)
+    // page-level styles (kept)
     const id = 'appointment-page-styles';
     const css = `
       html, body, #root { background: #e6f6ff !important; } /* light blue whole page */
@@ -422,7 +439,6 @@ export default function AppointmentPage() {
     };
   }, []);
 
-  // Voice recognition setup (kept from previous)
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -493,7 +509,6 @@ export default function AppointmentPage() {
     toast({ status: 'warning', title: 'Unknown command' });
   };
 
-  // Basic validation
   const validateMainForm = () => {
     if (!agentTin.trim()) { toast({ status: 'error', title: 'Agent TIN required' }); return false; }
     if (!agentName.trim()) { toast({ status: 'error', title: 'Agent Name required' }); return false; }
@@ -507,7 +522,6 @@ export default function AppointmentPage() {
     return true;
   };
 
-  // T1 modal functions
   const openAddT1 = () => {
     setEditingIndex(null);
     setT1Sad('');
@@ -551,14 +565,12 @@ export default function AppointmentPage() {
 
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
-  // Confirm modal
   const openConfirm = () => {
     if (!validateMainForm()) return;
     setConfirmOpen(true);
   };
   const closeConfirm = () => setConfirmOpen(false);
 
-  // --- Helper: generate appointment numbers using pickupDate and existing count (avoids relying on numeric DB id) ---
   async function generateNumbersUsingSupabase(pickupDateValue) {
     try {
       const { count } = await supabase
@@ -572,21 +584,19 @@ export default function AppointmentPage() {
       const YY = String(d.getFullYear()).slice(-2);
       const MM = String(d.getMonth() + 1).padStart(2, '0');
       const DD = String(d.getDate()).padStart(2, '0');
-      const appointmentNumber = `${YY}${MM}${DD}${pad(seq, 4)}`;
-      const weighbridgeNumber = `WB${YY}${MM}${pad(seq, 5)}`;
+      const appointmentNumber = `${YY}${MM}${DD}${String(seq).padStart(4,'0')}`;
+      const weighbridgeNumber = `WB${YY}${MM}${String(seq).padStart(5,'0')}`;
       return { appointmentNumber, weighbridgeNumber };
     } catch (e) {
-      // fallback to random
       const d = new Date(pickupDateValue);
       const YY = String(d.getFullYear()).slice(-2);
       const MM = String(d.getMonth() + 1).padStart(2, '0');
       const DD = String(d.getDate()).padStart(2, '0');
       const rand = Math.floor(Math.random() * 9999) + 1;
-      return { appointmentNumber: `${YY}${MM}${DD}${pad(rand, 4)}`, weighbridgeNumber: `WB${YY}${MM}${pad(rand, 5)}` };
+      return { appointmentNumber: `${YY}${MM}${DD}${String(rand).padStart(4,'0')}`, weighbridgeNumber: `WB${YY}${MM}${String(rand).padStart(5,'0')}` };
     }
   }
 
-  // Direct Supabase create (DB-only saving)
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
@@ -688,7 +698,6 @@ export default function AppointmentPage() {
     };
   };
 
-  // Create appointment — DB-only (no external API)
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
     setLoadingCreate(true);
@@ -709,11 +718,9 @@ export default function AppointmentPage() {
     };
 
     try {
-      // Direct DB write only
       const result = await createDirectlyInSupabase(payload);
       const ticket = result.appointment;
 
-      // Build ticket object to feed the PDF renderer (ONLY the fields you requested)
       const ticketForPdf = {
         agentTin: ticket.agentTin || ticket.agent_tin || payload.agentTin,
         agentName: ticket.agentName || ticket.agent_name || payload.agentName,
@@ -732,7 +739,15 @@ export default function AppointmentPage() {
         const doc = <AppointmentPdf ticket={ticketForPdf} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
-        downloadBlob(blob, `WeighbridgeTicket-${ticketForPdf.agentTin || Date.now()}.pdf`);
+        const filename = `WeighbridgeTicket-${ticketForPdf.agentTin || Date.now()}.pdf`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
@@ -740,10 +755,8 @@ export default function AppointmentPage() {
 
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
-      // confetti
       await triggerConfetti(160);
 
-      // Reset form
       setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
       setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
       setConfirmOpen(false);
@@ -758,7 +771,6 @@ export default function AppointmentPage() {
 
   const packingTypesUsed = useMemo(() => (t1s || []).map(t => t.packingType), [t1s]);
 
-  // UI: when mobile show cards, else table
   const renderRecords = () => {
     if (t1s.length === 0) {
       return <Box p={6}><Text color="gray.600">No T1 records added yet.</Text></Box>;
@@ -786,7 +798,6 @@ export default function AppointmentPage() {
       );
     }
 
-    // desktop table
     return (
       <Table variant="simple" size="sm">
         <Thead>
@@ -922,7 +933,7 @@ export default function AppointmentPage() {
         </MotionBox>
       </Box>
 
-      {/* T1 Modal — cinematic holographic modal */}
+      {/* T1 Modal */}
       <Modal isOpen={isT1ModalOpen} onClose={closeT1Modal} isCentered size="md">
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
         <AnimatePresence>
@@ -1011,4 +1022,28 @@ export default function AppointmentPage() {
       </Modal>
     </Container>
   );
+}
+
+// ---------- small helper: confetti (same as before) ----------
+async function triggerConfetti(count = 140) {
+  try {
+    if (typeof window !== 'undefined' && !window.confetti) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+        s.onload = () => resolve();
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    }
+    if (window.confetti) {
+      window.confetti({
+        particleCount: Math.min(count, 400),
+        spread: 160,
+        origin: { y: 0.6 },
+      });
+    }
+  } catch (e) {
+    // silent
+  }
 }
