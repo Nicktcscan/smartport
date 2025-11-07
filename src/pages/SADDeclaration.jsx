@@ -66,9 +66,7 @@ async function runInBatches(items = [], batchSize = 20, fn) {
   const results = [];
   for (let i = 0; i < items.length; i += batchSize) {
     const chunk = items.slice(i, i + batchSize);
-    // map to promises
     const promises = chunk.map(fn);
-    // await chunk
     // eslint-disable-next-line no-await-in-loop
     const chunkRes = await Promise.all(promises);
     results.push(...chunkRes);
@@ -111,7 +109,8 @@ export default function SADDeclaration() {
   const [statusFilter, setStatusFilter] = useState('');
   const [regimeFilter, setRegimeFilter] = useState('');
   const [sortBy, setSortBy] = useState('created_at');
-  const [sortDir, setSortDir] = useState('desc');
+  // default changed to 'asc' so "Newest" appears on top due to existing sort logic inversion
+  const [sortDir, setSortDir] = useState('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
@@ -142,7 +141,15 @@ export default function SADDeclaration() {
   const createdByMapRef = useRef({});
   const createdByMap = createdByMapRef.current;
 
-  /* ---------- fetchSADs: core fix for ticket counts ---------- */
+  // If user selects 'created_at' ensure sortDir stays 'asc' so newest is on top
+  useEffect(() => {
+    if (sortBy === 'created_at' && sortDir !== 'asc') {
+      setSortDir('asc');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortBy]);
+
+  /* ---------- fetchSADs: core (ticket counts handled) ---------- */
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
@@ -173,7 +180,6 @@ export default function SADDeclaration() {
       const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
 
       // If there are SADs, fetch exact counts per SAD using head:true + count:'exact'
-      // We do this per-SAD (in batches) to avoid PostgREST default row limit and get exact counts.
       if (sadNos.length) {
         const countResults = await runInBatches(sadNos, 25, async (sadKey) => {
           try {
@@ -195,14 +201,13 @@ export default function SADDeclaration() {
         const countsMap = {};
         for (const r of countResults) countsMap[String(r.sadKey)] = Number(r.count || 0);
 
-        // merge counts into normalized rows (and ensure total_recorded_weight uses stored value unless zero)
+        // merge counts into normalized rows
         for (let i = 0; i < normalized.length; i++) {
           const s = normalized[i];
           const key = s.sad_no != null ? String(s.sad_no).trim() : '';
           normalized[i] = {
             ...s,
             ticket_count: countsMap[key] || 0,
-            // keep total_recorded_weight as-is (DB trigger should maintain it). If zero, keep zero.
             total_recorded_weight: Number(s.total_recorded_weight || 0),
           };
         }
@@ -783,6 +788,7 @@ export default function SADDeclaration() {
       }
       const ta = new Date(a.created_at || a.updated_at || 0).getTime();
       const tb = new Date(b.created_at || b.updated_at || 0).getTime();
+      // NOTE: existing inversion kept: multiply by -dir so selecting 'asc' yields newest-first for created_at
       return (ta - tb) * -dir;
     });
     return arr;
@@ -871,7 +877,7 @@ export default function SADDeclaration() {
 
       <Heading mb={4}>SAD Declaration Panel</Heading>
 
-      {/* Stats */}
+      {/* Stats with different backgrounds */}
       <div className="stat-group-custom">
         <Stat bg="linear-gradient(90deg,#7b61ff,#3ef4d0)" color="white" p={3} borderRadius="md" boxShadow="sm" style={{ minWidth: 180 }}>
           <StatLabel style={{ color: 'rgba(255,255,255,0.95)' }}>Total SADs</StatLabel>
@@ -968,8 +974,8 @@ export default function SADDeclaration() {
           </Select>
 
           <Select size="sm" value={sortDir} onChange={(e) => setSortDir(e.target.value)} maxW="120px">
-            <option value="desc">Desc</option>
             <option value="asc">Asc</option>
+            <option value="desc">Desc</option>
           </Select>
 
           <Box ml="auto" display="flex" gap={3} alignItems="center">
@@ -1018,7 +1024,12 @@ export default function SADDeclaration() {
                       <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Status">
-                        <VStack align="start" spacing={1}><HStack><Box width="10px" height="10px" borderRadius="full" bg={color} /><Text color={color} fontWeight="medium">{s.status}</Text></HStack></VStack>
+                        <VStack align="start" spacing={1}>
+                          <HStack>
+                            <Box width="10px" height="10px" borderRadius="full" bg={color} />
+                            <Text color={color} fontWeight="medium">{s.status}</Text>
+                          </HStack>
+                        </VStack>
                       </Td>
                       <Td data-label="Discrepancy">
                         <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
@@ -1280,7 +1291,7 @@ export default function SADDeclaration() {
         <FaPlus />
       </div>
 
-      {/* Orb modal */}
+      {/* Orb holographic modal */}
       <Modal isOpen={orbOpen} onClose={closeOrb} isCentered size="lg" motionPreset="scale">
         <ModalOverlay />
         <ModalContent style={{ background: 'linear-gradient(180deg,#fff,#f8fbff)', borderRadius: 12, padding: 12 }}>
