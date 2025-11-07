@@ -8,12 +8,23 @@ import {
 } from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
-import { pdf as pdfRender, Document, Page, Text as PdfText, View as PdfView, StyleSheet, Image as PdfImage } from '@react-pdf/renderer';
+import {
+  pdf as pdfRender,
+  Document,
+  Page,
+  Text as PdfText,
+  View as PdfView,
+  StyleSheet,
+  Image as PdfImage,
+  Svg,
+  Rect,
+  Text as SvgText
+} from '@react-pdf/renderer';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
-// ----- Logos (ensure these files are in src/assets/) -----
+// ----- Logos & coat (ensure these files are in src/assets/) -----
 import gralogo from '../assets/gralogo.png';
-import gpalogo from '../assets/gpalogo.png';
+import coat from '../assets/coat.png'; // new watermark
 import gnswlogo from '../assets/gnswlogo.png';
 
 // ---------- Config ----------
@@ -51,7 +62,7 @@ const pdfStyles = StyleSheet.create({
   subtitle: { fontSize: 9, color: '#222', marginBottom: 2 },
 
   // Main container box (table-like)
-  mainBox: { borderWidth: 0.6, borderColor: '#000', padding: 10, marginBottom: 10 },
+  mainBox: { borderWidth: 0.6, borderColor: '#000', padding: 14, marginBottom: 10, position: 'relative' },
   sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
 
   // Label / value styles (serif)
@@ -59,7 +70,7 @@ const pdfStyles = StyleSheet.create({
   value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4 },
 
   // subtle divider used between logical groups
-  groupBox: { borderTopWidth: 0.8, borderTopColor: '#000', paddingTop: 6, marginTop: 6 },
+  groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#000', paddingTop: 6, marginTop: 6 },
 
   // T1 summary table styling inside main box
   t1Table: { width: '100%', marginTop: 6, borderTopWidth: 0.5, borderTopColor: '#000' },
@@ -70,12 +81,11 @@ const pdfStyles = StyleSheet.create({
   t1Col3: { width: '25%', fontSize: 10.5 },
   t1Col4: { width: '25%', fontSize: 10.5 },
 
-  // watermark (centered, faded)
-  watermark: { position: 'absolute', left: '50%', top: '42%', width: 360, transform: 'translate(-180px, -50%)', opacity: 0.12 },
+  // watermark inside the mainBox (100% width)
+  watermarkInline: { width: '100%', opacity: 0.12, position: 'absolute', left: 14, top: 18, zIndex: 0 },
 
-  // barcode container
+  // barcode area (right-aligned inside main box)
   barcodeBox: { marginTop: 12, width: '100%', flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
-  barcodeImg: { width: 260, height: 56, objectFit: 'contain', alignSelf: 'flex-end' },
 
   // footer small text
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 8 },
@@ -88,41 +98,69 @@ function pad(num, length = 4) {
 }
 
 /**
- * Generate a barcode-like SVG data URL from a string.
- * This simple generator maps each character's charCode into a sequence of bars.
- * It's not a standards-compliant code128 encoder but produces a high-contrast 1D barcode-like SVG
- * suitable for scanning if the scanner can be configured for such patterns, and it visually encodes all fields.
+ * Convert an object/string to a deterministic bit stream (array of 0/1)
+ * Then return number of bars and for each bar whether it's tall (1) or short (0).
+ * This isn't Code128 — it's a visual, high-contrast 1D representation that is reliably displayed by react-pdf.
  */
-function generateBarcodeSvgDataUrlFromObject(obj, width = 440, height = 64) {
-  const payload = typeof obj === 'string' ? obj : JSON.stringify(obj);
-  const chars = Array.from(payload);
-  // create bits stream from char codes
+function payloadToBits(payload) {
+  const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  const chars = Array.from(text);
   let bits = [];
   for (let i = 0; i < chars.length; i++) {
     const code = chars[i].charCodeAt(0);
     for (let b = 0; b < 8; b++) bits.push((code >> b) & 1);
   }
-  // ensure enough bits
-  while (bits.length < 200) bits = bits.concat(bits);
+  // expand to at least 240 bits
+  while (bits.length < 240) bits = bits.concat(bits);
+  return bits;
+}
+
+/**
+ * Render a barcode as an inline SVG (React-PDF Svg component)
+ * - width: desired pixel width
+ * - height: desired height
+ * The algorithm maps bits to narrow/wide bars. The payload is the ticket data object.
+ */
+function BarcodeSvg({ payload, width = 420, height = 56 }) {
+  const bits = payloadToBits(payload);
   const totalBars = Math.min(bits.length, 300);
   const barWidth = Math.max(1, Math.floor(width / totalBars));
+  // build rects
+  const rects = [];
   let x = 0;
-  let rects = '';
   for (let i = 0; i < totalBars; i++) {
     const bit = bits[i];
-    const bh = bit ? height : Math.floor(height * 0.65);
+    const bh = bit ? height : Math.floor(height * 0.62);
     const w = bit ? barWidth : Math.max(1, Math.floor(barWidth / 2));
-    rects += `<rect x="${x}" y="${0}" width="${w}" height="${bh}" fill="black"/>`;
+    rects.push({ x, y: 0, width: w, height: bh });
     x += barWidth;
   }
-  // small human-readable row
-  const safeText = payload.length > 120 ? payload.slice(0, 120) + '…' : payload;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height + 14}">
-    <rect width="100%" height="100%" fill="white" />
-    ${rects}
-    <text x="50%" y="${height + 10}" font-size="10" text-anchor="middle" fill="#222" font-family="monospace">${safeText.replace(/&/g,'&amp;')}</text>
-  </svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+
+  // human readable label (shortened)
+  const label = (typeof payload === 'string' ? payload : JSON.stringify(payload));
+  const safeLabel = label.length > 120 ? label.slice(0, 120) + '…' : label;
+
+  return (
+    <Svg width={width} height={height + 14} style={{ display: 'block' }}>
+      {/* background */}
+      <Rect x={0} y={0} width={width} height={height + 14} fill="white" />
+      {/* bars */}
+      {rects.map((r, i) => (
+        <Rect key={i} x={r.x} y={r.y} width={r.width} height={r.height} fill="black" />
+      ))}
+      {/* human text */}
+      <SvgText
+        x={width / 2}
+        y={height + 11}
+        fontSize={9}
+        textAnchor="middle"
+        fill="#222"
+        fontFamily="monospace"
+      >
+        {safeLabel.replace(/&/g, '&amp;')}
+      </SvgText>
+    </Svg>
+  );
 }
 
 function downloadBlob(blob, filename) {
@@ -159,11 +197,11 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (UPDATED: only requested fields included) ----------
+// ---------- PDF component (UPDATED: inline SVG barcode, coat.png watermark inside details box) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
 
-  // The PDF must only show the specified form fields + T1 summary
+  // Only show the requested fields + T1 summary
   const ticketData = {
     agentTin: t.agentTin || '',
     agentName: t.agentName || '',
@@ -192,14 +230,9 @@ function AppointmentPdf({ ticket }) {
     t1s: ticketData.t1s,
   };
 
-  const barcodeDataUrl = generateBarcodeSvgDataUrlFromObject(barcodePayload, 420, 56);
-
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark (center, faint) */}
-        <PdfImage src={gpalogo} style={pdfStyles.watermark} />
-
         {/* Header */}
         <PdfView style={pdfStyles.headerWrap}>
           <PdfView style={pdfStyles.leftHeader}>
@@ -218,11 +251,14 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
         </PdfView>
 
-        {/* Main boxed content (table-like) */}
+        {/* Main boxed content (watermark embedded inside this box, rendered first so text overlays it) */}
         <PdfView style={pdfStyles.mainBox}>
+          {/* Watermark: coat.png — sized to 100% width of the main box. Render first so other content is on top */}
+          <PdfImage src={coat} style={pdfStyles.watermarkInline} />
+
           {/* Row 1 */}
           <PdfView style={pdfStyles.sectionRow}>
-            <PdfView style={{ width: '48%' }}>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Agent TIN :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.agentTin}</PdfText>
 
@@ -233,7 +269,7 @@ function AppointmentPdf({ ticket }) {
               <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '48%' }}>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
 
@@ -246,27 +282,26 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
 
           {/* Row 2 */}
-          <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBox]}>
-            <PdfView style={{ width: '48%' }}>
+          <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBoxTopBorder]}>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Driver Name :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverName}</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '48%' }}>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
               <PdfText style={pdfStyles.label}>Driver License No :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
             </PdfView>
           </PdfView>
 
           {/* T1 summary */}
-          <PdfView style={pdfStyles.groupBox}>
-            <PdfText style={[pdfStyles.label, { textAlign: 'left' }]}>T1 Records Summary :</PdfText>
-            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+          <PdfView style={pdfStyles.groupBoxTopBorder}>
+            <PdfText style={[pdfStyles.label, { textAlign: 'left', zIndex: 1 }]}>T1 Records Summary :</PdfText>
+            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4, zIndex: 1 }}>
               <PdfText style={pdfStyles.value}>Count : {ticketData.t1Count}</PdfText>
               <PdfText style={pdfStyles.value}>Packing types : {ticketData.packingTypesUsed || '—'}</PdfText>
             </PdfView>
 
-            {/* Compact T1 listing (if any) */}
             {ticketData.t1Count > 0 && (
               <PdfView style={pdfStyles.t1Table}>
                 <PdfView style={pdfStyles.t1HeaderRow}>
@@ -288,9 +323,9 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
-          {/* Barcode (right-aligned near bottom of main box) */}
+          {/* Barcode (render inline using Svg — right-aligned within the main box) */}
           <PdfView style={pdfStyles.barcodeBox}>
-            <PdfImage src={barcodeDataUrl} style={pdfStyles.barcodeImg} />
+            <BarcodeSvg payload={barcodePayload} width={420} height={56} />
           </PdfView>
         </PdfView>
 
