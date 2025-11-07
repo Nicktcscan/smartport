@@ -20,7 +20,7 @@ const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 const REGIME_OPTIONS = ['import', 'export', 'warehousing'];
 
-// --- Helpers: number formatting + SAD normalization
+/* ---------- helpers ---------- */
 const formatNumber = (v) => {
   if (v === null || v === undefined || v === '') return '';
   const n = Number(String(v).replace(/,/g, ''));
@@ -33,44 +33,6 @@ const parseNumberString = (s) => {
   if (cleaned === '') return '';
   return cleaned;
 };
-
-/**
- * Normalize SAD number for internal matching:
- * - convert to string if not null
- * - remove zero-width/invisible characters
- * - trim whitespace
- * - remove thousands commas (e.g. "22,477" -> "22477")
- *
- * We intentionally **do not** strip letters; alphanumeric SADs (e.g. "GPA2025100701") remain.
- */
-function normalizeSadNo(raw) {
-  if (raw === null || raw === undefined) return '';
-  let s = String(raw);
-  // remove zero width and BOM chars
-  s = s.replace(/[\u200B-\u200D\uFEFF]/g, '');
-  s = s.trim();
-  // remove thousands-separator commas and normal spaces inside numeric-looking strings
-  // keep alphanumeric content intact except commas
-  s = s.replace(/,/g, '');
-  // collapse multiple spaces
-  s = s.replace(/\s+/g, ' ');
-  return s;
-}
-
-/**
- * For building a query that tries to match variant forms (we'll use ilike fallback with this).
- * For numeric-like SADs, return the digits-only form to help matching.
- */
-function cleanedForQuery(raw) {
-  const n = normalizeSadNo(raw);
-  // if purely digits after removing commas -> return digits-only
-  const digitsOnly = n.replace(/[^\d]/g, '');
-  if (digitsOnly && digitsOnly.length > 0 && digitsOnly.length === n.replace(/\s/g, '').length) {
-    return digitsOnly;
-  }
-  return n;
-}
-
 function exportToCSV(rows = [], filename = 'export.csv') {
   if (!rows || rows.length === 0) return;
   const headers = Object.keys(rows[0]);
@@ -99,6 +61,22 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   URL.revokeObjectURL(url);
 }
 
+/* Helper to run promises in chunks to reduce concurrency spikes */
+async function runInBatches(items = [], batchSize = 20, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    // map to promises
+    const promises = chunk.map(fn);
+    // await chunk
+    // eslint-disable-next-line no-await-in-loop
+    const chunkRes = await Promise.all(promises);
+    results.push(...chunkRes);
+  }
+  return results;
+}
+
+/* ---------- component ---------- */
 export default function SADDeclaration() {
   const toast = useToast();
 
@@ -164,7 +142,7 @@ export default function SADDeclaration() {
   const createdByMapRef = useRef({});
   const createdByMap = createdByMapRef.current;
 
-  // fetchSADs with created_by resolver
+  /* ---------- fetchSADs: core fix for ticket counts ---------- */
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
@@ -177,14 +155,13 @@ export default function SADDeclaration() {
       const { data, error } = await q;
       if (error) throw error;
 
-      // normalize rows (including trimmed/cleaned sad_no)
+      // normalize rows (trim sad_no, keep originals)
       const normalized = (data || []).map((r) => {
-        const raw = r.sad_no;
-        const normalizedSad = normalizeSadNo(raw);
+        const trimmed = r.sad_no != null ? String(r.sad_no).trim() : r.sad_no;
         return {
           ...r,
-          sad_no: normalizedSad,
-          _raw_sad_no: raw, // keep original raw if needed
+          sad_no: trimmed,
+          _raw_sad_no: r.sad_no,
           docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
           total_recorded_weight: Number(r.total_recorded_weight ?? 0),
           ticket_count: 0,
@@ -192,67 +169,41 @@ export default function SADDeclaration() {
         };
       });
 
-      // Build list of SAD keys to query tickets for (cleaned)
-      const sadNosForQuery = Array.from(new Set(
-        normalized
-          .map((s) => cleanedForQuery(s.sad_no))
-          .filter(Boolean)
-      ));
+      // Build list of unique trimmed SADs
+      const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
 
-      // If we have SADs, query tickets and aggregate by normalized key
-      if (sadNosForQuery.length) {
-        // Primary attempt: query with .in using the cleaned values
-        let tickets = [];
-        try {
-          const { data: tData, error: tErr } = await supabase
-            .from('tickets')
-            .select('sad_no, net, weight')
-            .in('sad_no', sadNosForQuery)
-            .limit(10000); // reasonable safety
-          if (!tErr && tData) tickets = tData;
-        } catch (e) {
-          console.warn('tickets .in query failed, will fallback to broader fetch', e);
-        }
-
-        // Fallback: if we got nothing, attempt a broader fetch where sad_no is not null but will filter in JS
-        if (!tickets || tickets.length === 0) {
+      // If there are SADs, fetch exact counts per SAD using head:true + count:'exact'
+      // We do this per-SAD (in batches) to avoid PostgREST default row limit and get exact counts.
+      if (sadNos.length) {
+        const countResults = await runInBatches(sadNos, 25, async (sadKey) => {
           try {
-            const { data: allT, error: allErr } = await supabase
+            const { error: cErr, count } = await supabase
               .from('tickets')
-              .select('sad_no, net, weight')
-              .limit(10000);
-            if (!allErr && Array.isArray(allT)) {
-              // We'll only keep tickets that match our normalized keys when normalized
-              tickets = allT.filter(t => {
-                const key = normalizeSadNo(t.sad_no);
-                // match if normalized key equals any normalized SAD in our list
-                return sadNosForQuery.includes(cleanedForQuery(key));
-              });
+              .select('id', { head: true, count: 'exact' })
+              .eq('sad_no', sadKey);
+            if (cErr) {
+              console.warn('count query failed for', sadKey, cErr);
+              return { sadKey, count: 0 };
             }
+            return { sadKey, count: Number(count || 0) };
           } catch (e) {
-            console.warn('fallback tickets fetch failed', e);
+            console.warn('count exception for', sadKey, e);
+            return { sadKey, count: 0 };
           }
-        }
+        });
 
-        // aggregate totals and counts using normalized keys
-        const totals = {};
-        const counts = {};
-        for (const t of tickets || []) {
-          const key = cleanedForQuery(normalizeSadNo(t.sad_no));
-          const n = Number(t.net ?? t.weight ?? 0);
-          totals[key] = (totals[key] || 0) + (Number.isFinite(n) ? n : 0);
-          counts[key] = (counts[key] || 0) + 1;
-        }
+        const countsMap = {};
+        for (const r of countResults) countsMap[String(r.sadKey)] = Number(r.count || 0);
 
+        // merge counts into normalized rows (and ensure total_recorded_weight uses stored value unless zero)
         for (let i = 0; i < normalized.length; i++) {
           const s = normalized[i];
-          const key = cleanedForQuery(s.sad_no);
-          const totalForKey = totals[key];
-          const countForKey = counts[key] || 0;
+          const key = s.sad_no != null ? String(s.sad_no).trim() : '';
           normalized[i] = {
             ...s,
-            total_recorded_weight: typeof totalForKey !== 'undefined' ? totalForKey : s.total_recorded_weight || 0,
-            ticket_count: countForKey,
+            ticket_count: countsMap[key] || 0,
+            // keep total_recorded_weight as-is (DB trigger should maintain it). If zero, keep zero.
+            total_recorded_weight: Number(s.total_recorded_weight || 0),
           };
         }
       }
@@ -290,8 +241,8 @@ export default function SADDeclaration() {
     }
   };
 
+  /* ---------- lifecycle: load + realtime ---------- */
   useEffect(() => {
-    // load activity
     try {
       const raw = localStorage.getItem('sad_activity');
       if (raw) {
@@ -302,7 +253,6 @@ export default function SADDeclaration() {
 
     fetchSADs();
 
-    // realtime subscriptions
     try {
       if (supabase.channel) {
         const ch = supabase.channel('public:sad_declarations')
@@ -322,7 +272,7 @@ export default function SADDeclaration() {
           .subscribe();
         ticketsSubRef.current = tch;
       } else {
-        // older client fallback (no-op if not supported)
+        // older client fallback - keep as best-effort
       }
     } catch (e) { /* ignore */ }
 
@@ -343,12 +293,11 @@ export default function SADDeclaration() {
     try { await supabase.from('sad_activity').insert([{ text, meta }]); } catch (e) { /* ignore */ }
   };
 
-  // open docs modal
+  /* ---------- docs upload ---------- */
   const openDocsModal = (sad) => {
     setDocsModal({ open: true, docs: Array.isArray(sad.docs) ? sad.docs : [], sad_no: sad.sad_no });
   };
 
-  // upload docs
   const uploadDocs = async (sad_no, files = []) => {
     if (!files || files.length === 0) return [];
     const uploaded = [];
@@ -376,7 +325,7 @@ export default function SADDeclaration() {
     return uploaded;
   };
 
-  // create SAD - attach created_by when possible
+  /* ---------- create SAD ---------- */
   const handleCreateSAD = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!sadNo || !declaredWeight) {
@@ -387,8 +336,9 @@ export default function SADDeclaration() {
     try {
       const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
       const docRecords = await uploadDocs(sadNo, docs);
+      const trimmedSad = String(sadNo).trim();
       const payload = {
-        sad_no: normalizeSadNo(sadNo),
+        sad_no: trimmedSad,
         regime: regime || null,
         declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
@@ -402,19 +352,17 @@ export default function SADDeclaration() {
       const { error } = await supabase.from('sad_declarations').insert([payload]);
       if (error) throw error;
 
-      // store username if available
       if (currentUser && currentUser.id) {
         const uname = (currentUser.user_metadata && currentUser.user_metadata.full_name) || currentUser.email || '';
         if (uname) createdByMapRef.current = { ...createdByMapRef.current, [currentUser.id]: uname };
       }
 
-      // confetti (if available)
       if (typeof window !== 'undefined' && window.confetti) {
         try { window.confetti({ particleCount: 120, spread: 160, origin: { y: 0.6 } }); } catch (e) { /* ignore */ }
       }
 
-      toast({ title: 'SAD registered', description: `SAD ${sadNo} created`, status: 'success' });
-      await pushActivity(`Created SAD ${sadNo}`);
+      toast({ title: 'SAD registered', description: `SAD ${trimmedSad} created`, status: 'success' });
+      await pushActivity(`Created SAD ${trimmedSad}`);
       setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]);
       fetchSADs();
       closeOrb();
@@ -426,24 +374,15 @@ export default function SADDeclaration() {
     }
   };
 
-  // open SAD detail (existing) - robust fetching using normalized key and ilike fallback
+  /* ---------- open / details ---------- */
   const openSadDetail = async (sad) => {
     setSelectedSad(sad);
     setIsModalOpen(true);
     setDetailLoading(true);
     try {
-      const normalizedKey = normalizeSadNo(sad.sad_no);
-      // first try exact match
-      let result = await supabase.from('tickets').select('*').eq('sad_no', normalizedKey).order('date', { ascending: false });
-      if ((result?.data?.length || 0) === 0) {
-        // fallback: try ilike with cleaned digits or normalized form
-        const cleaned = cleanedForQuery(normalizedKey);
-        if (cleaned) {
-          const { data: fallbackData } = await supabase.from('tickets').select('*').ilike('sad_no', `%${cleaned}%`).order('date', { ascending: false });
-          if (fallbackData && fallbackData.length) result = { data: fallbackData, error: null };
-        }
-      }
-      const data = result?.data ?? [];
+      const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+      const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
+      if (error) throw error;
       setDetailTickets(data || []);
       const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
       setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)), ticket_count: (data || []).length }));
@@ -457,33 +396,27 @@ export default function SADDeclaration() {
     }
   };
 
-  // open details modal (new) which shows declared/discharged/status/createdAt/createdBy + tickets
   const openDetailsModal = async (sad) => {
     setDetailsData({ sad, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
     setDetailsOpen(true);
     try {
-      const normalizedKey = normalizeSadNo(sad.sad_no);
-      let ticketsRes = await supabase.from('tickets').select('*').eq('sad_no', normalizedKey).order('date', { ascending: false });
-      if ((ticketsRes?.data?.length || 0) === 0) {
-        const cleaned = cleanedForQuery(normalizedKey);
-        if (cleaned) {
-          const { data: fb } = await supabase.from('tickets').select('*').ilike('sad_no', `%${cleaned}%`).order('date', { ascending: false });
-          if (fb && fb.length) ticketsRes = { data: fb, error: null };
+      const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+      const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
+      if (!error) {
+        let createdByUsername = sad.created_by_username || null;
+        if (!createdByUsername && sad.created_by) {
+          try {
+            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
+            if (u) {
+              createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
+              createdByUsername = u.username || u.email || null;
+            }
+          } catch (e) { /* ignore */ }
         }
+        setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
+      } else {
+        setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
       }
-
-      const tickets = ticketsRes?.data || [];
-      let createdByUsername = sad.created_by_username || null;
-      if (!createdByUsername && sad.created_by) {
-        try {
-          const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
-          if (u) {
-            createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
-            createdByUsername = u.username || u.email || null;
-          }
-        } catch (e) { /* ignore */ }
-      }
-      setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
     } catch (err) {
       console.error('openDetailsModal', err);
       setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
@@ -491,11 +424,11 @@ export default function SADDeclaration() {
     }
   };
 
-  // open edit modal now with SAD Number editable
+  /* ---------- edit ---------- */
   const openEditModal = (sad) => {
     setEditModalData({
-      original_sad_no: sad.sad_no, // keep original
-      sad_no: sad.sad_no,          // editable
+      original_sad_no: sad.sad_no,
+      sad_no: sad.sad_no,
       regime: sad.regime ?? '',
       declared_weight: String(sad.declared_weight ?? ''),
       status: sad.status ?? 'In Progress',
@@ -504,15 +437,13 @@ export default function SADDeclaration() {
   };
   const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); };
 
-  // Save edit modal -> supports renaming SAD number
   const saveEditModal = async () => {
     if (!editModalData || !editModalData.original_sad_no) return;
     const originalSad = editModalData.original_sad_no;
-    const newSad = normalizeSadNo(editModalData.sad_no ?? '');
+    const newSad = String(editModalData.sad_no ?? '').trim();
     const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
     const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
 
-    // optimistic UI update
     setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString() } : s)));
     setConfirmSaveOpen(false);
     closeEditModal();
@@ -522,18 +453,14 @@ export default function SADDeclaration() {
 
       if (newSad !== originalSad) {
         const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
-        if (conflict) {
-          throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
-        }
+        if (conflict) throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
 
-        // update child tables first: tickets, reports_generated
         const { error: tErr } = await supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (tErr) console.warn('tickets update returned error', tErr);
 
         const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
-        // now update the parent SAD row
         const { error: parentErr } = await supabase.from('sad_declarations').update({
           sad_no: newSad,
           regime: editModalData.regime ?? null,
@@ -543,13 +470,11 @@ export default function SADDeclaration() {
           manual_update: true,
         }).eq('sad_no', originalSad);
         if (parentErr) {
-          // attempt rollback children updates to originalSad (best-effort)
           try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
           try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
           throw parentErr;
         }
       } else {
-        // same sad_no -> simple update
         const { error } = await supabase.from('sad_declarations').update({
           regime: editModalData.regime ?? null,
           declared_weight: declaredParsed,
@@ -560,7 +485,6 @@ export default function SADDeclaration() {
         if (error) throw error;
       }
 
-      // log change
       try {
         const after = {
           ...before,
@@ -579,11 +503,11 @@ export default function SADDeclaration() {
     } catch (err) {
       console.error('saveEditModal', err);
       toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
-      fetchSADs(); // refresh to ensure UI consistency
+      fetchSADs();
     }
   };
 
-  // update status quick action
+  /* ---------- quick actions ---------- */
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
@@ -608,19 +532,12 @@ export default function SADDeclaration() {
 
   const recalcTotalForSad = async (sad_no) => {
     try {
-      const normalizedKey = normalizeSadNo(sad_no);
-      let res = await supabase.from('tickets').select('net, weight').eq('sad_no', normalizedKey);
-      if ((res?.data?.length || 0) === 0) {
-        const cleaned = cleanedForQuery(normalizedKey);
-        if (cleaned) {
-          const { data: fb } = await supabase.from('tickets').select('net, weight').ilike('sad_no', `%${cleaned}%`);
-          if (fb && fb.length) res = { data: fb, error: null };
-        }
-      }
-      const tickets = res?.data || [];
+      const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
+      const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
+      if (error) throw error;
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', normalizedKey);
-      await pushActivity(`Recalculated total for ${normalizedKey}: ${total}`);
+      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+      await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
     } catch (err) {
@@ -665,7 +582,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // NL search
+  /* ---------- NL search ---------- */
   const runNlQuery = async () => {
     if (!nlQuery) { fetchSADs(); return; }
     setNlLoading(true);
@@ -686,7 +603,7 @@ export default function SADDeclaration() {
     } finally { setNlLoading(false); }
   };
 
-  // explain discrepancy
+  /* ---------- discrepancy helper ---------- */
   const handleExplainDiscrepancy = async (s) => {
     const recorded = Number(s.total_recorded_weight || 0);
     const declared = Number(s.declared_weight || 0);
@@ -709,19 +626,12 @@ export default function SADDeclaration() {
     await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
   };
 
-  // generate printable report (iframe-based)
+  /* ---------- PDF report ---------- */
   const generatePdfReport = async (s) => {
     try {
-      const normalizedKey = normalizeSadNo(s.sad_no);
-      let res = await supabase.from('tickets').select('*').eq('sad_no', normalizedKey).order('date', { ascending: false });
-      if ((res?.data?.length || 0) === 0) {
-        const cleaned = cleanedForQuery(normalizedKey);
-        if (cleaned) {
-          const { data: fb } = await supabase.from('tickets').select('*').ilike('sad_no', `%${cleaned}%`).order('date', { ascending: false });
-          if (fb && fb.length) res = { data: fb, error: null };
-        }
-      }
-      const tickets = res?.data || [];
+      const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
+      const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
+      if (error) console.warn('Could not fetch tickets for PDF', error);
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
       const html = `
@@ -813,7 +723,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // UI derived values
+  /* ---------- UI derived ---------- */
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
       const d = Number(s.declared_weight || 0);
@@ -896,7 +806,6 @@ export default function SADDeclaration() {
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
   };
 
-  // manual backup uses component state so implement here
   const handleManualBackupToStorage = async () => {
     try {
       const rows = sads.map(s => ({
@@ -925,7 +834,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // styling block
+  /* ---------- styles + render ---------- */
   const pageCss = `
 :root{
   --muted: rgba(7,17,25,0.55);
@@ -1109,12 +1018,7 @@ export default function SADDeclaration() {
                       <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Status">
-                        <VStack align="start" spacing={1}>
-                          <HStack>
-                            <Box width="10px" height="10px" borderRadius="full" bg={color} />
-                            <Text color={color} fontWeight="medium">{s.status}</Text>
-                          </HStack>
-                        </VStack>
+                        <VStack align="start" spacing={1}><HStack><Box width="10px" height="10px" borderRadius="full" bg={color} /><Text color={color} fontWeight="medium">{s.status}</Text></HStack></VStack>
                       </Td>
                       <Td data-label="Discrepancy">
                         <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
@@ -1234,7 +1138,7 @@ export default function SADDeclaration() {
         </ModalContent>
       </Modal>
 
-      {/* Edit modal (SAD Number editable) */}
+      {/* Edit modal */}
       <Modal isOpen={editModalOpen} onClose={closeEditModal} size="md" isCentered>
         <ModalOverlay />
         <ModalContent>
@@ -1376,7 +1280,7 @@ export default function SADDeclaration() {
         <FaPlus />
       </div>
 
-      {/* Orb holographic modal */}
+      {/* Orb modal */}
       <Modal isOpen={orbOpen} onClose={closeOrb} isCentered size="lg" motionPreset="scale">
         <ModalOverlay />
         <ModalContent style={{ background: 'linear-gradient(180deg,#fff,#f8fbff)', borderRadius: 12, padding: 12 }}>
