@@ -13,9 +13,9 @@ import { supabase } from '../supabaseClient'; // ensure this file exists and exp
 
 
 // ----------------- Import logos (place your files in src/assets) -----------------
-import gralogo from '../src/assets/gralogo.png';
-import gpalogo from '../src/assets/gpalogo.png';
-import gnswlogo from '../src/assets/gnswlogo.png';
+import gralogo from '../assets/gralogo.png';
+import gpalogo from '../assets/gpalogo.png';
+import gnswlogo from '../assets/gnswlogo.png';
 
 
 // ---------- Config ----------
