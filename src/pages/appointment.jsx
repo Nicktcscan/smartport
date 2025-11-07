@@ -11,6 +11,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { pdf as pdfRender, Document, Page, Text as PdfText, View as PdfView, StyleSheet, Image as PdfImage } from '@react-pdf/renderer';
 
 // ---------- Config ----------
+const API_URL = 'https://smartport-api.vercel.app/api/appointments';
+
 const WAREHOUSES = [
   { value: 'WTGMBJLCON', label: 'WTGMBJLCON - GAMBIA PORTS AUTHORITY - P.O BOX 617 BANJUL BJ' },
 ];
@@ -92,7 +94,6 @@ async function triggerConfetti(count = 140) {
     }
   } catch (e) {
     // silent
-    // console.debug('confetti load failed', e);
   }
 }
 
@@ -367,7 +368,7 @@ export default function AppointmentPage() {
   };
   const closeConfirm = () => setConfirmOpen(false);
 
-  // Create appointment — POST to /api/appointments (Step 2)
+  // Create appointment — POST to external API
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
     setLoadingCreate(true);
@@ -388,22 +389,25 @@ export default function AppointmentPage() {
     };
 
     try {
-      const resp = await fetch('/api/appointments', {
+      const resp = await fetch(API_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        mode: 'cors',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
         body: JSON.stringify(payload),
       });
 
       if (!resp.ok) {
-        const err = await resp.json().catch(() => null);
-        console.error('API error', err);
-        toast({ title: 'Failed', description: err?.error || err?.message || 'Server error creating appointment', status: 'error' });
+        // try to parse JSON error, fallback to text
+        let err = null;
+        try { err = await resp.json(); } catch (e) { err = { error: await resp.text() }; }
+        console.error('API error', resp.status, err);
+        toast({ title: 'Failed', description: err?.error || err?.message || `Server returned ${resp.status}`, status: 'error' });
         setLoadingCreate(false);
         return;
       }
 
       const body = await resp.json();
-      const ticket = body?.appointment;
+      const ticket = body?.appointment || body?.data || body?.appointment_data || null;
       if (!ticket) {
         toast({ title: 'API returned no appointment', status: 'error' });
         setLoadingCreate(false);
