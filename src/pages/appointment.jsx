@@ -24,7 +24,7 @@ import { supabase } from '../supabaseClient'; // ensure this file exists and exp
 
 // ----- Logos & coat (ensure these files are in src/assets/) -----
 import gralogo from '../assets/gralogo.png';
-import coat from '../assets/coat.png'; // new watermark
+import coat from '../assets/coat.png'; // watermark
 import gnswlogo from '../assets/gnswlogo.png';
 
 // ---------- Config ----------
@@ -100,7 +100,6 @@ function pad(num, length = 4) {
 /**
  * Convert an object/string to a deterministic bit stream (array of 0/1)
  * Then return number of bars and for each bar whether it's tall (1) or short (0).
- * This isn't Code128 — it's a visual, high-contrast 1D representation that is reliably displayed by react-pdf.
  */
 function payloadToBits(payload) {
   const text = typeof payload === 'string' ? payload : JSON.stringify(payload);
@@ -148,14 +147,14 @@ function BarcodeSvg({ payload, width = 420, height = 56 }) {
       {rects.map((r, i) => (
         <Rect key={i} x={r.x} y={r.y} width={r.width} height={r.height} fill="black" />
       ))}
-      {/* human text */}
+      {/* human text -- use built-in Courier font to avoid registration error */}
       <SvgText
         x={width / 2}
         y={height + 11}
         fontSize={9}
         textAnchor="middle"
         fill="#222"
-        fontFamily="monospace"
+        fontFamily="Courier"
       >
         {safeLabel.replace(/&/g, '&amp;')}
       </SvgText>
@@ -197,7 +196,7 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (UPDATED: inline SVG barcode, coat.png watermark inside details box) ----------
+// ---------- PDF component (fixed font usage) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
 
