@@ -18,22 +18,27 @@ import logoUrl from '../assets/logo.png';
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
-// Keep DB-friendly regime values here. We'll display codes in the UI.
-const REGIME_OPTIONS = ['import', 'export', 'warehousing'];
 
-// Map DB regime -> display code
-const REGIME_CODE_MAP = {
+// ---------- Regime configuration ----------
+// Database now stores regime codes directly: IM4 (import), EX1 (export), IM7 (warehousing)
+const REGIME_OPTIONS = ['IM4', 'EX1', 'IM7'];
+
+// Map code -> human label
+const REGIME_LABEL_MAP = {
+  IM4: 'Import',
+  EX1: 'Export',
+  IM7: 'Warehousing',
+};
+
+// Map common word inputs -> code (helps NL search)
+const WORD_TO_CODE = {
   import: 'IM4',
   export: 'EX1',
   warehousing: 'IM7',
+  warehouse: 'IM7',
 };
-// Inverse map for searching by code
-const CODE_TO_REGIME = Object.entries(REGIME_CODE_MAP).reduce((acc, [k, v]) => {
-  acc[v.toUpperCase()] = k;
-  return acc;
-}, {});
 
-/* ---------- helpers ---------- */
+// ---------- helpers ----------
 const formatNumber = (v) => {
   if (v === null || v === undefined || v === '') return '';
   const n = Number(String(v).replace(/,/g, ''));
@@ -74,7 +79,7 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   URL.revokeObjectURL(url);
 }
 
-/* Helper to run promises in chunks to reduce concurrency spikes */
+/* Helper to run promises in batches */
 async function runInBatches(items = [], batchSize = 20, fn) {
   const results = [];
   for (let i = 0; i < items.length; i += batchSize) {
@@ -87,13 +92,12 @@ async function runInBatches(items = [], batchSize = 20, fn) {
   return results;
 }
 
-/* ---------- component ---------- */
 export default function SADDeclaration() {
   const toast = useToast();
 
   // form
   const [sadNo, setSadNo] = useState('');
-  const [regime, setRegime] = useState('');
+  const [regime, setRegime] = useState(''); // will hold codes like IM4/EX1/IM7
   const [declaredWeight, setDeclaredWeight] = useState('');
   const [docs, setDocs] = useState([]);
 
@@ -122,7 +126,7 @@ export default function SADDeclaration() {
   const [statusFilter, setStatusFilter] = useState('');
   const [regimeFilter, setRegimeFilter] = useState('');
   const [sortBy, setSortBy] = useState('created_at');
-  // default changed to 'asc' so "Newest" appears on top due to existing sort logic inversion
+  // Ascending is default per your request (keeps newest-on-top via existing inversion logic)
   const [sortDir, setSortDir] = useState('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
@@ -154,7 +158,7 @@ export default function SADDeclaration() {
   const createdByMapRef = useRef({});
   const createdByMap = createdByMapRef.current;
 
-  // If user selects 'created_at' ensure sortDir stays 'asc' so newest is on top
+  // ensure created_at sorting keeps newest first if sortBy is created_at
   useEffect(() => {
     if (sortBy === 'created_at' && sortDir !== 'asc') {
       setSortDir('asc');
@@ -162,20 +166,20 @@ export default function SADDeclaration() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortBy]);
 
-  /* ---------- fetchSADs: core (ticket counts handled) ---------- */
+  // ----- fetchSADs -----
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
+      // when talking to DB, regime values are the codes (IM4/EX1/IM7)
       let q = supabase.from('sad_declarations').select('*').order('created_at', { ascending: false });
       if (filter) {
         if (filter.status) q = q.eq('status', filter.status);
         if (filter.sad_no) q = q.eq('sad_no', filter.sad_no);
-        if (filter.regime) q = q.ilike('regime', `%${filter.regime}%`);
+        if (filter.regime) q = q.eq('regime', filter.regime);
       }
       const { data, error } = await q;
       if (error) throw error;
 
-      // normalize rows (trim sad_no, keep originals)
       const normalized = (data || []).map((r) => {
         const trimmed = r.sad_no != null ? String(r.sad_no).trim() : r.sad_no;
         return {
@@ -189,10 +193,8 @@ export default function SADDeclaration() {
         };
       });
 
-      // Build list of unique trimmed SADs
+      // get counts per sad
       const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
-
-      // If there are SADs, fetch exact counts per SAD using head:true + count:'exact'
       if (sadNos.length) {
         const countResults = await runInBatches(sadNos, 25, async (sadKey) => {
           try {
@@ -214,7 +216,6 @@ export default function SADDeclaration() {
         const countsMap = {};
         for (const r of countResults) countsMap[String(r.sadKey)] = Number(r.count || 0);
 
-        // merge counts into normalized rows
         for (let i = 0; i < normalized.length; i++) {
           const s = normalized[i];
           const key = s.sad_no != null ? String(s.sad_no).trim() : '';
@@ -259,7 +260,7 @@ export default function SADDeclaration() {
     }
   };
 
-  /* ---------- lifecycle: load + realtime ---------- */
+  // lifecycle: load + realtime
   useEffect(() => {
     try {
       const raw = localStorage.getItem('sad_activity');
@@ -289,8 +290,6 @@ export default function SADDeclaration() {
           .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => fetchSADs())
           .subscribe();
         ticketsSubRef.current = tch;
-      } else {
-        // older client fallback - keep as best-effort
       }
     } catch (e) { /* ignore */ }
 
@@ -311,11 +310,12 @@ export default function SADDeclaration() {
     try { await supabase.from('sad_activity').insert([{ text, meta }]); } catch (e) { /* ignore */ }
   };
 
-  /* ---------- docs upload ---------- */
+  // open docs modal
   const openDocsModal = (sad) => {
     setDocsModal({ open: true, docs: Array.isArray(sad.docs) ? sad.docs : [], sad_no: sad.sad_no });
   };
 
+  // upload docs
   const uploadDocs = async (sad_no, files = []) => {
     if (!files || files.length === 0) return [];
     const uploaded = [];
@@ -343,7 +343,7 @@ export default function SADDeclaration() {
     return uploaded;
   };
 
-  /* ---------- create SAD ---------- */
+  // create SAD - now storing regime as code (IM4/EX1/IM7)
   const handleCreateSAD = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     if (!sadNo || !declaredWeight) {
@@ -355,9 +355,17 @@ export default function SADDeclaration() {
       const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
       const docRecords = await uploadDocs(sadNo, docs);
       const trimmedSad = String(sadNo).trim();
+
+      // regime should already be a code (IM4/EX1/IM7). If user accidentally typed a word, convert it.
+      let regimeCode = regime;
+      if (!regimeCode && typeof regime === 'string') {
+        const low = regime.trim().toLowerCase();
+        if (WORD_TO_CODE[low]) regimeCode = WORD_TO_CODE[low];
+      }
+
       const payload = {
         sad_no: trimmedSad,
-        regime: regime || null, // store DB-friendly value
+        regime: regimeCode || null,
         declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
         status: 'In Progress',
@@ -392,7 +400,7 @@ export default function SADDeclaration() {
     }
   };
 
-  /* ---------- open / details ---------- */
+  // open SAD detail (existing)
   const openSadDetail = async (sad) => {
     setSelectedSad(sad);
     setIsModalOpen(true);
@@ -414,6 +422,7 @@ export default function SADDeclaration() {
     }
   };
 
+  // open details modal
   const openDetailsModal = async (sad) => {
     setDetailsData({ sad, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
     setDetailsOpen(true);
@@ -442,7 +451,7 @@ export default function SADDeclaration() {
     }
   };
 
-  /* ---------- edit ---------- */
+  // edit modal open
   const openEditModal = (sad) => {
     setEditModalData({
       original_sad_no: sad.sad_no,
@@ -455,6 +464,7 @@ export default function SADDeclaration() {
   };
   const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); };
 
+  // save edit modal (handles renaming and regime/code changes)
   const saveEditModal = async () => {
     if (!editModalData || !editModalData.original_sad_no) return;
     const originalSad = editModalData.original_sad_no;
@@ -462,6 +472,7 @@ export default function SADDeclaration() {
     const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
     const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
 
+    // optimistic UI update
     setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString() } : s)));
     setConfirmSaveOpen(false);
     closeEditModal();
@@ -469,32 +480,45 @@ export default function SADDeclaration() {
     try {
       if (!newSad) throw new Error('SAD Number cannot be empty');
 
+      // ensure regime is a code; if user entered a word, convert
+      let regimeToSave = editModalData.regime;
+      if (regimeToSave && typeof regimeToSave === 'string') {
+        const low = regimeToSave.trim().toLowerCase();
+        if (WORD_TO_CODE[low]) regimeToSave = WORD_TO_CODE[low];
+      }
+
       if (newSad !== originalSad) {
         const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
-        if (conflict) throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
+        if (conflict) {
+          throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
+        }
 
+        // update child tables first: tickets, reports_generated
         const { error: tErr } = await supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (tErr) console.warn('tickets update returned error', tErr);
 
         const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
+        // now update the parent SAD row
         const { error: parentErr } = await supabase.from('sad_declarations').update({
           sad_no: newSad,
-          regime: editModalData.regime ?? null,
+          regime: regimeToSave ?? null,
           declared_weight: declaredParsed,
           status: editModalData.status ?? null,
           updated_at: new Date().toISOString(),
           manual_update: true,
         }).eq('sad_no', originalSad);
         if (parentErr) {
+          // attempt rollback children updates to originalSad (best-effort)
           try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
           try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
           throw parentErr;
         }
       } else {
+        // same sad_no -> simple update
         const { error } = await supabase.from('sad_declarations').update({
-          regime: editModalData.regime ?? null,
+          regime: regimeToSave ?? null,
           declared_weight: declaredParsed,
           status: editModalData.status ?? null,
           updated_at: new Date().toISOString(),
@@ -503,11 +527,12 @@ export default function SADDeclaration() {
         if (error) throw error;
       }
 
+      // log change
       try {
         const after = {
           ...before,
           sad_no: newSad,
-          regime: editModalData.regime,
+          regime: regimeToSave,
           declared_weight: declaredParsed,
           status: editModalData.status,
           updated_at: new Date().toISOString(),
@@ -521,11 +546,11 @@ export default function SADDeclaration() {
     } catch (err) {
       console.error('saveEditModal', err);
       toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
-      fetchSADs();
+      fetchSADs(); // refresh to ensure UI consistency
     }
   };
 
-  /* ---------- quick actions ---------- */
+  // update status quick action
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
@@ -584,7 +609,7 @@ export default function SADDeclaration() {
       const rows = [{
         sad_no: s.sad_no,
         regime: s.regime,
-        regime_code: REGIME_CODE_MAP[s.regime] || '',
+        regime_label: REGIME_LABEL_MAP[s.regime] || '',
         declared_weight: s.declared_weight,
         total_recorded_weight: s.total_recorded_weight,
         status: s.status,
@@ -601,26 +626,30 @@ export default function SADDeclaration() {
     }
   };
 
-  /* ---------- NL search ---------- */
+  // NL search
   const runNlQuery = async () => {
     if (!nlQuery) { fetchSADs(); return; }
     setNlLoading(true);
     try {
-      const q = nlQuery.toLowerCase();
+      const q = nlQuery.trim();
+      const lower = q.toLowerCase();
       const filter = {};
-      if (/\bcompleted\b/.test(q)) filter.status = 'Completed';
-      else if (/\bin progress\b/.test(q) || /\binprogress\b/.test(q)) filter.status = 'In Progress';
-      else if (/\bon hold\b/.test(q)) filter.status = 'On Hold';
+      if (/\bcompleted\b/.test(lower)) filter.status = 'Completed';
+      else if (/\bin progress\b/.test(lower) || /\binprogress\b/.test(lower)) filter.status = 'In Progress';
+      else if (/\bon hold\b/.test(lower)) filter.status = 'On Hold';
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
-      // If user typed the regime code (e.g. IM4), translate to DB regime
+      // If user typed a regime code (IM4/EX1/IM7) or a word like "import", map to code
       if (!filter.sad_no && !filter.status) {
-        const up = nlQuery.trim().toUpperCase();
-        if (CODE_TO_REGIME[up]) {
-          filter.regime = CODE_TO_REGIME[up];
+        const up = q.toUpperCase();
+        if (REGIME_OPTIONS.includes(up)) {
+          filter.regime = up;
+        } else if (WORD_TO_CODE[lower]) {
+          filter.regime = WORD_TO_CODE[lower];
         } else {
-          filter.regime = nlQuery;
+          // fallback: let fetchSADs use ilike — but db stores codes, so this probably won't match; still, set regimeFilter for UI filtering
+          filter.regime = null;
         }
       }
 
@@ -632,7 +661,7 @@ export default function SADDeclaration() {
     } finally { setNlLoading(false); }
   };
 
-  /* ---------- discrepancy helper ---------- */
+  // discrepancy helper
   const handleExplainDiscrepancy = async (s) => {
     const recorded = Number(s.total_recorded_weight || 0);
     const declared = Number(s.declared_weight || 0);
@@ -655,7 +684,7 @@ export default function SADDeclaration() {
     await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
   };
 
-  /* ---------- PDF report ---------- */
+  // generate printable report (iframe-based)
   const generatePdfReport = async (s) => {
     try {
       const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
@@ -663,7 +692,7 @@ export default function SADDeclaration() {
       if (error) console.warn('Could not fetch tickets for PDF', error);
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
-      const regimeCode = REGIME_CODE_MAP[s.regime] || s.regime || '—';
+      const regimeLabel = REGIME_LABEL_MAP[s.regime] ? `${REGIME_LABEL_MAP[s.regime]} (${s.regime})` : (s.regime || '—');
       const html = `
       <!doctype html>
       <html>
@@ -694,7 +723,7 @@ export default function SADDeclaration() {
           </header>
 
           <div class="meta">
-            <p><strong>Regime:</strong> ${regimeCode}</p>
+            <p><strong>Regime:</strong> ${regimeLabel}</p>
             <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
             <p><strong>Discharged weight:</strong> ${recorded.toLocaleString()} kg</p>
             <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Created by: ${s.created_by ? (createdByMap[s.created_by] || '') : '—'}</p>
@@ -753,7 +782,7 @@ export default function SADDeclaration() {
     }
   };
 
-  /* ---------- UI derived ---------- */
+  // UI derived values
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
       const d = Number(s.declared_weight || 0);
@@ -813,7 +842,7 @@ export default function SADDeclaration() {
       }
       const ta = new Date(a.created_at || a.updated_at || 0).getTime();
       const tb = new Date(b.created_at || b.updated_at || 0).getTime();
-      // NOTE: existing inversion kept: multiply by -dir so selecting 'asc' yields newest-first for created_at
+      // keep inversion so 'asc' yields newest-first for created_at
       return (ta - tb) * -dir;
     });
     return arr;
@@ -827,7 +856,7 @@ export default function SADDeclaration() {
     const rows = filteredSads.map(s => ({
       sad_no: s.sad_no,
       regime: s.regime,
-      regime_code: REGIME_CODE_MAP[s.regime] || '',
+      regime_label: REGIME_LABEL_MAP[s.regime] || '',
       declared_weight: s.declared_weight,
       total_recorded_weight: s.total_recorded_weight,
       status: s.status,
@@ -843,7 +872,7 @@ export default function SADDeclaration() {
       const rows = sads.map(s => ({
         sad_no: s.sad_no,
         regime: s.regime,
-        regime_code: REGIME_CODE_MAP[s.regime] || '',
+        regime_label: REGIME_LABEL_MAP[s.regime] || '',
         declared_weight: s.declared_weight,
         total_recorded_weight: s.total_recorded_weight,
         status: s.status,
@@ -867,7 +896,7 @@ export default function SADDeclaration() {
     }
   };
 
-  /* ---------- styles + render ---------- */
+  // styles and render
   const pageCss = `
 :root{
   --muted: rgba(7,17,25,0.55);
@@ -904,7 +933,7 @@ export default function SADDeclaration() {
 
       <Heading mb={4}>SAD Declaration Panel</Heading>
 
-      {/* Stats with different backgrounds */}
+      {/* Stats */}
       <div className="stat-group-custom">
         <Stat bg="linear-gradient(90deg,#7b61ff,#3ef4d0)" color="white" p={3} borderRadius="md" boxShadow="sm" style={{ minWidth: 180 }}>
           <StatLabel style={{ color: 'rgba(255,255,255,0.95)' }}>Total SADs</StatLabel>
@@ -949,9 +978,9 @@ export default function SADDeclaration() {
           <FormControl>
             <FormLabel>Regime</FormLabel>
             <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
-              {REGIME_OPTIONS.map(opt => (
-                <option key={opt} value={opt}>
-                  {opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}
+              {REGIME_OPTIONS.map(code => (
+                <option key={code} value={code}>
+                  {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
                 </option>
               ))}
             </Select>
@@ -994,9 +1023,9 @@ export default function SADDeclaration() {
 
           <Select placeholder="Filter by regime" size="sm" value={regimeFilter} onChange={(e) => setRegimeFilter(e.target.value)} maxW="200px">
             <option value="">All</option>
-            {REGIME_OPTIONS.map(opt => (
-              <option key={opt} value={opt}>
-                {opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}
+            {REGIME_OPTIONS.map(code => (
+              <option key={code} value={code}>
+                {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
               </option>
             ))}
           </Select>
@@ -1050,12 +1079,12 @@ export default function SADDeclaration() {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
                   const color = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
-                  const regimeCode = REGIME_CODE_MAP[s.regime] || '—';
+                  const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
 
                   return (
                     <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
                       <Td data-label="SAD"><Text fontWeight="bold">{s.sad_no}</Text></Td>
-                      <Td data-label="Regime"><Text>{regimeCode}</Text></Td>
+                      <Td data-label="Regime"><Text>{regimeDisplay}</Text></Td>
                       <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
@@ -1204,9 +1233,9 @@ export default function SADDeclaration() {
                   <FormLabel>Regime</FormLabel>
                   <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
                     <option value="">Select regime</option>
-                    {REGIME_OPTIONS.map(opt => (
-                      <option key={opt} value={opt}>
-                        {opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}
+                    {REGIME_OPTIONS.map(code => (
+                      <option key={code} value={code}>
+                        {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
                       </option>
                     ))}
                   </Select>
@@ -1347,7 +1376,7 @@ export default function SADDeclaration() {
           <ModalBody>
             <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
               <FormControl><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
-              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(opt => <option key={opt} value={opt}>{opt.charAt(0).toUpperCase() + opt.slice(1)} {REGIME_CODE_MAP[opt] ? `(${REGIME_CODE_MAP[opt]})` : ''}</option>)}</Select></FormControl>
+              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
               <FormControl><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
               <FormControl><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
             </SimpleGrid>
