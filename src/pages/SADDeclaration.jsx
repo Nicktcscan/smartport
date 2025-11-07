@@ -139,16 +139,22 @@ export default function SADDeclaration() {
       const { data, error } = await q;
       if (error) throw error;
 
-      const normalized = (data || []).map((r) => ({
-        ...r,
-        docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
-        total_recorded_weight: Number(r.total_recorded_weight ?? 0),
-        ticket_count: 0,
-        manual_update: r.manual_update ?? false,
-      }));
+      // normalize rows (including trimmed sad_no)
+      const normalized = (data || []).map((r) => {
+        const trimmedSadNo = r.sad_no != null ? String(r.sad_no).trim() : r.sad_no;
+        return {
+          ...r,
+          sad_no: trimmedSadNo,
+          _raw_sad_no: r.sad_no, // keep original if needed
+          docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
+          total_recorded_weight: Number(r.total_recorded_weight ?? 0),
+          ticket_count: 0,
+          manual_update: r.manual_update ?? false,
+        };
+      });
 
-      // tickets totals & counts
-      const sadNos = normalized.map((s) => s.sad_no).filter(Boolean);
+      // tickets totals & counts (robust keys: string-trim)
+      const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
       if (sadNos.length) {
         const { data: tickets, error: tErr } = await supabase
           .from('tickets')
@@ -159,18 +165,25 @@ export default function SADDeclaration() {
           const totals = {};
           const counts = {};
           for (const t of tickets) {
+            const key = t.sad_no != null ? String(t.sad_no).trim() : '';
             const n = Number(t.net ?? t.weight ?? 0);
-            totals[t.sad_no] = (totals[t.sad_no] || 0) + (Number.isFinite(n) ? n : 0);
-            counts[t.sad_no] = (counts[t.sad_no] || 0) + 1;
+            totals[key] = (totals[key] || 0) + (Number.isFinite(n) ? n : 0);
+            counts[key] = (counts[key] || 0) + 1;
           }
+
           for (let i = 0; i < normalized.length; i++) {
             const s = normalized[i];
-            if (s.sad_no && totals[s.sad_no] != null) {
-              normalized[i] = { ...s, total_recorded_weight: totals[s.sad_no], ticket_count: counts[s.sad_no] || 0 };
-            } else if (s.sad_no && counts[s.sad_no]) {
-              normalized[i] = { ...s, ticket_count: counts[s.sad_no] || 0 };
-            }
+            const key = s.sad_no != null ? String(s.sad_no).trim() : '';
+            const totalForKey = totals[key];
+            const countForKey = counts[key] || 0;
+            normalized[i] = {
+              ...s,
+              total_recorded_weight: typeof totalForKey !== 'undefined' ? totalForKey : s.total_recorded_weight || 0,
+              ticket_count: countForKey,
+            };
           }
+        } else if (tErr) {
+          console.warn('fetch tickets for sad counts error', tErr);
         }
       }
 
@@ -303,7 +316,7 @@ export default function SADDeclaration() {
       const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
       const docRecords = await uploadDocs(sadNo, docs);
       const payload = {
-        sad_no: sadNo,
+        sad_no: String(sadNo).trim(),
         regime: regime || null,
         declared_weight: Number(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
@@ -347,7 +360,8 @@ export default function SADDeclaration() {
     setIsModalOpen(true);
     setDetailLoading(true);
     try {
-      const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', sad.sad_no).order('date', { ascending: false });
+      const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+      const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (error) throw error;
       setDetailTickets(data || []);
       const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
@@ -367,7 +381,8 @@ export default function SADDeclaration() {
     setDetailsData({ sad, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
     setDetailsOpen(true);
     try {
-      const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', sad.sad_no).order('date', { ascending: false });
+      const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+      const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (!error) {
         let createdByUsername = sad.created_by_username || null;
         if (!createdByUsername && sad.created_by) {
@@ -428,11 +443,9 @@ export default function SADDeclaration() {
         }
 
         // update child tables first: tickets, reports_generated
-        // (best-effort: if you have other tables referencing sad_no, include them here)
         const { error: tErr } = await supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (tErr) console.warn('tickets update returned error', tErr);
 
-        // update reports_generated (if exists)
         const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
@@ -511,11 +524,12 @@ export default function SADDeclaration() {
 
   const recalcTotalForSad = async (sad_no) => {
     try {
-      const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', sad_no);
+      const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
+      const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
       if (error) throw error;
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
-      await pushActivity(`Recalculated total for ${sad_no}: ${total}`);
+      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+      await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
     } catch (err) {
@@ -607,7 +621,8 @@ export default function SADDeclaration() {
   // generate printable report (iframe-based)
   const generatePdfReport = async (s) => {
     try {
-      const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', s.sad_no).order('date', { ascending: false });
+      const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
+      const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (error) console.warn('Could not fetch tickets for PDF', error);
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
@@ -989,7 +1004,7 @@ export default function SADDeclaration() {
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
 
                   return (
-                    <RowMotion key={s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
+                    <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
                       <Td data-label="SAD"><Text fontWeight="bold">{s.sad_no}</Text></Td>
                       <Td data-label="Regime"><Text>{s.regime || '—'}</Text></Td>
                       <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
