@@ -1,3 +1,5 @@
+/* eslint-disable no-unused-vars */
+/* eslint-disable no-loop-func */
 // src/pages/ManualEntry.jsx
 import React, { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {

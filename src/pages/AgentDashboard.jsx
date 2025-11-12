@@ -21,7 +21,6 @@ import {
   StatLabel,
   StatNumber,
   StatHelpText,
-  VStack,
   Spacer,
 } from '@chakra-ui/react';
 import { SearchIcon, DownloadIcon } from '@chakra-ui/icons';

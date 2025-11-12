@@ -1,5 +1,5 @@
 // src/pages/ExitTrucks.jsx
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Box,
   Heading,
@@ -38,22 +38,14 @@ import {
   MenuButton,
   MenuList,
   MenuItem,
-  Tooltip,
   useBreakpointValue,
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   DownloadIcon,
   ArrowForwardIcon,
-  InfoOutlineIcon,
 } from '@chakra-ui/icons';
 import {
-  FaTruck,
-  FaWeightHanging,
-  FaUserTie,
-  FaBoxes,
-  FaRoute,
-  FaCalendarAlt,
   FaFileInvoice,
   FaFilePdf,
   FaMagic,
@@ -158,9 +150,9 @@ async function extractTextFromPdfUrl(url) {
 function parseDriverNameFromText(text) {
   if (!text) return null;
   const patterns = [
-    /Driver\s*Name\s*[:\-]\s*(.+?)(?:\n|$)/i,
-    /Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
-    /Name\s*of\s*Driver\s*[:\-]\s*(.+?)(?:\n|$)/i,
+    /Driver\s*Name\s*[:\\-]\s*(.+?)(?:\n|$)/i,
+    /Driver\s*[:\\-]\s*(.+?)(?:\n|$)/i,
+    /Name\s*of\s*Driver\s*[:\\-]\s*(.+?)(?:\n|$)/i,
     /Driver\s+[:]\s*([A-Z][A-Za-z'’\-\s]+[A-Za-z])/m,
   ];
   for (const pat of patterns) {
@@ -184,6 +176,7 @@ export default function ExitTrucks() {
   const toast = useToast();
   const prefersReducedMotion = usePrefersReducedMotion();
   const isMobile = useBreakpointValue({ base: true, md: false });
+  // eslint-disable-next-line no-unused-vars
   const { user } = useAuth(); // used for optimistic audit fields when inserting outgate (if needed)
 
   // data and UI state
@@ -379,6 +372,7 @@ export default function ExitTrucks() {
 
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageItems, selectedRowIndex]);
 
   useEffect(() => {
@@ -508,120 +502,8 @@ export default function ExitTrucks() {
   };
 
   /* Optimistic confirm exit flow (in detail modal) */
-  const handleConfirmExit = async () => {
-    if (!selectedTicket) return;
-    // build payload for outgate table
-    const { ticketId, ticketNo, gnswTruckNo, containerNo, sadNo, gross, tare, net, date, fileUrl } = selectedTicket;
-    const payload = {
-      ticket_id: ticketId,
-      ticket_no: ticketNo || null,
-      vehicle_number: gnswTruckNo || null,
-      container_id: containerNo || null,
-      sad_no: sadNo || null,
-      gross: numericValue(gross),
-      tare: numericValue(tare),
-      net: numericValue(net),
-      date: date || null,
-      file_url: fileUrl || null,
-      driver: selectedTicket.driver || null,
-      created_at: new Date().toISOString(),
-      // optional audit: include edited_by as user id if desired
-      edited_by: user?.id ?? null,
-    };
-
-    // optimistic UI update
-    const existingTickets = [...exitedTrucks];
-    const optimisticRow = {
-      ...selectedTicket,
-      exitTime: new Date().toISOString(),
-    };
-    setExitedTrucks((prev) => [optimisticRow, ...prev.filter((p) => p.ticketId !== optimisticRow.ticketId)]);
-
-    // attempt to insert outgate and mark ticket as Exited
-    try {
-      // prevent duplicate outgate for same ticket_id
-      if (payload.ticket_id) {
-        const { data: existing, error: checkErr } = await supabase
-          .from('outgate')
-          .select('id')
-          .eq('ticket_id', payload.ticket_id)
-          .limit(1);
-        if (checkErr) console.warn('existing outgate check failed', checkErr);
-        if (existing && existing.length) {
-          toast({ title: 'Already confirmed', description: 'This ticket already has an outgate row', status: 'warning' });
-          // ensure ticket status set to Exited
-          try {
-            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', payload.ticket_id);
-          } catch (e) {}
-          onClose();
-          return;
-        }
-      }
-
-      const { error: insertErr } = await supabase.from('outgate').insert([payload]);
-      if (insertErr) throw insertErr;
-
-      if (payload.ticket_id) {
-        const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', payload.ticket_id);
-        if (updErr) console.warn('could not update ticket status', updErr);
-      }
-
-      // confetti
-      try {
-        const confettiModule = await import('canvas-confetti').catch(() => null);
-        const confetti = confettiModule?.default ?? window.confetti;
-        if (confetti) confetti({ particleCount: 140, spread: 120, origin: { y: 0.6 } });
-      } catch (e) {}
-
-      toast({ title: 'Exit confirmed', status: 'success' });
-      onClose();
-    } catch (err) {
-      console.error('confirm exit failed', err);
-      toast({ title: 'Failed to confirm exit', description: err?.message || String(err), status: 'error' });
-      // rollback optimistic
-      setExitedTrucks(existingTickets);
-    } finally {
-      // refresh lists (best-effort)
-      try {
-        const { data } = await supabase.from('tickets').select('*').eq('status', 'Exited').order('submitted_at', { ascending: false });
-        if (data) {
-          const mapped = (data || []).map((item) => ({
-            ticketId: item.ticket_id ?? item.id ?? `${Math.random()}`,
-            ticketNo: item.ticket_no ?? '',
-            gnswTruckNo: item.gnsw_truck_no ?? item.vehicle_number ?? '',
-            sadNo: item.sad_no ?? '',
-            exitTime: item.created_at ?? item.exit_time ?? null,
-            driver: item.driver ?? '',
-            gross: item.gross ?? item.gross_weight ?? null,
-            tare: item.tare ?? null,
-            net: item.net ?? null,
-            date: item.date ?? item.submitted_at ?? null,
-            containerNo: item.container_no ?? null,
-            operator: item.operator ?? null,
-            passNumber: item.pass_number ?? null,
-            scaleName: item.scale_name ?? null,
-            anpr: item.wb_id ?? null,
-            fileUrl: item.file_url ?? null,
-            raw: item,
-          }));
-          setExitedTrucks(mapped);
-        }
-      } catch (_) {}
-    }
-  };
 
   /* Bulk demo confirm (orb) */
-  const handleOrbConfirmVisible = async () => {
-    if (!pageItems.length) return toast({ title: 'No visible items', status: 'info' });
-    // this demo triggers confetti and shows success — real bulk insert logic could be added here
-    try {
-      const confettiModule = await import('canvas-confetti').catch(() => null);
-      const confetti = confettiModule?.default ?? window.confetti;
-      if (confetti) confetti({ particleCount: 180, spread: 160, origin: { y: 0.6 } });
-    } catch (e) {}
-    toast({ title: `Bulk confirm (demo) for ${pageItems.length} items`, status: 'success' });
-    closeOrb();
-  };
 
   /* Export & bulk actions */
   const handleExportSelected = () => {

@@ -21,7 +21,6 @@ import {
   IconButton,
   Select,
   Tag,
-  Tooltip,
   Popover,
   PopoverTrigger,
   PopoverContent,
@@ -52,7 +51,7 @@ import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../context/AuthContext';
 import { FiRefreshCw, FiDownload, FiTruck, FiFileText, FiUsers, FiPlus } from 'react-icons/fi';
-import { Line, Pie } from 'react-chartjs-2';
+import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -123,9 +122,9 @@ export default function AdminPanel() {
 
   // UI controls
   const [chartDays, setChartDays] = useState(DEFAULT_CHART_DAYS);
-  const [activityFilter, setActivityFilter] = useState('all');
+  const [activityFilter] = useState('all');
   const [activityLimit, setActivityLimit] = useState(8);
-  const [activitySearch, setActivitySearch] = useState('');
+  const [activitySearch] = useState('');
   const debouncedActivitySearch = useDebounce(activitySearch, 250);
 
   // reports modal/popover + orb modal (generate)
@@ -584,13 +583,6 @@ export default function AdminPanel() {
   }, [tickets, chartDays]);
 
   // pie chart for users
-  const chartPieData = useMemo(() => {
-    const counts = {};
-    (users || []).forEach((u) => { const r = u.role || 'unknown'; counts[r] = (counts[r] || 0) + 1; });
-    const labels = Object.keys(counts);
-    const data = labels.map((l) => counts[l]);
-    return { labels, datasets: [{ data, backgroundColor: labels.map((_, idx) => `hsl(${(idx * 60) % 360} 70% 60%)`) }] };
-  }, [users]);
 
   // ActivityItem component (keeps popovers contained)
   const ActivityItem = ({ item }) => {

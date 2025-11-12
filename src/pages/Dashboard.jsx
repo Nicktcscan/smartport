@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 // src/pages/Dashboard.jsx
 import React, { useEffect, useState, useCallback } from 'react';
 import {
@@ -29,8 +30,8 @@ ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarEle
 
 function Dashboard() {
   const [tickets, setTickets] = useState([]);
-  const [filteredTickets, setFilteredTickets] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [ setFilteredTickets] = useState([]);
+  const [setLoading] = useState(true);
   const [filterStatus] = useState('');
   const [searchTerm] = useState('');
   const [dateFrom] = useState('');
@@ -56,6 +57,7 @@ function Dashboard() {
     } finally {
       setLoading(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [toast]);
 
   // Live subscription

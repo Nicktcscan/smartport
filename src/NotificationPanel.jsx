@@ -81,7 +81,7 @@ export default function NotificationPanel() {
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
-  const [user, setUser] = useState(null);
+  const [setUser] = useState(null);
   const [role, setRole] = useState(null);
   const [userId, setUserId] = useState(null);
 

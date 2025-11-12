@@ -1,15 +1,7 @@
-import React, { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { createWorker } from "tesseract.js";
-import * as pdfjsLib from "pdfjs-dist/webpack"; // Use webpack build of pdfjs
 import { Box, Text, Button, Progress } from "@chakra-ui/react";
 
-function createLogger(setProgress) {
-  return (m) => {
-    if (m.status === "recognizing text") {
-      setProgress(Math.round(m.progress * 100));
-    }
-  };
-}
 
 function OCRComponent({ onComplete }) {
   const [file, setFile] = useState(null);

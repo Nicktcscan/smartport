@@ -36,7 +36,7 @@ import { useNavigate } from 'react-router-dom';
 
 function Header() {
   const { isOpen, onOpen, onClose } = useDisclosure();
-  const [notificationsCount, setNotificationsCount] = useState(3);
+  const [notificationsCount] = useState(3);
 
   const { logout, user } = useAuth() || {};
   const navigate = useNavigate();
