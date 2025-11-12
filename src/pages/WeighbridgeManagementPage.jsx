@@ -485,7 +485,7 @@ function WeighbridgeManagementPage() {
     if (!Number.isNaN(d1.getTime())) return d1.toISOString();
 
     // Try common pattern: DD-MMM-YY(YY) [HH:MM(:SS)] [AM/PM]
-    const m = sanitized.match(/(\d{1,2})[-/]([A-Za-z]{3,9})[-/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*([AP]M))?)?/i);
+    const m = sanitized.match(/(\d{1,2})[-\/]([A-Za-z]{3,9})[-\/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*([AP]M))?)?/i);
     if (m) {
       const day = Number(m[1]);
       const monStr = m[2].slice(0,3).toLowerCase();
@@ -986,7 +986,7 @@ function WeighbridgeManagementPage() {
             const dd = new Date(san);
             if (!Number.isNaN(dd.getTime())) return dd.toISOString();
             // attempt dd-mmm parsing
-            const m = san.match(/(\d{1,2})[-/]([A-Za-z]{3,9})[-/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*([AP]M)?)?/i);
+            const m = san.match(/(\d{1,2})[-\/]([A-Za-z]{3,9})[-\/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*([AP]M)?)?/i);
             if (m) {
               // reuse logic from parseDateStringToISO above
               const day = Number(m[1]);
