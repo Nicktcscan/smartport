@@ -84,7 +84,7 @@ function Header() {
         <Image src={logo} alt="Company Logo" boxSize="48px" objectFit="contain" mr={3} />
 
         <Text fontSize="xl" fontWeight="bold" color="white">
-          NICK TC-SCAN WBMS
+          SMARTPORT WBMS
         </Text>
 
         <Spacer />
