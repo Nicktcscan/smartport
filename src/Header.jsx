@@ -83,9 +83,14 @@ function Header() {
       >
         <Image src={logo} alt="Company Logo" boxSize="48px" objectFit="contain" mr={3} />
 
-        <Text fontSize="xl" fontWeight="bold" color="white">
-          SMARTPORT WEIGHBIDGE SYSTEM
-        </Text>
+        <Box display="flex" flexDirection="column" lineHeight="1">
+          <Text fontSize="xl" fontWeight="bold" color="white">
+            SMARTPORT WEIGHBIDGE SYSTEM
+          </Text>
+          <Text fontSize="sm" color="whiteAlpha.800" mt="2px">
+            NICK TC-SCAN (GAMBIA) LTD.
+          </Text>
+        </Box>
 
         <Spacer />
 
