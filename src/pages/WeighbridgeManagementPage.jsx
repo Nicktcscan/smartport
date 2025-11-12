@@ -383,245 +383,330 @@ function WeighbridgeManagementPage() {
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
   const pageItems = useMemo(() => getCondensedPages(currentPage, totalPages), [currentPage, totalPages]);
 
-  // ------------------------ Advanced OCR extraction (improved ticket candidates + confidences) ------------------------
   const handleExtract = (rawText) => {
-    if (!rawText) {
-      setExtractedPairs([]);
-      setTicketCandidates([]);
-      setSelectedTicketCandidate("");
-      return;
+  if (!rawText) {
+    setExtractedPairs([]);
+    setTicketCandidates([]);
+    setSelectedTicketCandidate("");
+    return;
+  }
+
+  // Normalize lines and whitespace
+  const lines = String(rawText || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\t/g, " ")
+    .replace(/\u00A0/g, " ")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const full = lines.join("\n");
+  const found = {};
+
+  const extractLabelLine = (labelRegex) =>
+    lines.find((l) => labelRegex.test(l)) || null;
+
+  // parseWeightFromLine: prefer distinct 4-6 digit tokens and reasonable bounds
+  const parseWeightFromLine = (line) => {
+    if (!line) return null;
+    const matches = Array.from(line.matchAll(/\b(\d{4,6})\b/g)).map((m) => m[1]);
+    if (matches.length === 0) return null;
+    for (let i = 0; i < matches.length; i++) {
+      const num = Number(matches[i].replace(/,/g, ""));
+      if (!Number.isFinite(num)) continue;
+      if (num >= 100 && num <= 200000) return num;
     }
-
-    // Normalize lines and whitespace
-    const lines = String(rawText || "")
-      .replace(/\r\n/g, "\n")
-      .replace(/\t/g, " ")
-      .replace(/\u00A0/g, " ")
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-
-    const full = lines.join("\n");
-    const found = {};
-
-    const extractLabelLine = (labelRegex) =>
-      lines.find((l) => labelRegex.test(l)) || null;
-
-    // parseWeightFromLine: prefer distinct 4-6 digit tokens and reasonable bounds
-    const parseWeightFromLine = (line) => {
-      if (!line) return null;
-      const matches = Array.from(line.matchAll(/\b(\d{4,6})\b/g)).map((m) => m[1]);
-      if (matches.length === 0) return null;
-      for (let i = 0; i < matches.length; i++) {
-        const num = Number(matches[i].replace(/,/g, ""));
-        if (!Number.isFinite(num)) continue;
-        if (num >= 100 && num <= 200000) return num;
-      }
-      return null;
-    };
-
-    // GNSW Truck No
-    const gnswLine =
-      extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
-    if (gnswLine) {
-      const m =
-        gnswLine.match(/GNSW\s*Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i) ||
-        gnswLine.match(/Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i);
-      if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
-    } else {
-      const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
-      if (plateMatch && plateMatch[1]) {
-        found.gnsw_truck_no = plateMatch[1].toUpperCase();
-      }
-    }
-
-    // Trailer no
-    const trailerLine = extractLabelLine(/\bTrailer\b.*\bNo\b/i) || extractLabelLine(/\bTrailer No\b/i);
-    if (trailerLine) {
-      const m = trailerLine.match(/Trailer\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
-      if (m && m[1]) found.trailer_no = m[1].trim();
-    }
-
-    // Driver
-    const driverLine = extractLabelLine(/\bDriver\b/i);
-    if (driverLine) {
-      let drv = driverLine.replace(/Driver\s*[:-]?\s*/i, "").trim();
-      drv = drv.replace(/^[-:]+/, "").trim();
-      drv = drv.replace(/\bTruck\b.*$/i, "").trim();
-      drv = drv.replace(/\(.*?\)/g, "").trim();
-      found.driver = drv || null;
-    }
-
-    // Scale Name / WB ID
-    const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
-    if (scaleLine) {
-      const m = scaleLine.match(/Scale\s*Name\s*[:-]?\s*([A-Z0-9_-]+)/i) || scaleLine.match(/Scale\s*[:-]?\s*([A-Z0-9_-]+)/i);
-      if (m && m[1]) {
-        const cand = String(m[1]).toUpperCase();
-        found.scale_name = cand;
-      }
-    }
-    if (!found.scale_name) {
-      const wb = full.match(/\b(WBRIDGE\d+)\b/i);
-      if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
-    }
-
-    // Gross / Tare / Net
-    const grossLine = extractLabelLine(/\bGross\b/i);
-    if (grossLine) found.gross = parseWeightFromLine(grossLine);
-    else {
-      const mt = full.match(/Gross\s*[:-]?\s*(\d{4,6})/i);
-      if (mt && mt[1]) found.gross = Number(mt[1]);
-    }
-
-    const tareLine = extractLabelLine(/\bTare\b/i);
-    if (tareLine) found.tare = parseWeightFromLine(tareLine);
-    else {
-      const mt = full.match(/Tare\s*[:-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
-      if (mt && mt[1]) found.tare = Number(mt[1]);
-    }
-
-    const netLine = extractLabelLine(/\bNet\b/i);
-    if (netLine) found.net = parseWeightFromLine(netLine);
-    else {
-      const mn = full.match(/Net\s*[:-]?\s*(\d{4,6})/i);
-      if (mn && mn[1]) found.net = Number(mn[1]);
-    }
-
-    // SAD No
-    const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
-    if (sadLine) {
-      const m = sadLine.match(/SAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:-]?\s*(\d{2,6})/i);
-      if (m && m[1]) found.sad_no = m[1];
-    } else {
-      const sadFb = full.match(/\bSAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:-]?\s*(\d{2,6})/i);
-      if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
-    }
-
-    // other metadata (container/consignee/operator)
-    const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
-    if (containerLine) {
-      const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
-      if (m && m[1]) found.container_no = String(m[1]).trim();
-      else {
-        const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
-        if (bulkLine) found.container_no = "BULK";
-      }
-    }
-
-    const consigneeLine = extractLabelLine(/Consignee\b/i);
-    if (consigneeLine) {
-      let c = consigneeLine.replace(/Consignee\s*[:-]?\s*/i, "").trim();
-      c = c.split(/\bTare\b/i)[0].trim();
-      c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
-      found.consignee = c || null;
-    }
-
-    const materialLine = extractLabelLine(/Material\b/i);
-    if (materialLine) {
-      const m = materialLine.match(/Material\s*[:-]?\s*(.+)/i);
-      if (m && m[1]) found.material = m[1].trim();
-    }
-
-    const operatorLine = extractLabelLine(/\bOperator\b/i);
-    if (operatorLine) {
-      let op = operatorLine.replace(/Operator\s*[:-]?\s*/i, "").trim();
-      op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
-      op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
-      op = op.replace(/\bWBRIDGE\d+\b/gi, "");
-      op = op.replace(/\b\d{2,6}\s*kg\b/gi, "");
-      op = op.replace(/\b(true|false)\b/ig, "");
-      op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
-      if (op) {
-        const opMatch = op.match(/[A-Za-z][A-Za-z.\s'-]{0,40}/);
-        found.operator = opMatch ? opMatch[0].trim() : op;
-      } else {
-        found.operator = "Operator";
-      }
-    }
-
-    // Date detection (common formats)
-    const dateMatch = full.match(
-      /(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/i
-    );
-    if (dateMatch) {
-      found.date = dateMatch[0].trim();
-    }
-
-    // --- Ticket number: produce candidates with confidence ---
-    const candidateList = generateTicketCandidates(rawText, found); // array of {value, confidence, reason}
-
-    // Attempt to pick best candidate automatically only if it's clearly valid
-    // Default selection rule: prefer 'context-numeric' candidate if present (as you requested)
-    let defaultCandidate = null;
-    const contextNumeric = candidateList.find(c => c.reason === 'context-numeric');
-    if (contextNumeric) defaultCandidate = normalizeTicketFormat(contextNumeric.value);
-    else if (candidateList.length > 0) defaultCandidate = normalizeTicketFormat(candidateList[0].value);
-
-    // Build extractedPairs with confidence heuristics:
-    const pairs = [];
-    // helper to add pair with confidence
-    const addPair = (key, value, confidence = 0.6) => {
-      if (value === undefined || value === null) return;
-      pairs.push({ key, value, confidence: Math.max(0, Math.min(1, confidence)) });
-    };
-
-    // Add many fields with reasonable confidence values
-    if (found.ticket_no) addPair('ticket_no', found.ticket_no, 0.95);
-    if (!found.ticket_no && defaultCandidate) addPair('ticket_no', defaultCandidate, candidateList.find(c => normalizeTicketFormat(c.value) === defaultCandidate)?.confidence ?? 0.75);
-    if (found.gnsw_truck_no) addPair('gnsw_truck_no', found.gnsw_truck_no, 0.9);
-    if (found.trailer_no) addPair('trailer_no', found.trailer_no, 0.85);
-    if (found.driver) addPair('driver', found.driver, 0.82);
-    if (found.scale_name) addPair('wb_id', found.scale_name, 0.8);
-    if (found.gross !== undefined && found.gross !== null) addPair('gross', found.gross, found.gross ? 0.9 : 0.5);
-    if (found.tare !== undefined && found.tare !== null) addPair('tare', found.tare, found.tare ? 0.9 : 0.5);
-    if (found.net !== undefined && found.net !== null) addPair('net', found.net, found.net ? 0.9 : 0.5);
-    if (found.sad_no) addPair('sad_no', found.sad_no, 0.88);
-    if (found.container_no) addPair('container_no', found.container_no, 0.7);
-    if (found.consignee) addPair('consignee', found.consignee, 0.65);
-    if (found.material) addPair('material', found.material, 0.62);
-    if (found.operator) addPair('operator', found.operator, 0.6);
-    if (found.date) addPair('date', found.date, 0.6);
-    if (found.weight) addPair('weight', found.weight, 0.55);
-
-    setExtractedPairs(pairs);
-
-    // Sort candidates by confidence (already sorted in generator, but ensure)
-    const sortedCandidates = candidateList.slice().sort((a, b) => b.confidence - a.confidence || b.value.length - a.value.length);
-    // ensure normalized values in candidates for display & selection
-    const normalizedCandidates = sortedCandidates.map(c => ({ ...c, normalized: normalizeTicketFormat(c.value) }));
-    setTicketCandidates(normalizedCandidates);
-
-    // select default: prefer context-numeric normalized, else top normalized
-    const selectedDefault = (normalizedCandidates.find(c => c.reason === 'context-numeric')?.normalized)
-      || normalizedCandidates[0]?.normalized || "";
-    setSelectedTicketCandidate(selectedDefault);
-
-    // Merge into formData only if empty (but DO NOT overwrite ticket_no automatically if multiple candidates exist)
-    setFormData((prev) => {
-      const next = { ...prev };
-      pairs.forEach(({ key, value }) => {
-        const existing = next[key];
-        const isEmpty = existing === null || existing === undefined || existing === "" || existing === false;
-        if (key === "ticket_no") {
-          const autoPickAllowed = (normalizedCandidates.length <= 1) || (/^\d{5}$/.test(String(value)));
-          if (!autoPickAllowed) return;
-          if (isEmpty) next[key] = value;
-        } else {
-          if (isEmpty) next[key] = value;
-        }
-      });
-      return next;
-    });
-
-    toast({
-      title: "Form populated from Ticket Reader",
-      description: "Fields cleaned and normalized where possible. Verify ticket number if needed.",
-      status: "success",
-      duration: 3500,
-      isClosable: true,
-    });
+    return null;
   };
+
+  // -----------------------
+  // Helper: sanitize time tokens inside a date string to avoid out-of-range values
+  // - clamps minutes/seconds to 0-59
+  // - clamps hours to 0-23 (24h) or 1-12 (12h with AM/PM)
+  // - supports formats like "11:63:00 PM", "2025-11-07 25:05:00", "9:5:3 AM", "11:63 PM"
+  // -----------------------
+  function sanitizeTimeInDateString(s) {
+    if (!s || typeof s !== "string") return s;
+    let out = String(s);
+
+    // Normalize common separators and excessive spaces
+    out = out.replace(/\s+/g, " ").trim();
+
+    // 1) HH:MM:SS [AM|PM] or H:MM:SSAM (with optional space)
+    out = out.replace(/(\b\d{1,2}):(\d{1,2}):(\d{1,2})(\s*[AP]M\b)?/gi, (m, hh, mm, ss, ampmRaw) => {
+      const ampm = ampmRaw ? ampmRaw.trim().toUpperCase() : "";
+      let H = parseInt(hh, 10);
+      let M = parseInt(mm, 10);
+      let S = parseInt(ss, 10);
+
+      // clamp seconds/minutes
+      if (!Number.isFinite(S) || S < 0) S = 0;
+      if (S > 59) S = 59;
+      if (!Number.isFinite(M) || M < 0) M = 0;
+      if (M > 59) M = 59;
+
+      if (ampm) {
+        // 12-hour clock: clamp to 1..12
+        if (!Number.isFinite(H) || H < 1) H = 1;
+        if (H > 12) H = ((H - 1) % 12) + 1;
+        if (H < 1) H = 1;
+      } else {
+        // 24-hour clock: clamp to 0..23
+        if (!Number.isFinite(H) || H < 0) H = 0;
+        if (H > 23) H = 23;
+      }
+
+      const hh2 = String(H).padStart(2, "0");
+      const mm2 = String(M).padStart(2, "0");
+      const ss2 = String(S).padStart(2, "0");
+      return `${hh2}:${mm2}:${ss2}${ampm ? " " + ampm : ""}`;
+    });
+
+    // 2) HH:MM [AM|PM] (no seconds)
+    out = out.replace(/(\b\d{1,2}):(\d{1,2})(\s*[AP]M\b)?/gi, (m, hh, mm, ampmRaw) => {
+      // Avoid reprocessing HH:MM:SS matches (they've been normalized above)
+      if (/\d{1,2}:\d{1,2}:\d{1,2}/.test(m)) return m;
+      const ampm = ampmRaw ? ampmRaw.trim().toUpperCase() : "";
+      let H = parseInt(hh, 10);
+      let M = parseInt(mm, 10);
+
+      if (!Number.isFinite(M) || M < 0) M = 0;
+      if (M > 59) M = 59;
+
+      if (ampm) {
+        if (!Number.isFinite(H) || H < 1) H = 1;
+        if (H > 12) H = ((H - 1) % 12) + 1;
+        if (H < 1) H = 1;
+      } else {
+        if (!Number.isFinite(H) || H < 0) H = 0;
+        if (H > 23) H = 23;
+      }
+
+      const hh2 = String(H).padStart(2, "0");
+      const mm2 = String(M).padStart(2, "0");
+      return `${hh2}:${mm2}${ampm ? " " + ampm : ""}`;
+    });
+
+    // 3) ISO like "YYYY-MM-DD HH:MM:SS" (ensure 24-hour clamp)
+    out = out.replace(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})/g, (m, datePart, hh, mm, ss) => {
+      let H = parseInt(hh, 10);
+      let M = parseInt(mm, 10);
+      let S = parseInt(ss, 10);
+      if (!Number.isFinite(S) || S < 0) S = 0;
+      if (S > 59) S = 59;
+      if (!Number.isFinite(M) || M < 0) M = 0;
+      if (M > 59) M = 59;
+      if (!Number.isFinite(H) || H < 0) H = 0;
+      if (H > 23) H = 23;
+      return `${datePart} ${String(H).padStart(2, "0")}:${String(M).padStart(2, "0")}:${String(S).padStart(2, "0")}`;
+    });
+
+    return out;
+  }
+
+  // GNSW Truck No
+  const gnswLine =
+    extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
+  if (gnswLine) {
+    const m =
+      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i) ||
+      gnswLine.match(/Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i);
+    if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
+  } else {
+    const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
+    if (plateMatch && plateMatch[1]) {
+      found.gnsw_truck_no = plateMatch[1].toUpperCase();
+    }
+  }
+
+  // Trailer no
+  const trailerLine = extractLabelLine(/\bTrailer\b.*\bNo\b/i) || extractLabelLine(/\bTrailer No\b/i);
+  if (trailerLine) {
+    const m = trailerLine.match(/Trailer\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
+    if (m && m[1]) found.trailer_no = m[1].trim();
+  }
+
+  // Driver
+  const driverLine = extractLabelLine(/\bDriver\b/i);
+  if (driverLine) {
+    let drv = driverLine.replace(/Driver\s*[:-]?\s*/i, "").trim();
+    drv = drv.replace(/^[-:]+/, "").trim();
+    drv = drv.replace(/\bTruck\b.*$/i, "").trim();
+    drv = drv.replace(/\(.*?\)/g, "").trim();
+    found.driver = drv || null;
+  }
+
+  // Scale Name / WB ID
+  const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
+  if (scaleLine) {
+    const m = scaleLine.match(/Scale\s*Name\s*[:-]?\s*([A-Z0-9_-]+)/i) || scaleLine.match(/Scale\s*[:-]?\s*([A-Z0-9_-]+)/i);
+    if (m && m[1]) {
+      const cand = String(m[1]).toUpperCase();
+      found.scale_name = cand;
+    }
+  }
+  if (!found.scale_name) {
+    const wb = full.match(/\b(WBRIDGE\d+)\b/i);
+    if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
+  }
+
+  // Gross / Tare / Net
+  const grossLine = extractLabelLine(/\bGross\b/i);
+  if (grossLine) found.gross = parseWeightFromLine(grossLine);
+  else {
+    const mt = full.match(/Gross\s*[:-]?\s*(\d{4,6})/i);
+    if (mt && mt[1]) found.gross = Number(mt[1]);
+  }
+
+  const tareLine = extractLabelLine(/\bTare\b/i);
+  if (tareLine) found.tare = parseWeightFromLine(tareLine);
+  else {
+    const mt = full.match(/Tare\s*[:-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
+    if (mt && mt[1]) found.tare = Number(mt[1]);
+  }
+
+  const netLine = extractLabelLine(/\bNet\b/i);
+  if (netLine) found.net = parseWeightFromLine(netLine);
+  else {
+    const mn = full.match(/Net\s*[:-]?\s*(\d{4,6})/i);
+    if (mn && mn[1]) found.net = Number(mn[1]);
+  }
+
+  // SAD No
+  const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
+  if (sadLine) {
+    const m = sadLine.match(/SAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:-]?\s*(\d{2,6})/i);
+    if (m && m[1]) found.sad_no = m[1];
+  } else {
+    const sadFb = full.match(/\bSAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:-]?\s*(\d{2,6})/i);
+    if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
+  }
+
+  // other metadata (container/consignee/operator)
+  const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
+  if (containerLine) {
+    const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
+    if (m && m[1]) found.container_no = String(m[1]).trim();
+    else {
+      const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
+      if (bulkLine) found.container_no = "BULK";
+    }
+  }
+
+  const consigneeLine = extractLabelLine(/Consignee\b/i);
+  if (consigneeLine) {
+    let c = consigneeLine.replace(/Consignee\s*[:-]?\s*/i, "").trim();
+    c = c.split(/\bTare\b/i)[0].trim();
+    c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
+    found.consignee = c || null;
+  }
+
+  const materialLine = extractLabelLine(/Material\b/i);
+  if (materialLine) {
+    const m = materialLine.match(/Material\s*[:-]?\s*(.+)/i);
+    if (m && m[1]) found.material = m[1].trim();
+  }
+
+  const operatorLine = extractLabelLine(/\bOperator\b/i);
+  if (operatorLine) {
+    let op = operatorLine.replace(/Operator\s*[:-]?\s*/i, "").trim();
+    op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
+    op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
+    op = op.replace(/\bWBRIDGE\d+\b/gi, "");
+    op = op.replace(/\b\d{2,6}\s*kg\b/gi, "");
+    op = op.replace(/\b(true|false)\b/ig, "");
+    op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
+    if (op) {
+      const opMatch = op.match(/[A-Za-z][A-Za-z.\s'-]{0,40}/);
+      found.operator = opMatch ? opMatch[0].trim() : op;
+    } else {
+      found.operator = "Operator";
+    }
+  }
+
+  // Date detection (common formats)
+  const dateMatch = full.match(
+    /(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/i
+  );
+  if (dateMatch) {
+    // sanitize the matched date/time to avoid out-of-range components
+    found.date = sanitizeTimeInDateString(dateMatch[0].trim());
+  }
+
+  // --- Ticket number: produce candidates with confidence ---
+  const candidateList = generateTicketCandidates(rawText, found); // array of {value, confidence, reason}
+
+  // Attempt to pick best candidate automatically only if it's clearly valid
+  // Default selection rule: prefer 'context-numeric' candidate if present (as you requested)
+  let defaultCandidate = null;
+  const contextNumeric = candidateList.find(c => c.reason === 'context-numeric');
+  if (contextNumeric) defaultCandidate = normalizeTicketFormat(contextNumeric.value);
+  else if (candidateList.length > 0) defaultCandidate = normalizeTicketFormat(candidateList[0].value);
+
+  // Build extractedPairs with confidence heuristics:
+  const pairs = [];
+  // helper to add pair with confidence
+  const addPair = (key, value, confidence = 0.6) => {
+    if (value === undefined || value === null) return;
+    pairs.push({ key, value, confidence: Math.max(0, Math.min(1, confidence)) });
+  };
+
+  // Add many fields with reasonable confidence values
+  if (found.ticket_no) addPair('ticket_no', found.ticket_no, 0.95);
+  if (!found.ticket_no && defaultCandidate) addPair('ticket_no', defaultCandidate, candidateList.find(c => normalizeTicketFormat(c.value) === defaultCandidate)?.confidence ?? 0.75);
+  if (found.gnsw_truck_no) addPair('gnsw_truck_no', found.gnsw_truck_no, 0.9);
+  if (found.trailer_no) addPair('trailer_no', found.trailer_no, 0.85);
+  if (found.driver) addPair('driver', found.driver, 0.82);
+  if (found.scale_name) addPair('wb_id', found.scale_name, 0.8);
+  if (found.gross !== undefined && found.gross !== null) addPair('gross', found.gross, found.gross ? 0.9 : 0.5);
+  if (found.tare !== undefined && found.tare !== null) addPair('tare', found.tare, found.tare ? 0.9 : 0.5);
+  if (found.net !== undefined && found.net !== null) addPair('net', found.net, found.net ? 0.9 : 0.5);
+  if (found.sad_no) addPair('sad_no', found.sad_no, 0.88);
+  if (found.container_no) addPair('container_no', found.container_no, 0.7);
+  if (found.consignee) addPair('consignee', found.consignee, 0.65);
+  if (found.material) addPair('material', found.material, 0.62);
+  if (found.operator) addPair('operator', found.operator, 0.6);
+  if (found.date) addPair('date', found.date, 0.6);
+  if (found.weight) addPair('weight', found.weight, 0.55);
+
+  setExtractedPairs(pairs);
+
+  // Sort candidates by confidence (already sorted in generator, but ensure)
+  const sortedCandidates = candidateList.slice().sort((a, b) => b.confidence - a.confidence || b.value.length - a.value.length);
+  // ensure normalized values in candidates for display & selection
+  const normalizedCandidates = sortedCandidates.map(c => ({ ...c, normalized: normalizeTicketFormat(c.value) }));
+  setTicketCandidates(normalizedCandidates);
+
+  // select default: prefer context-numeric normalized, else top normalized
+  const selectedDefault = (normalizedCandidates.find(c => c.reason === 'context-numeric')?.normalized)
+    || normalizedCandidates[0]?.normalized || "";
+  setSelectedTicketCandidate(selectedDefault);
+
+  // Merge into formData only if empty (but DO NOT overwrite ticket_no automatically if multiple candidates exist)
+  setFormData((prev) => {
+    const next = { ...prev };
+    pairs.forEach(({ key, value }) => {
+      const existing = next[key];
+      const isEmpty = existing === null || existing === undefined || existing === "" || existing === false;
+      if (key === "ticket_no") {
+        const autoPickAllowed = (normalizedCandidates.length <= 1) || (/^\d{5}$/.test(String(value)));
+        if (!autoPickAllowed) return;
+        if (isEmpty) next[key] = value;
+      } else {
+        if (isEmpty) next[key] = value;
+      }
+    });
+    return next;
+  });
+
+  toast({
+    title: "Form populated from Ticket Reader",
+    description: "Fields cleaned and normalized where possible. Verify ticket number if needed.",
+    status: "success",
+    duration: 3500,
+    isClosable: true,
+  });
+};
 
   // ------------------------ Apply chosen ticket candidate ------------------------
   const applySelectedTicketCandidate = () => {
