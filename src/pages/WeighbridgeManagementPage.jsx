@@ -383,42 +383,6 @@ function WeighbridgeManagementPage() {
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
   const pageItems = useMemo(() => getCondensedPages(currentPage, totalPages), [currentPage, totalPages]);
 
-  const handleExtract = (rawText) => {
-  if (!rawText) {
-    setExtractedPairs([]);
-    setTicketCandidates([]);
-    setSelectedTicketCandidate("");
-    return;
-  }
-
-  // Normalize lines and whitespace
-  const lines = String(rawText || "")
-    .replace(/\r\n/g, "\n")
-    .replace(/\t/g, " ")
-    .replace(/\u00A0/g, " ")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-
-  const full = lines.join("\n");
-  const found = {};
-
-  const extractLabelLine = (labelRegex) =>
-    lines.find((l) => labelRegex.test(l)) || null;
-
-  // parseWeightFromLine: prefer distinct 4-6 digit tokens and reasonable bounds
-  const parseWeightFromLine = (line) => {
-    if (!line) return null;
-    const matches = Array.from(line.matchAll(/\b(\d{4,6})\b/g)).map((m) => m[1]);
-    if (matches.length === 0) return null;
-    for (let i = 0; i < matches.length; i++) {
-      const num = Number(matches[i].replace(/,/g, ""));
-      if (!Number.isFinite(num)) continue;
-      if (num >= 100 && num <= 200000) return num;
-    }
-    return null;
-  };
-
   // -----------------------
   // Helper: sanitize time tokens inside a date string to avoid out-of-range values
   // - clamps minutes/seconds to 0-59
@@ -504,209 +468,313 @@ function WeighbridgeManagementPage() {
     return out;
   }
 
-  // GNSW Truck No
-  const gnswLine =
-    extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
-  if (gnswLine) {
-    const m =
-      gnswLine.match(/GNSW\s*Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i) ||
-      gnswLine.match(/Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i);
-    if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
-  } else {
-    const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
-    if (plateMatch && plateMatch[1]) {
-      found.gnsw_truck_no = plateMatch[1].toUpperCase();
-    }
-  }
+  /**
+   * Parse a human-friendly/sanitized date string into ISO timestamp (UTC).
+   * Returns ISO string (e.g. 2025-11-07T13:45:00.000Z) or null if parsing fails.
+   *
+   * Heuristics:
+   *  - Try new Date(sanitized)
+   *  - Support DD-MMM-YY / DD-MMM-YYYY with optional time and AM/PM
+   *  - For two-digit years, assume 2000+
+   */
+  function parseDateStringToISO(s) {
+    if (!s || typeof s !== "string") return null;
+    const sanitized = sanitizeTimeInDateString(s.trim());
+    // Quick attempt
+    const d1 = new Date(sanitized);
+    if (!Number.isNaN(d1.getTime())) return d1.toISOString();
 
-  // Trailer no
-  const trailerLine = extractLabelLine(/\bTrailer\b.*\bNo\b/i) || extractLabelLine(/\bTrailer No\b/i);
-  if (trailerLine) {
-    const m = trailerLine.match(/Trailer\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
-    if (m && m[1]) found.trailer_no = m[1].trim();
-  }
-
-  // Driver
-  const driverLine = extractLabelLine(/\bDriver\b/i);
-  if (driverLine) {
-    let drv = driverLine.replace(/Driver\s*[:-]?\s*/i, "").trim();
-    drv = drv.replace(/^[-:]+/, "").trim();
-    drv = drv.replace(/\bTruck\b.*$/i, "").trim();
-    drv = drv.replace(/\(.*?\)/g, "").trim();
-    found.driver = drv || null;
-  }
-
-  // Scale Name / WB ID
-  const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
-  if (scaleLine) {
-    const m = scaleLine.match(/Scale\s*Name\s*[:-]?\s*([A-Z0-9_-]+)/i) || scaleLine.match(/Scale\s*[:-]?\s*([A-Z0-9_-]+)/i);
-    if (m && m[1]) {
-      const cand = String(m[1]).toUpperCase();
-      found.scale_name = cand;
-    }
-  }
-  if (!found.scale_name) {
-    const wb = full.match(/\b(WBRIDGE\d+)\b/i);
-    if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
-  }
-
-  // Gross / Tare / Net
-  const grossLine = extractLabelLine(/\bGross\b/i);
-  if (grossLine) found.gross = parseWeightFromLine(grossLine);
-  else {
-    const mt = full.match(/Gross\s*[:-]?\s*(\d{4,6})/i);
-    if (mt && mt[1]) found.gross = Number(mt[1]);
-  }
-
-  const tareLine = extractLabelLine(/\bTare\b/i);
-  if (tareLine) found.tare = parseWeightFromLine(tareLine);
-  else {
-    const mt = full.match(/Tare\s*[:-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
-    if (mt && mt[1]) found.tare = Number(mt[1]);
-  }
-
-  const netLine = extractLabelLine(/\bNet\b/i);
-  if (netLine) found.net = parseWeightFromLine(netLine);
-  else {
-    const mn = full.match(/Net\s*[:-]?\s*(\d{4,6})/i);
-    if (mn && mn[1]) found.net = Number(mn[1]);
-  }
-
-  // SAD No
-  const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
-  if (sadLine) {
-    const m = sadLine.match(/SAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:-]?\s*(\d{2,6})/i);
-    if (m && m[1]) found.sad_no = m[1];
-  } else {
-    const sadFb = full.match(/\bSAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:-]?\s*(\d{2,6})/i);
-    if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
-  }
-
-  // other metadata (container/consignee/operator)
-  const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
-  if (containerLine) {
-    const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
-    if (m && m[1]) found.container_no = String(m[1]).trim();
-    else {
-      const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
-      if (bulkLine) found.container_no = "BULK";
-    }
-  }
-
-  const consigneeLine = extractLabelLine(/Consignee\b/i);
-  if (consigneeLine) {
-    let c = consigneeLine.replace(/Consignee\s*[:-]?\s*/i, "").trim();
-    c = c.split(/\bTare\b/i)[0].trim();
-    c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
-    found.consignee = c || null;
-  }
-
-  const materialLine = extractLabelLine(/Material\b/i);
-  if (materialLine) {
-    const m = materialLine.match(/Material\s*[:-]?\s*(.+)/i);
-    if (m && m[1]) found.material = m[1].trim();
-  }
-
-  const operatorLine = extractLabelLine(/\bOperator\b/i);
-  if (operatorLine) {
-    let op = operatorLine.replace(/Operator\s*[:-]?\s*/i, "").trim();
-    op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
-    op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
-    op = op.replace(/\bWBRIDGE\d+\b/gi, "");
-    op = op.replace(/\b\d{2,6}\s*kg\b/gi, "");
-    op = op.replace(/\b(true|false)\b/ig, "");
-    op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
-    if (op) {
-      const opMatch = op.match(/[A-Za-z][A-Za-z.\s'-]{0,40}/);
-      found.operator = opMatch ? opMatch[0].trim() : op;
-    } else {
-      found.operator = "Operator";
-    }
-  }
-
-  // Date detection (common formats)
-  const dateMatch = full.match(
-    /(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/i
-  );
-  if (dateMatch) {
-    // sanitize the matched date/time to avoid out-of-range components
-    found.date = sanitizeTimeInDateString(dateMatch[0].trim());
-  }
-
-  // --- Ticket number: produce candidates with confidence ---
-  const candidateList = generateTicketCandidates(rawText, found); // array of {value, confidence, reason}
-
-  // Attempt to pick best candidate automatically only if it's clearly valid
-  // Default selection rule: prefer 'context-numeric' candidate if present (as you requested)
-  let defaultCandidate = null;
-  const contextNumeric = candidateList.find(c => c.reason === 'context-numeric');
-  if (contextNumeric) defaultCandidate = normalizeTicketFormat(contextNumeric.value);
-  else if (candidateList.length > 0) defaultCandidate = normalizeTicketFormat(candidateList[0].value);
-
-  // Build extractedPairs with confidence heuristics:
-  const pairs = [];
-  // helper to add pair with confidence
-  const addPair = (key, value, confidence = 0.6) => {
-    if (value === undefined || value === null) return;
-    pairs.push({ key, value, confidence: Math.max(0, Math.min(1, confidence)) });
-  };
-
-  // Add many fields with reasonable confidence values
-  if (found.ticket_no) addPair('ticket_no', found.ticket_no, 0.95);
-  if (!found.ticket_no && defaultCandidate) addPair('ticket_no', defaultCandidate, candidateList.find(c => normalizeTicketFormat(c.value) === defaultCandidate)?.confidence ?? 0.75);
-  if (found.gnsw_truck_no) addPair('gnsw_truck_no', found.gnsw_truck_no, 0.9);
-  if (found.trailer_no) addPair('trailer_no', found.trailer_no, 0.85);
-  if (found.driver) addPair('driver', found.driver, 0.82);
-  if (found.scale_name) addPair('wb_id', found.scale_name, 0.8);
-  if (found.gross !== undefined && found.gross !== null) addPair('gross', found.gross, found.gross ? 0.9 : 0.5);
-  if (found.tare !== undefined && found.tare !== null) addPair('tare', found.tare, found.tare ? 0.9 : 0.5);
-  if (found.net !== undefined && found.net !== null) addPair('net', found.net, found.net ? 0.9 : 0.5);
-  if (found.sad_no) addPair('sad_no', found.sad_no, 0.88);
-  if (found.container_no) addPair('container_no', found.container_no, 0.7);
-  if (found.consignee) addPair('consignee', found.consignee, 0.65);
-  if (found.material) addPair('material', found.material, 0.62);
-  if (found.operator) addPair('operator', found.operator, 0.6);
-  if (found.date) addPair('date', found.date, 0.6);
-  if (found.weight) addPair('weight', found.weight, 0.55);
-
-  setExtractedPairs(pairs);
-
-  // Sort candidates by confidence (already sorted in generator, but ensure)
-  const sortedCandidates = candidateList.slice().sort((a, b) => b.confidence - a.confidence || b.value.length - a.value.length);
-  // ensure normalized values in candidates for display & selection
-  const normalizedCandidates = sortedCandidates.map(c => ({ ...c, normalized: normalizeTicketFormat(c.value) }));
-  setTicketCandidates(normalizedCandidates);
-
-  // select default: prefer context-numeric normalized, else top normalized
-  const selectedDefault = (normalizedCandidates.find(c => c.reason === 'context-numeric')?.normalized)
-    || normalizedCandidates[0]?.normalized || "";
-  setSelectedTicketCandidate(selectedDefault);
-
-  // Merge into formData only if empty (but DO NOT overwrite ticket_no automatically if multiple candidates exist)
-  setFormData((prev) => {
-    const next = { ...prev };
-    pairs.forEach(({ key, value }) => {
-      const existing = next[key];
-      const isEmpty = existing === null || existing === undefined || existing === "" || existing === false;
-      if (key === "ticket_no") {
-        const autoPickAllowed = (normalizedCandidates.length <= 1) || (/^\d{5}$/.test(String(value)));
-        if (!autoPickAllowed) return;
-        if (isEmpty) next[key] = value;
-      } else {
-        if (isEmpty) next[key] = value;
+    // Try common pattern: DD-MMM-YY(YY) [HH:MM(:SS)] [AM/PM]
+    const m = sanitized.match(/(\d{1,2})[-\/]([A-Za-z]{3,9})[-\/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*([AP]M))?)?/i);
+    if (m) {
+      const day = Number(m[1]);
+      const monStr = m[2].slice(0,3).toLowerCase();
+      const yearRaw = m[3];
+      let year = Number(yearRaw);
+      if (yearRaw.length === 2) {
+        year = 2000 + year;
       }
-    });
-    return next;
-  });
+      const months = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+      const month = months[monStr] ?? null;
+      if (month === null) return null;
+      let H = 0, M = 0, S = 0;
+      if (m[4]) {
+        const parts = m[4].split(':').map(x => Number(x));
+        H = parts[0] || 0;
+        M = parts[1] || 0;
+        S = parts[2] || 0;
+        if (m[5]) {
+          const ampm = (m[5] || "").toUpperCase();
+          if (ampm === 'PM' && H < 12) H = (H % 12) + 12;
+          if (ampm === 'AM' && H === 12) H = 0;
+        }
+      }
+      try {
+        const dt = new Date(Date.UTC(year, month, day, H, M, S));
+        if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+      } catch (e) {
+        // ignore
+      }
+    }
 
-  toast({
-    title: "Form populated from Ticket Reader",
-    description: "Fields cleaned and normalized where possible. Verify ticket number if needed.",
-    status: "success",
-    duration: 3500,
-    isClosable: true,
-  });
-};
+    // Try ISO-ish extraction (first {...} or [...]) - less likely for date but keep
+    const isoMatch = sanitized.match(/(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2}))?/);
+    if (isoMatch) {
+      try {
+        const dt = new Date(sanitized);
+        if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+      } catch (e) {}
+    }
+
+    return null;
+  }
+
+  // GNSW Truck No
+  const handleExtract = (rawText) => {
+    if (!rawText) {
+      setExtractedPairs([]);
+      setTicketCandidates([]);
+      setSelectedTicketCandidate("");
+      return;
+    }
+
+    // Normalize lines and whitespace
+    const lines = String(rawText || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\t/g, " ")
+      .replace(/\u00A0/g, " ")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    const full = lines.join("\n");
+    const found = {};
+
+    const extractLabelLine = (labelRegex) =>
+      lines.find((l) => labelRegex.test(l)) || null;
+
+    // parseWeightFromLine: prefer distinct 4-6 digit tokens and reasonable bounds
+    const parseWeightFromLine = (line) => {
+      if (!line) return null;
+      const matches = Array.from(line.matchAll(/\b(\d{4,6})\b/g)).map((m) => m[1]);
+      if (matches.length === 0) return null;
+      for (let i = 0; i < matches.length; i++) {
+        const num = Number(matches[i].replace(/,/g, ""));
+        if (!Number.isFinite(num)) continue;
+        if (num >= 100 && num <= 200000) return num;
+      }
+      return null;
+    };
+
+    // -----------------------
+    // GNSW Truck No
+    // -----------------------
+    const gnswLine =
+      extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
+    if (gnswLine) {
+      const m =
+        gnswLine.match(/GNSW\s*Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i) ||
+        gnswLine.match(/Truck\s*No\.?\s*(?::|-)?\s*([A-Z0-9/-]{3,15})/i);
+      if (m && m[1]) found.gnsw_truck_no = String(m[1]).trim().toUpperCase();
+    } else {
+      const plateMatch = full.match(/\b([A-Z]{1,3}\d{2,4}[A-Z]{0,2})\b/i);
+      if (plateMatch && plateMatch[1]) {
+        found.gnsw_truck_no = plateMatch[1].toUpperCase();
+      }
+    }
+
+    // Trailer no
+    const trailerLine = extractLabelLine(/\bTrailer\b.*\bNo\b/i) || extractLabelLine(/\bTrailer No\b/i);
+    if (trailerLine) {
+      const m = trailerLine.match(/Trailer\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
+      if (m && m[1]) found.trailer_no = m[1].trim();
+    }
+
+    // Driver
+    const driverLine = extractLabelLine(/\bDriver\b/i);
+    if (driverLine) {
+      let drv = driverLine.replace(/Driver\s*[:-]?\s*/i, "").trim();
+      drv = drv.replace(/^[-:]+/, "").trim();
+      drv = drv.replace(/\bTruck\b.*$/i, "").trim();
+      drv = drv.replace(/\(.*?\)/g, "").trim();
+      found.driver = drv || null;
+    }
+
+    // Scale Name / WB ID
+    const scaleLine = extractLabelLine(/Scale\s*Name|ScaleName|Scale:/i);
+    if (scaleLine) {
+      const m = scaleLine.match(/Scale\s*Name\s*[:-]?\s*([A-Z0-9_-]+)/i) || scaleLine.match(/Scale\s*[:-]?\s*([A-Z0-9_-]+)/i);
+      if (m && m[1]) {
+        const cand = String(m[1]).toUpperCase();
+        found.scale_name = cand;
+      }
+    }
+    if (!found.scale_name) {
+      const wb = full.match(/\b(WBRIDGE\d+)\b/i);
+      if (wb && wb[1]) found.scale_name = wb[1].toUpperCase();
+    }
+
+    // Gross / Tare / Net
+    const grossLine = extractLabelLine(/\bGross\b/i);
+    if (grossLine) found.gross = parseWeightFromLine(grossLine);
+    else {
+      const mt = full.match(/Gross\s*[:-]?\s*(\d{4,6})/i);
+      if (mt && mt[1]) found.gross = Number(mt[1]);
+    }
+
+    const tareLine = extractLabelLine(/\bTare\b/i);
+    if (tareLine) found.tare = parseWeightFromLine(tareLine);
+    else {
+      const mt = full.match(/Tare\s*[:-]?\s*(?:\([A-Za-z]+\)\s*)?(\d{4,6})/i);
+      if (mt && mt[1]) found.tare = Number(mt[1]);
+    }
+
+    const netLine = extractLabelLine(/\bNet\b/i);
+    if (netLine) found.net = parseWeightFromLine(netLine);
+    else {
+      const mn = full.match(/Net\s*[:-]?\s*(\d{4,6})/i);
+      if (mn && mn[1]) found.net = Number(mn[1]);
+    }
+
+    // SAD No
+    const sadLine = extractLabelLine(/\bSAD\b.*\bNo\b/i) || extractLabelLine(/\bSAD\b/i);
+    if (sadLine) {
+      const m = sadLine.match(/SAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || sadLine.match(/SAD\s*[:-]?\s*(\d{2,6})/i);
+      if (m && m[1]) found.sad_no = m[1];
+    } else {
+      const sadFb = full.match(/\bSAD\s*No\.?\s*[:-]?\s*(\d{2,6})/i) || full.match(/\bSAD\s*[:-]?\s*(\d{2,6})/i);
+      if (sadFb && sadFb[1]) found.sad_no = sadFb[1];
+    }
+
+    // other metadata (container/consignee/operator)
+    const containerLine = extractLabelLine(/\bContainer\b/i) || extractLabelLine(/\bContainer\s*No\b/i);
+    if (containerLine) {
+      const m = containerLine.match(/Container\s*(?:No\.?|#)?\s*[:-]?\s*([A-Z0-9-]+)/i);
+      if (m && m[1]) found.container_no = String(m[1]).trim();
+      else {
+        const bulkLine = lines.find((l) => /\bBULK\b/i.test(l));
+        if (bulkLine) found.container_no = "BULK";
+      }
+    }
+
+    const consigneeLine = extractLabelLine(/Consignee\b/i);
+    if (consigneeLine) {
+      let c = consigneeLine.replace(/Consignee\s*[:-]?\s*/i, "").trim();
+      c = c.split(/\bTare\b/i)[0].trim();
+      c = c.replace(/\b\d{2,6}\s*kg\b/i, "").trim();
+      found.consignee = c || null;
+    }
+
+    const materialLine = extractLabelLine(/Material\b/i);
+    if (materialLine) {
+      const m = materialLine.match(/Material\s*[:-]?\s*(.+)/i);
+      if (m && m[1]) found.material = m[1].trim();
+    }
+
+    const operatorLine = extractLabelLine(/\bOperator\b/i);
+    if (operatorLine) {
+      let op = operatorLine.replace(/Operator\s*[:-]?\s*/i, "").trim();
+      op = op.replace(/\d{1,2}-[A-Za-z]{3}-\d{2,4}/g, "");
+      op = op.replace(/\d{1,2}:\d{2}:\d{2}\s*[AP]M/gi, "");
+      op = op.replace(/\bWBRIDGE\d+\b/gi, "");
+      op = op.replace(/\b\d{2,6}\s*kg\b/gi, "");
+      op = op.replace(/\b(true|false)\b/ig, "");
+      op = op.replace(/\b(Pass|Number|Date|Scale|Weight|Manual)\b.*$/i, "").trim();
+      if (op) {
+        const opMatch = op.match(/[A-Za-z][A-Za-z.\s'-]{0,40}/);
+        found.operator = opMatch ? opMatch[0].trim() : op;
+      } else {
+        found.operator = "Operator";
+      }
+    }
+
+    // Date detection (common formats)
+    const dateMatch = full.match(
+      /(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/i
+    );
+    if (dateMatch) {
+      // sanitize the matched date/time to avoid out-of-range components
+      const sanitized = sanitizeTimeInDateString(dateMatch[0].trim());
+      found.date = sanitized;
+      const iso = parseDateStringToISO(sanitized);
+      if (iso) found.date_iso = iso;
+    }
+
+    // --- Ticket number: produce candidates with confidence ---
+    const candidateList = generateTicketCandidates(rawText, found); // array of {value, confidence, reason}
+
+    // Attempt to pick best candidate automatically only if it's clearly valid
+    // Default selection rule: prefer 'context-numeric' candidate if present (as you requested)
+    let defaultCandidate = null;
+    const contextNumeric = candidateList.find(c => c.reason === 'context-numeric');
+    if (contextNumeric) defaultCandidate = normalizeTicketFormat(contextNumeric.value);
+    else if (candidateList.length > 0) defaultCandidate = normalizeTicketFormat(candidateList[0].value);
+
+    // Build extractedPairs with confidence heuristics:
+    const pairs = [];
+    // helper to add pair with confidence
+    const addPair = (key, value, confidence = 0.6) => {
+      if (value === undefined || value === null) return;
+      pairs.push({ key, value, confidence: Math.max(0, Math.min(1, confidence)) });
+    };
+
+    // Add many fields with reasonable confidence values
+    if (found.ticket_no) addPair('ticket_no', found.ticket_no, 0.95);
+    if (!found.ticket_no && defaultCandidate) addPair('ticket_no', defaultCandidate, candidateList.find(c => normalizeTicketFormat(c.value) === defaultCandidate)?.confidence ?? 0.75);
+    if (found.gnsw_truck_no) addPair('gnsw_truck_no', found.gnsw_truck_no, 0.9);
+    if (found.trailer_no) addPair('trailer_no', found.trailer_no, 0.85);
+    if (found.driver) addPair('driver', found.driver, 0.82);
+    if (found.scale_name) addPair('wb_id', found.scale_name, 0.8);
+    if (found.gross !== undefined && found.gross !== null) addPair('gross', found.gross, found.gross ? 0.9 : 0.5);
+    if (found.tare !== undefined && found.tare !== null) addPair('tare', found.tare, found.tare ? 0.9 : 0.5);
+    if (found.net !== undefined && found.net !== null) addPair('net', found.net, found.net ? 0.9 : 0.5);
+    if (found.sad_no) addPair('sad_no', found.sad_no, 0.88);
+    if (found.container_no) addPair('container_no', found.container_no, 0.7);
+    if (found.consignee) addPair('consignee', found.consignee, 0.65);
+    if (found.material) addPair('material', found.material, 0.62);
+    if (found.operator) addPair('operator', found.operator, 0.6);
+    if (found.date) addPair('date', found.date, 0.6);
+    if (found.date_iso) addPair('date_iso', found.date_iso, 0.8);
+    if (found.weight) addPair('weight', found.weight, 0.55);
+
+    setExtractedPairs(pairs);
+
+    // Sort candidates by confidence (already sorted in generator, but ensure)
+    const sortedCandidates = candidateList.slice().sort((a, b) => b.confidence - a.confidence || b.value.length - a.value.length);
+    // ensure normalized values in candidates for display & selection
+    const normalizedCandidates = sortedCandidates.map(c => ({ ...c, normalized: normalizeTicketFormat(c.value) }));
+    setTicketCandidates(normalizedCandidates);
+
+    // select default: prefer context-numeric normalized, else top normalized
+    const selectedDefault = (normalizedCandidates.find(c => c.reason === 'context-numeric')?.normalized)
+      || normalizedCandidates[0]?.normalized || "";
+    setSelectedTicketCandidate(selectedDefault);
+
+    // Merge into formData only if empty (but DO NOT overwrite ticket_no automatically if multiple candidates exist)
+    setFormData((prev) => {
+      const next = { ...prev };
+      pairs.forEach(({ key, value }) => {
+        const existing = next[key];
+        const isEmpty = existing === null || existing === undefined || existing === "" || existing === false;
+        if (key === "ticket_no") {
+          const autoPickAllowed = (normalizedCandidates.length <= 1) || (/^\d{5}$/.test(String(value)));
+          if (!autoPickAllowed) return;
+          if (isEmpty) next[key] = value;
+        } else {
+          if (isEmpty) next[key] = value;
+        }
+      });
+      return next;
+    });
+
+    toast({
+      title: "Form populated from Ticket Reader",
+      description: "Fields cleaned and normalized where possible. Verify ticket number if needed.",
+      status: "success",
+      duration: 3500,
+      isClosable: true,
+    });
+  };
 
   // ------------------------ Apply chosen ticket candidate ------------------------
   const applySelectedTicketCandidate = () => {
@@ -898,6 +966,62 @@ function WeighbridgeManagementPage() {
             submissionData.total_weight = Number.isFinite(n) ? n : null;
           }
         } else submissionData.total_weight = null;
+      }
+
+      // Normalize date field (if present) to ISO to avoid DB timestamp parsing errors
+      if (submissionData.date && typeof submissionData.date === 'string') {
+        // prefer date_iso extracted if user used the extractor
+        let parsedISO = null;
+        // if the value already looks like an ISO, try new Date
+        try {
+          const d = new Date(submissionData.date);
+          if (!Number.isNaN(d.getTime())) parsedISO = d.toISOString();
+        } catch {}
+        if (!parsedISO) {
+          // try sanitize + parse heuristics (reuse helper from above)
+          parsedISO = (function tryParse(s) {
+            if (!s) return null;
+            const san = sanitizeTimeInDateString(s);
+            // try direct Date
+            const dd = new Date(san);
+            if (!Number.isNaN(dd.getTime())) return dd.toISOString();
+            // attempt dd-mmm parsing
+            const m = san.match(/(\d{1,2})[-\/]([A-Za-z]{3,9})[-\/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*([AP]M)?)?/i);
+            if (m) {
+              // reuse logic from parseDateStringToISO above
+              const day = Number(m[1]);
+              const monStr = m[2].slice(0,3).toLowerCase();
+              const yearRaw = m[3];
+              let year = Number(yearRaw);
+              if (yearRaw.length === 2) year = 2000 + year;
+              const months = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+              const month = months[monStr] ?? null;
+              if (month === null) return null;
+              let H=0,M=0,S=0;
+              if (m[4]) {
+                const parts = m[4].split(':').map(x => Number(x));
+                H = parts[0] || 0; M = parts[1] || 0; S = parts[2] || 0;
+                if (m[5]) {
+                  const ampm = (m[5] || "").toUpperCase();
+                  if (ampm === 'PM' && H < 12) H = (H % 12) + 12;
+                  if (ampm === 'AM' && H === 12) H = 0;
+                }
+              }
+              try {
+                const dt = new Date(Date.UTC(year, month, day, H, M, S));
+                if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+              } catch {}
+            }
+            return null;
+          })(submissionData.date);
+        }
+        if (parsedISO) {
+          // For DB insert prefer a date-only string if no time was provided, but ISO is safe
+          submissionData.date = parsedISO;
+        } else {
+          // keep original sanitized value if parse failed — DB may still accept a simple YYYY-MM-DD style, else validation will fail
+          submissionData.date = sanitizeTimeInDateString(submissionData.date);
+        }
       }
 
       // attach current user as created_by (and user_id fallback)
