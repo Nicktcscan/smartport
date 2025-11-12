@@ -5,7 +5,7 @@ import {
   Thead, Tbody, Tr, Th, Td, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   useDisclosure, Text, SimpleGrid, IconButton, Flex, Select, Progress, HStack,
-  useColorModeValue, Badge, Grid, Spacer, Avatar, Divider, VStack as VStack2, Tooltip, BoxProps
+  useColorModeValue, Badge, Grid, Spacer, Avatar, Divider, VStack as VStack2, Tooltip,
 } from "@chakra-ui/react";
 import {
   ViewIcon, EditIcon, CheckIcon, CloseIcon, InfoOutlineIcon,
@@ -383,7 +383,153 @@ function WeighbridgeManagementPage() {
   const totalPages = Math.max(1, Math.ceil(totalTickets / pageSize));
   const pageItems = useMemo(() => getCondensedPages(currentPage, totalPages), [currentPage, totalPages]);
 
-  // ------------------------ Advanced OCR extraction (improved ticket candidates + confidences) ------------------------
+  // -----------------------
+  // Helper: sanitize time tokens inside a date string to avoid out-of-range values
+  // - clamps minutes/seconds to 0-59
+  // - clamps hours to 0-23 (24h) or 1-12 (12h with AM/PM)
+  // - supports formats like "11:63:00 PM", "2025-11-07 25:05:00", "9:5:3 AM", "11:63 PM"
+  // -----------------------
+  function sanitizeTimeInDateString(s) {
+    if (!s || typeof s !== "string") return s;
+    let out = String(s);
+
+    // Normalize common separators and excessive spaces
+    out = out.replace(/\s+/g, " ").trim();
+
+    // 1) HH:MM:SS [AM|PM] or H:MM:SSAM (with optional space)
+    out = out.replace(/(\b\d{1,2}):(\d{1,2}):(\d{1,2})(\s*[AP]M\b)?/gi, (m, hh, mm, ss, ampmRaw) => {
+      const ampm = ampmRaw ? ampmRaw.trim().toUpperCase() : "";
+      let H = parseInt(hh, 10);
+      let M = parseInt(mm, 10);
+      let S = parseInt(ss, 10);
+
+      // clamp seconds/minutes
+      if (!Number.isFinite(S) || S < 0) S = 0;
+      if (S > 59) S = 59;
+      if (!Number.isFinite(M) || M < 0) M = 0;
+      if (M > 59) M = 59;
+
+      if (ampm) {
+        // 12-hour clock: clamp to 1..12
+        if (!Number.isFinite(H) || H < 1) H = 1;
+        if (H > 12) H = ((H - 1) % 12) + 1;
+        if (H < 1) H = 1;
+      } else {
+        // 24-hour clock: clamp to 0..23
+        if (!Number.isFinite(H) || H < 0) H = 0;
+        if (H > 23) H = 23;
+      }
+
+      const hh2 = String(H).padStart(2, "0");
+      const mm2 = String(M).padStart(2, "0");
+      const ss2 = String(S).padStart(2, "0");
+      return `${hh2}:${mm2}:${ss2}${ampm ? " " + ampm : ""}`;
+    });
+
+    // 2) HH:MM [AM|PM] (no seconds)
+    out = out.replace(/(\b\d{1,2}):(\d{1,2})(\s*[AP]M\b)?/gi, (m, hh, mm, ampmRaw) => {
+      // Avoid reprocessing HH:MM:SS matches (they've been normalized above)
+      if (/\d{1,2}:\d{1,2}:\d{1,2}/.test(m)) return m;
+      const ampm = ampmRaw ? ampmRaw.trim().toUpperCase() : "";
+      let H = parseInt(hh, 10);
+      let M = parseInt(mm, 10);
+
+      if (!Number.isFinite(M) || M < 0) M = 0;
+      if (M > 59) M = 59;
+
+      if (ampm) {
+        if (!Number.isFinite(H) || H < 1) H = 1;
+        if (H > 12) H = ((H - 1) % 12) + 1;
+        if (H < 1) H = 1;
+      } else {
+        if (!Number.isFinite(H) || H < 0) H = 0;
+        if (H > 23) H = 23;
+      }
+
+      const hh2 = String(H).padStart(2, "0");
+      const mm2 = String(M).padStart(2, "0");
+      return `${hh2}:${mm2}${ampm ? " " + ampm : ""}`;
+    });
+
+    // 3) ISO like "YYYY-MM-DD HH:MM:SS" (ensure 24-hour clamp)
+    out = out.replace(/(\d{4}-\d{2}-\d{2})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})/g, (m, datePart, hh, mm, ss) => {
+      let H = parseInt(hh, 10);
+      let M = parseInt(mm, 10);
+      let S = parseInt(ss, 10);
+      if (!Number.isFinite(S) || S < 0) S = 0;
+      if (S > 59) S = 59;
+      if (!Number.isFinite(M) || M < 0) M = 0;
+      if (M > 59) M = 59;
+      if (!Number.isFinite(H) || H < 0) H = 0;
+      if (H > 23) H = 23;
+      return `${datePart} ${String(H).padStart(2, "0")}:${String(M).padStart(2, "0")}:${String(S).padStart(2, "0")}`;
+    });
+
+    return out;
+  }
+
+  /**
+   * Parse a human-friendly/sanitized date string into ISO timestamp (UTC).
+   * Returns ISO string (e.g. 2025-11-07T13:45:00.000Z) or null if parsing fails.
+   *
+   * Heuristics:
+   *  - Try new Date(sanitized)
+   *  - Support DD-MMM-YY / DD-MMM-YYYY with optional time and AM/PM
+   *  - For two-digit years, assume 2000+
+   */
+  function parseDateStringToISO(s) {
+    if (!s || typeof s !== "string") return null;
+    const sanitized = sanitizeTimeInDateString(s.trim());
+    // Quick attempt
+    const d1 = new Date(sanitized);
+    if (!Number.isNaN(d1.getTime())) return d1.toISOString();
+
+    // Try common pattern: DD-MMM-YY(YY) [HH:MM(:SS)] [AM/PM]
+    const m = sanitized.match(/(\d{1,2})[-/]([A-Za-z]{3,9})[-/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)(?:\s*([AP]M))?)?/i);
+    if (m) {
+      const day = Number(m[1]);
+      const monStr = m[2].slice(0,3).toLowerCase();
+      const yearRaw = m[3];
+      let year = Number(yearRaw);
+      if (yearRaw.length === 2) {
+        year = 2000 + year;
+      }
+      const months = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+      const month = months[monStr] ?? null;
+      if (month === null) return null;
+      let H = 0, M = 0, S = 0;
+      if (m[4]) {
+        const parts = m[4].split(':').map(x => Number(x));
+        H = parts[0] || 0;
+        M = parts[1] || 0;
+        S = parts[2] || 0;
+        if (m[5]) {
+          const ampm = (m[5] || "").toUpperCase();
+          if (ampm === 'PM' && H < 12) H = (H % 12) + 12;
+          if (ampm === 'AM' && H === 12) H = 0;
+        }
+      }
+      try {
+        const dt = new Date(Date.UTC(year, month, day, H, M, S));
+        if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Try ISO-ish extraction (first {...} or [...]) - less likely for date but keep
+    const isoMatch = sanitized.match(/(\d{4}-\d{2}-\d{2})(?:[ T](\d{2}:\d{2}:\d{2}))?/);
+    if (isoMatch) {
+      try {
+        const dt = new Date(sanitized);
+        if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+      } catch (e) {}
+    }
+
+    return null;
+  }
+
+  // GNSW Truck No
   const handleExtract = (rawText) => {
     if (!rawText) {
       setExtractedPairs([]);
@@ -420,7 +566,9 @@ function WeighbridgeManagementPage() {
       return null;
     };
 
+    // -----------------------
     // GNSW Truck No
+    // -----------------------
     const gnswLine =
       extractLabelLine(/GNSW\s*Truck\s*No/i) || extractLabelLine(/\bTruck\s*No\b/i);
     if (gnswLine) {
@@ -545,7 +693,11 @@ function WeighbridgeManagementPage() {
       /(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)|(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/i
     );
     if (dateMatch) {
-      found.date = dateMatch[0].trim();
+      // sanitize the matched date/time to avoid out-of-range components
+      const sanitized = sanitizeTimeInDateString(dateMatch[0].trim());
+      found.date = sanitized;
+      const iso = parseDateStringToISO(sanitized);
+      if (iso) found.date_iso = iso;
     }
 
     // --- Ticket number: produce candidates with confidence ---
@@ -582,6 +734,7 @@ function WeighbridgeManagementPage() {
     if (found.material) addPair('material', found.material, 0.62);
     if (found.operator) addPair('operator', found.operator, 0.6);
     if (found.date) addPair('date', found.date, 0.6);
+    if (found.date_iso) addPair('date_iso', found.date_iso, 0.8);
     if (found.weight) addPair('weight', found.weight, 0.55);
 
     setExtractedPairs(pairs);
@@ -815,6 +968,62 @@ function WeighbridgeManagementPage() {
         } else submissionData.total_weight = null;
       }
 
+      // Normalize date field (if present) to ISO to avoid DB timestamp parsing errors
+      if (submissionData.date && typeof submissionData.date === 'string') {
+        // prefer date_iso extracted if user used the extractor
+        let parsedISO = null;
+        // if the value already looks like an ISO, try new Date
+        try {
+          const d = new Date(submissionData.date);
+          if (!Number.isNaN(d.getTime())) parsedISO = d.toISOString();
+        } catch {}
+        if (!parsedISO) {
+          // try sanitize + parse heuristics (reuse helper from above)
+          parsedISO = (function tryParse(s) {
+            if (!s) return null;
+            const san = sanitizeTimeInDateString(s);
+            // try direct Date
+            const dd = new Date(san);
+            if (!Number.isNaN(dd.getTime())) return dd.toISOString();
+            // attempt dd-mmm parsing
+            const m = san.match(/(\d{1,2})[-/]([A-Za-z]{3,9})[-/](\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*([AP]M)?)?/i);
+            if (m) {
+              // reuse logic from parseDateStringToISO above
+              const day = Number(m[1]);
+              const monStr = m[2].slice(0,3).toLowerCase();
+              const yearRaw = m[3];
+              let year = Number(yearRaw);
+              if (yearRaw.length === 2) year = 2000 + year;
+              const months = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+              const month = months[monStr] ?? null;
+              if (month === null) return null;
+              let H=0,M=0,S=0;
+              if (m[4]) {
+                const parts = m[4].split(':').map(x => Number(x));
+                H = parts[0] || 0; M = parts[1] || 0; S = parts[2] || 0;
+                if (m[5]) {
+                  const ampm = (m[5] || "").toUpperCase();
+                  if (ampm === 'PM' && H < 12) H = (H % 12) + 12;
+                  if (ampm === 'AM' && H === 12) H = 0;
+                }
+              }
+              try {
+                const dt = new Date(Date.UTC(year, month, day, H, M, S));
+                if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+              } catch {}
+            }
+            return null;
+          })(submissionData.date);
+        }
+        if (parsedISO) {
+          // For DB insert prefer a date-only string if no time was provided, but ISO is safe
+          submissionData.date = parsedISO;
+        } else {
+          // keep original sanitized value if parse failed — DB may still accept a simple YYYY-MM-DD style, else validation will fail
+          submissionData.date = sanitizeTimeInDateString(submissionData.date);
+        }
+      }
+
       // attach current user as created_by (and user_id fallback)
       let currentUserId = null;
       try {
@@ -1014,7 +1223,7 @@ function WeighbridgeManagementPage() {
   };
 
   // ------------------------ Assistant suggestions ------------------------
-  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantOpen] = useState(false);
   const suggestedFixes = useMemo(() => {
     const out = [];
     if (extractedPairs.length === 0) {

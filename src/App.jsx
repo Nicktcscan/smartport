@@ -12,13 +12,11 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import TicketDetails from './pages/TicketDetails';
 import OutgateDashboard from './pages/OutgateDashboard';
-import CustomsManagementPage from './pages/CustomsManagementPage';
 import AdminPanelPage from './pages/AdminPanelPage';
 import UsersPage from './pages/UsersPage';
 import RolesPermissionsPage from './pages/RolesPermissionsPage';
 import GateOperationsPage from './pages/GateOperationsPage';
 import Login from './pages/Login';
-import WeighbridgeRecords from './pages/WeighbridgeRecords';
 import CargoVerification from './pages/CargoInspection';
 import WeighbridgeManagementPage from './pages/WeighbridgeManagementPage';
 import HoldReleaseRequests from './pages/HoldReleaseRequests';
@@ -205,18 +203,6 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <CargoVerification />
-                    </Box>
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-            <Route
-              path="/weighbridge-records"
-              element={
-                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-                  <Layout>
-                    <Box as="main" p={4} bg="gray.50">
-                      <WeighbridgeRecords />
                     </Box>
                   </Layout>
                 </ProtectedRoute>

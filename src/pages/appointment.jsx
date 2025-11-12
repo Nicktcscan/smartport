@@ -51,7 +51,7 @@ const pdfStyles = StyleSheet.create({
     paddingBottom: 36,
     paddingHorizontal: 20,
     fontSize: 10.5,
-    fontFamily: 'Times-Roman', // main serif
+    fontFamily: 'Times-Roman',
     position: 'relative',
     color: '#000',
   },
@@ -81,7 +81,6 @@ const pdfStyles = StyleSheet.create({
   t1Col3: { width: '25%', fontSize: 10.5 },
   t1Col4: { width: '25%', fontSize: 10.5 },
 
-  // watermark reduced to 40% width (i.e. 60% smaller than 100%), opacity 50%
   watermarkInline: { width: '40%', opacity: 0.5, position: 'absolute', left: '30%', top: 18, zIndex: 0 },
 
   barcodeBox: { marginTop: 12, width: '100%', flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
@@ -106,10 +105,6 @@ const CODE128_WIDTHS = [
 const CODE128_STOP = "2331112";
 
 // ---------- Helpers ----------
-function pad(num, length = 4) {
-  const s = String(num || 0);
-  return s.padStart(length, '0');
-}
 function charCodeForCode128B(ch) {
   const code = ch.charCodeAt(0);
   if (code >= 32 && code <= 127) return code - 32;
@@ -153,7 +148,7 @@ function codesToModuleWidths(codes) {
 }
 
 // ---------- Code128 Svg component (scanner-friendly) ----------
-function Code128Svg({ payloadStr, width = 315, height = 42 }) { // reduced by 25% (defaults)
+function Code128Svg({ payloadStr, width = 315, height = 42 }) {
   const codes = buildCode128CodesB(payloadStr);
   const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
   const modulePx = width / totalModules;
@@ -261,7 +256,6 @@ function AppointmentPdf({ ticket }) {
         </PdfView>
 
         <PdfView style={pdfStyles.mainBox}>
-          {/* watermark reduced to 40% width (60% smaller) and 50% opacity */}
           <PdfImage src={coat} style={pdfStyles.watermarkInline} />
 
           <PdfView style={pdfStyles.sectionRow}>
@@ -329,7 +323,6 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
 
           <PdfView style={pdfStyles.barcodeBox}>
-            {/* Barcode reduced by 25% (width/height defaults set in Code128Svg) */}
             <Code128Svg payloadStr={barcodePayloadStr} width={315} height={42} />
           </PdfView>
         </PdfView>
@@ -342,7 +335,7 @@ function AppointmentPdf({ ticket }) {
   );
 }
 
-// ---------- Main page component (unchanged UI apart from PDF generation usage) ----------
+// ---------- Main page component ----------
 export default function AppointmentPage() {
   const toast = useToast();
 
@@ -366,13 +359,50 @@ export default function AppointmentPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
-  const [isOrbOpen, setOrbOpen] = useState(false);
+  // only need the setter (isOrbOpen was unused)
+  const [, setOrbOpen] = useState(false);
 
   const recognitionRef = useRef(null);
   const [voiceActive, setVoiceActive] = useState(false);
 
   const containerRef = useRef(null);
   const isMobile = useBreakpointValue({ base: true, md: false });
+
+  // utility UI highlights (move above speech effect so it's available to handler)
+  const pulseRow = (index) => {
+    const rows = document.querySelectorAll('.panel-card');
+    const idx = Math.max(0, Math.min(index, rows.length - 1));
+    const row = rows[idx];
+    if (!row) return;
+    row.classList.add('highlight-flash');
+    setTimeout(() => row.classList.remove('highlight-flash'), 2400);
+  };
+  const highlightAll = () => {
+    const els = document.querySelectorAll('.panel-card');
+    els.forEach((el) => el.classList.add('highlight-flash'));
+    setTimeout(() => els.forEach((el) => el.classList.remove('highlight-flash')), 2000);
+  };
+
+  // voice command handler (kept above the effect so useEffect's dependency warning is avoided)
+  const handleVoiceCommand = (text = '') => {
+    const t = String(text || '').toLowerCase().trim();
+    toast({ status: 'info', title: 'Voice command', description: `"${t}"`, duration: 2000 });
+    if (t.includes('promote all')) {
+      highlightAll();
+      return;
+    }
+    if (t.includes('demote row')) {
+      const m = t.match(/demote row (\d+)/);
+      const digits = m ? Number(m[1]) : null;
+      if (digits) {
+        pulseRow(digits - 1);
+      } else {
+        toast({ status: 'warning', title: 'No row number found' });
+      }
+      return;
+    }
+    toast({ status: 'warning', title: 'Unknown command' });
+  };
 
   useEffect(() => {
     const id = 'appointment-page-styles';
@@ -421,6 +451,7 @@ export default function AppointmentPage() {
     };
   }, []);
 
+  // Speech recognition setup - uses handleVoiceCommand defined above
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -441,7 +472,8 @@ export default function AppointmentPage() {
     return () => {
       try { rec.stop(); } catch (e) {}
     };
-  }, []);
+    // intentionally empty dep array — handler is stable because it's defined above in this component scope
+  }, );
 
   const startVoice = () => {
     const r = recognitionRef.current;
@@ -457,40 +489,6 @@ export default function AppointmentPage() {
     setVoiceActive(false);
   };
 
-  const pulseRow = (index) => {
-    const rows = document.querySelectorAll('.panel-card');
-    const idx = Math.max(0, Math.min(index, rows.length - 1));
-    const row = rows[idx];
-    if (!row) return;
-    row.classList.add('highlight-flash');
-    setTimeout(() => row.classList.remove('highlight-flash'), 2400);
-  };
-  const highlightAll = () => {
-    const els = document.querySelectorAll('.panel-card');
-    els.forEach((el) => el.classList.add('highlight-flash'));
-    setTimeout(() => els.forEach((el) => el.classList.remove('highlight-flash')), 2000);
-  };
-
-  const handleVoiceCommand = (text = '') => {
-    const t = String(text || '').toLowerCase().trim();
-    toast({ status: 'info', title: 'Voice command', description: `"${t}"`, duration: 2000 });
-    if (t.includes('promote all')) {
-      highlightAll();
-      return;
-    }
-    if (t.includes('demote row')) {
-      const m = t.match(/demote row (\d+)/);
-      const digits = m ? Number(m[1]) : null;
-      if (digits) {
-        pulseRow(digits - 1);
-      } else {
-        toast({ status: 'warning', title: 'No row number found' });
-      }
-      return;
-    }
-    toast({ status: 'warning', title: 'Unknown command' });
-  };
-
   const validateMainForm = () => {
     if (!agentTin.trim()) { toast({ status: 'error', title: 'Agent TIN required' }); return false; }
     if (!agentName.trim()) { toast({ status: 'error', title: 'Agent Name required' }); return false; }
@@ -504,13 +502,6 @@ export default function AppointmentPage() {
     return true;
   };
 
-  const openAddT1 = () => {
-    setEditingIndex(null);
-    setT1Sad('');
-    setT1Packing(PACKING_TYPES[0].value);
-    setT1Container('');
-    setT1ModalOpen(true);
-  };
   const openEditT1 = (idx) => {
     const row = t1s[idx];
     if (!row) return;
