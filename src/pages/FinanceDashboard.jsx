@@ -8,7 +8,6 @@ import {
 import { FaFileExport, FaDownload, FaMoneyBillWave, FaTruck, FaClipboardList, FaChartLine } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 import { useAuth } from '../context/AuthContext';
-import { exportToCSV as _exportCSV } from '../utils/exportHelpers'; // optional helper; if not present we'll include inline
 import logoUrl from '../assets/logo.png';
 
 /**
