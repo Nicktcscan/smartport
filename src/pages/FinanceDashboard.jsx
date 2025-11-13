@@ -3,7 +3,7 @@ import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   Container, Heading, Box, Stat, StatLabel, StatNumber, StatHelpText,
   SimpleGrid, HStack, VStack, Text, Button, Table, Thead, Tbody, Tr, Th, Td,
-  Spinner, useToast, Flex, Badge
+  Spinner, useToast, Flex, Badge,
 } from '@chakra-ui/react';
 import { FaFileExport, FaDownload, FaMoneyBillWave, FaTruck, FaClipboardList, FaChartLine } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
@@ -11,22 +11,12 @@ import { useAuth } from '../context/AuthContext';
 import logoUrl from '../assets/logo.png';
 
 /**
- * FinanceDashboard
+ * FinanceDashboard (fixed)
  *
- * Stats:
- * - Total SADs
- * - Total Appointments
- * - Total Tickets
- * - Total Trucks Exited (outgate rows)
- *
- * Extra:
- * - Recent tickets
- * - Recent outgate exits
- * - Top SAD discrepancies (largest absolute difference between recorded and declared)
- *
- * Notes:
- * - Uses supabase client already in your project.
- * - Styling intentionally echoes the SAD page gradients + glass feel.
+ * - Fixed Promise.all error (removed `.map(p => p.catch(...))` pattern)
+ * - Added robust error checking per Supabase response
+ * - Safer realtime subscription cleanup
+ * - Same UI as previous: stats + recent tickets/outgates + top discrepancies
  */
 
 function exportToCSV(rows = [], filename = 'export.csv') {
@@ -82,19 +72,24 @@ export default function FinanceDashboard() {
     const fetchAll = async () => {
       setLoading(true);
       try {
-        // counts
-        const [{ count: sadCount }, { count: apptCount }, { count: ticketCount }, { count: outgateCount }] = await Promise.all([
+        // Run the 4 count queries in parallel and handle results individually
+        const [
+          sadRes,
+          apptRes,
+          ticketRes,
+          outgateRes
+        ] = await Promise.all([
           supabase.from('sad_declarations').select('sad_no', { head: true, count: 'exact' }),
           supabase.from('appointments').select('id', { head: true, count: 'exact' }),
           supabase.from('tickets').select('id', { head: true, count: 'exact' }),
           supabase.from('outgate').select('id', { head: true, count: 'exact' }),
-        ].map(p => p.catch(e => ({ error: e })))); // avoid throwing all if one fails
+        ]);
 
         if (mountedRef.current) {
-          setTotalSADs(Number(sadCount || 0));
-          setTotalAppointments(Number(apptCount || 0));
-          setTotalTickets(Number(ticketCount || 0));
-          setTotalTrucksExited(Number(outgateCount || 0));
+          setTotalSADs(Number(sadRes?.count ?? 0));
+          setTotalAppointments(Number(apptRes?.count ?? 0));
+          setTotalTickets(Number(ticketRes?.count ?? 0));
+          setTotalTrucksExited(Number(outgateRes?.count ?? 0));
         }
 
         // recent tickets (top 10 latest)
@@ -106,6 +101,7 @@ export default function FinanceDashboard() {
 
         if (tErr) {
           console.warn('Recent tickets fetch failed', tErr);
+          if (mountedRef.current) setRecentTickets([]);
         } else if (mountedRef.current) {
           setRecentTickets(ticketRows || []);
         }
@@ -119,6 +115,7 @@ export default function FinanceDashboard() {
 
         if (oErr) {
           console.warn('Recent outgates fetch failed', oErr);
+          if (mountedRef.current) setRecentOutgates([]);
         } else if (mountedRef.current) {
           setRecentOutgates(outRows || []);
         }
@@ -131,6 +128,7 @@ export default function FinanceDashboard() {
 
         if (sErr) {
           console.warn('SADs fetch failed', sErr);
+          if (mountedRef.current) setSads([]);
         } else if (mountedRef.current) {
           setSads(Array.isArray(sadsData) ? sadsData : []);
         }
@@ -144,41 +142,74 @@ export default function FinanceDashboard() {
 
     fetchAll();
 
-    // real-time subscriptions (best-effort): update counts when tables change
-    let chanSad, chanTickets, chanOutgate, chanAppts;
+    // realtime subscriptions (best-effort)
+    const subs = [];
     try {
       if (supabase.channel) {
-        chanSad = supabase.channel('finance:sad_declarations')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, () => {
-            // small re-fetch
-            supabase.from('sad_declarations').select('sad_no', { head: true, count: 'exact' }).then(r => setTotalSADs(Number(r.count || 0)));
-            supabase.from('sad_declarations').select('sad_no, declared_weight, total_recorded_weight, status, created_at').then(r => { if (!r.error) setSads(r.data || []); });
-          }).subscribe();
+        subs.push(
+          supabase.channel('finance:sad_declarations')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, () => {
+              supabase.from('sad_declarations').select('sad_no', { head: true, count: 'exact' }).then((r) => {
+                if (!r?.error && mountedRef.current) setTotalSADs(Number(r.count || 0));
+              }).catch(() => {});
+              supabase.from('sad_declarations').select('sad_no, declared_weight, total_recorded_weight, status, created_at').then((r) => {
+                if (!r?.error && mountedRef.current) setSads(r.data || []);
+              }).catch(() => {});
+            }).subscribe()
+        );
 
-        chanTickets = supabase.channel('finance:tickets')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-            supabase.from('tickets').select('id', { head: true, count: 'exact' }).then(r => setTotalTickets(Number(r.count || 0)));
-            supabase.from('tickets').select('ticket_no, gnsw_truck_no, sad_no, net, gross, tare, date, status, ticket_id').order('date', { ascending: false }).limit(10).then(r => { if (!r.error) setRecentTickets(r.data || []); });
-          }).subscribe();
+        subs.push(
+          supabase.channel('finance:tickets')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+              supabase.from('tickets').select('id', { head: true, count: 'exact' }).then((r) => {
+                if (!r?.error && mountedRef.current) setTotalTickets(Number(r.count || 0));
+              }).catch(() => {});
+              supabase.from('tickets').select('ticket_no, gnsw_truck_no, sad_no, net, gross, tare, date, status, ticket_id').order('date', { ascending: false }).limit(10)
+                .then((r) => { if (!r?.error && mountedRef.current) setRecentTickets(r.data || []); }).catch(() => {});
+            }).subscribe()
+        );
 
-        chanOutgate = supabase.channel('finance:outgate')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, () => {
-            supabase.from('outgate').select('id', { head: true, count: 'exact' }).then(r => setTotalTrucksExited(Number(r.count || 0)));
-            supabase.from('outgate').select('ticket_no, vehicle_number, net, gross, tare, date, created_at').order('created_at', { ascending: false }).limit(10).then(r => { if (!r.error) setRecentOutgates(r.data || []); });
-          }).subscribe();
+        subs.push(
+          supabase.channel('finance:outgate')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, () => {
+              supabase.from('outgate').select('id', { head: true, count: 'exact' }).then((r) => {
+                if (!r?.error && mountedRef.current) setTotalTrucksExited(Number(r.count || 0));
+              }).catch(() => {});
+              supabase.from('outgate').select('ticket_no, vehicle_number, net, gross, tare, date, created_at').order('created_at', { ascending: false }).limit(10)
+                .then((r) => { if (!r?.error && mountedRef.current) setRecentOutgates(r.data || []); }).catch(() => {});
+            }).subscribe()
+        );
 
-        chanAppts = supabase.channel('finance:appointments')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, () => {
-            supabase.from('appointments').select('id', { head: true, count: 'exact' }).then(r => setTotalAppointments(Number(r.count || 0)));
-          }).subscribe();
+        subs.push(
+          supabase.channel('finance:appointments')
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, () => {
+              supabase.from('appointments').select('id', { head: true, count: 'exact' }).then((r) => {
+                if (!r?.error && mountedRef.current) setTotalAppointments(Number(r.count || 0));
+              }).catch(() => {});
+            }).subscribe()
+        );
+      } else {
+        // fallback older subscribe API (best-effort)
+        try {
+          const s1 = supabase.from('tickets').on('*', () => {
+            supabase.from('tickets').select('id', { head: true, count: 'exact' }).then((r) => { if (!r?.error && mountedRef.current) setTotalTickets(Number(r.count || 0)); }).catch(() => {});
+          }).subscribe?.();
+          if (s1) subs.push(s1);
+        } catch (e) { /* ignore */ }
       }
-    } catch (e) { /* ignore realtime errors */ }
+    } catch (e) {
+      // ignore realtime creation errors
+    }
 
     return () => {
-      try { if (chanSad && supabase.removeChannel) supabase.removeChannel(chanSad).catch(() => {}); } catch (e) {}
-      try { if (chanTickets && supabase.removeChannel) supabase.removeChannel(chanTickets).catch(() => {}); } catch (e) {}
-      try { if (chanOutgate && supabase.removeChannel) supabase.removeChannel(chanOutgate).catch(() => {}); } catch (e) {}
-      try { if (chanAppts && supabase.removeChannel) supabase.removeChannel(chanAppts).catch(() => {}); } catch (e) {}
+      try {
+        // remove channels/subscriptions if api available
+        if (Array.isArray(subs) && subs.length && supabase.removeChannel) {
+          subs.forEach((ch) => {
+            try { supabase.removeChannel(ch).catch(() => {}); } catch (er) { /* ignore */ }
+          });
+        }
+      } catch (e) { /* ignore */ }
     };
   }, [toast]);
 
@@ -192,7 +223,7 @@ export default function FinanceDashboard() {
         const pct = declared ? (diff / declared) * 100 : null;
         return { ...s, declared, recorded, diff, pct: pct === null ? null : Number(pct.toFixed(2)), absDiff: Math.abs(diff) };
       })
-      .filter(s => s.declared || s.recorded)
+      .filter(s => (s.declared || s.recorded))
       .sort((a, b) => b.absDiff - a.absDiff)
       .slice(0, 8);
   }, [sads]);
@@ -224,7 +255,6 @@ export default function FinanceDashboard() {
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
   };
 
-  // Small UI CSS inline block to match SAD page aesthetics
   const pageCss = `
     :root{
       --muted: rgba(7,17,25,0.55);
@@ -238,7 +268,7 @@ export default function FinanceDashboard() {
   `;
 
   return (
-    <Container maxW="9xl" className="finance-root">
+    <Container maxW="9xl" className="finance-root" py={6}>
       <style>{pageCss}</style>
 
       <Flex align="center" gap={4} mb={6}>
@@ -294,7 +324,6 @@ export default function FinanceDashboard() {
           </SimpleGrid>
 
           <SimpleGrid columns={{ base: 1, md: 2 }} spacing={6}>
-            {/* Top Discrepancies */}
             <Box className="glass">
               <Flex align="center" justify="space-between" mb={3}>
                 <Heading size="sm">Top SAD Discrepancies</Heading>
@@ -304,7 +333,7 @@ export default function FinanceDashboard() {
               {topDiscrepancies.length === 0 ? (
                 <Text color="gray.500">No notable discrepancies found.</Text>
               ) : (
-                <Table size="sm" variant="simple">
+                <Table size="sm">
                   <Thead>
                     <Tr>
                       <Th>SAD</Th>
@@ -329,7 +358,6 @@ export default function FinanceDashboard() {
               )}
             </Box>
 
-            {/* Recent Activity Tables */}
             <VStack spacing={6} align="stretch">
               <Box className="glass">
                 <Flex align="center" justify="space-between" mb={3}>
@@ -340,7 +368,7 @@ export default function FinanceDashboard() {
                 {recentTickets.length === 0 ? (
                   <Text color="gray.500">No recent tickets</Text>
                 ) : (
-                  <Table size="sm" variant="simple">
+                  <Table size="sm">
                     <Thead>
                       <Tr>
                         <Th>Ticket</Th>
@@ -377,7 +405,7 @@ export default function FinanceDashboard() {
                 {recentOutgates.length === 0 ? (
                   <Text color="gray.500">No recent exits</Text>
                 ) : (
-                  <Table size="sm" variant="simple">
+                  <Table size="sm">
                     <Thead>
                       <Tr>
                         <Th>Ticket</Th>
@@ -402,7 +430,6 @@ export default function FinanceDashboard() {
             </VStack>
           </SimpleGrid>
 
-          {/* Footer / quick actions */}
           <Box mt={6} p={4} className="glass">
             <Flex align="center" gap={3} wrap="wrap">
               <Text fontWeight="semibold">Quick Actions:</Text>
