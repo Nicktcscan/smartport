@@ -11,14 +11,14 @@ import { useAuth } from '../context/AuthContext';
 import logoUrl from '../assets/logo.png';
 
 /**
- * FinanceDashboard (fixed)
+ * FinanceDashboard — dedupe fixes
  *
- * - Fixed Promise.all error (removed `.map(p => p.catch(...))` pattern)
- * - Added robust error checking per Supabase response
- * - Safer realtime subscription cleanup
- * - Same UI as previous: stats + recent tickets/outgates + top discrepancies
+ * Changes:
+ * - Added robust de-duplication for fetched rows (tickets, outgates, sads) to remove duplicate rows.
+ * - Kept previous fixes for Promise handling & realtime subscription safety.
  */
 
+/* Simple CSV exporter */
 function exportToCSV(rows = [], filename = 'export.csv') {
   if (!rows || rows.length === 0) return;
   const headers = Object.keys(rows[0]);
@@ -47,6 +47,28 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   URL.revokeObjectURL(url);
 }
 
+/* Dedupe helper — preserves first occurrence order */
+const dedupeBy = (arr = [], keyFn) => {
+  if (!Array.isArray(arr)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of arr) {
+    const k = keyFn(item);
+    if (k == null) {
+      // fallback to JSON string if no key
+      const s = JSON.stringify(item);
+      if (seen.has(s)) continue;
+      seen.add(s);
+      out.push(item);
+    } else {
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(item);
+    }
+  }
+  return out;
+};
+
 export default function FinanceDashboard() {
   const toast = useToast();
   const { user } = useAuth() || {};
@@ -72,13 +94,8 @@ export default function FinanceDashboard() {
     const fetchAll = async () => {
       setLoading(true);
       try {
-        // Run the 4 count queries in parallel and handle results individually
-        const [
-          sadRes,
-          apptRes,
-          ticketRes,
-          outgateRes
-        ] = await Promise.all([
+        // Counts (head:true, count:'exact')
+        const [sadRes, apptRes, ticketRes, outgateRes] = await Promise.all([
           supabase.from('sad_declarations').select('sad_no', { head: true, count: 'exact' }),
           supabase.from('appointments').select('id', { head: true, count: 'exact' }),
           supabase.from('tickets').select('id', { head: true, count: 'exact' }),
@@ -92,7 +109,7 @@ export default function FinanceDashboard() {
           setTotalTrucksExited(Number(outgateRes?.count ?? 0));
         }
 
-        // recent tickets (top 10 latest)
+        // Recent tickets — fetch last 10, then dedupe by ticket_id or ticket_no
         const { data: ticketRows, error: tErr } = await supabase
           .from('tickets')
           .select('ticket_no, gnsw_truck_no, sad_no, net, gross, tare, date, status, ticket_id')
@@ -103,10 +120,11 @@ export default function FinanceDashboard() {
           console.warn('Recent tickets fetch failed', tErr);
           if (mountedRef.current) setRecentTickets([]);
         } else if (mountedRef.current) {
-          setRecentTickets(ticketRows || []);
+          const dedupedTickets = dedupeBy(ticketRows || [], (r) => r.ticket_id || r.ticket_no);
+          setRecentTickets(dedupedTickets);
         }
 
-        // recent outgates (last 10)
+        // Recent outgates — fetch last 10, dedupe by ticket_no or vehicle_number + date
         const { data: outRows, error: oErr } = await supabase
           .from('outgate')
           .select('ticket_no, vehicle_number, net, gross, tare, date, created_at')
@@ -117,10 +135,11 @@ export default function FinanceDashboard() {
           console.warn('Recent outgates fetch failed', oErr);
           if (mountedRef.current) setRecentOutgates([]);
         } else if (mountedRef.current) {
-          setRecentOutgates(outRows || []);
+          const dedupedOuts = dedupeBy(outRows || [], (r) => r.ticket_no || `${r.vehicle_number}::${r.created_at}`);
+          setRecentOutgates(dedupedOuts);
         }
 
-        // fetch SADs for discrepancy table
+        // SADs for discrepancy calculation — dedupe by sad_no
         const { data: sadsData, error: sErr } = await supabase
           .from('sad_declarations')
           .select('sad_no, declared_weight, total_recorded_weight, status, created_at')
@@ -130,7 +149,8 @@ export default function FinanceDashboard() {
           console.warn('SADs fetch failed', sErr);
           if (mountedRef.current) setSads([]);
         } else if (mountedRef.current) {
-          setSads(Array.isArray(sadsData) ? sadsData : []);
+          const dedupedSads = dedupeBy(sadsData || [], (s) => s.sad_no);
+          setSads(Array.isArray(dedupedSads) ? dedupedSads : []);
         }
       } catch (err) {
         console.error('fetchAll error', err);
@@ -142,57 +162,75 @@ export default function FinanceDashboard() {
 
     fetchAll();
 
-    // realtime subscriptions (best-effort)
+    // Realtime subscriptions — update counts and lists, ensure dedupe when applying results
     const subs = [];
     try {
       if (supabase.channel) {
         subs.push(
           supabase.channel('finance:sad_declarations')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, () => {
-              supabase.from('sad_declarations').select('sad_no', { head: true, count: 'exact' }).then((r) => {
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, async () => {
+              try {
+                const r = await supabase.from('sad_declarations').select('sad_no', { head: true, count: 'exact' });
                 if (!r?.error && mountedRef.current) setTotalSADs(Number(r.count || 0));
-              }).catch(() => {});
-              supabase.from('sad_declarations').select('sad_no, declared_weight, total_recorded_weight, status, created_at').then((r) => {
-                if (!r?.error && mountedRef.current) setSads(r.data || []);
-              }).catch(() => {});
+              } catch (_) {}
+              try {
+                const r2 = await supabase.from('sad_declarations').select('sad_no, declared_weight, total_recorded_weight, status, created_at').order('created_at', { ascending: false });
+                if (!r2?.error && mountedRef.current) {
+                  setSads(dedupeBy(r2.data || [], (s) => s.sad_no));
+                }
+              } catch (_) {}
             }).subscribe()
         );
 
         subs.push(
           supabase.channel('finance:tickets')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-              supabase.from('tickets').select('id', { head: true, count: 'exact' }).then((r) => {
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, async () => {
+              try {
+                const r = await supabase.from('tickets').select('id', { head: true, count: 'exact' });
                 if (!r?.error && mountedRef.current) setTotalTickets(Number(r.count || 0));
-              }).catch(() => {});
-              supabase.from('tickets').select('ticket_no, gnsw_truck_no, sad_no, net, gross, tare, date, status, ticket_id').order('date', { ascending: false }).limit(10)
-                .then((r) => { if (!r?.error && mountedRef.current) setRecentTickets(r.data || []); }).catch(() => {});
+              } catch (_) {}
+              try {
+                const r2 = await supabase.from('tickets').select('ticket_no, gnsw_truck_no, sad_no, net, gross, tare, date, status, ticket_id').order('date', { ascending: false }).limit(10);
+                if (!r2?.error && mountedRef.current) {
+                  setRecentTickets(dedupeBy(r2.data || [], (t) => t.ticket_id || t.ticket_no));
+                }
+              } catch (_) {}
             }).subscribe()
         );
 
         subs.push(
           supabase.channel('finance:outgate')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, () => {
-              supabase.from('outgate').select('id', { head: true, count: 'exact' }).then((r) => {
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, async () => {
+              try {
+                const r = await supabase.from('outgate').select('id', { head: true, count: 'exact' });
                 if (!r?.error && mountedRef.current) setTotalTrucksExited(Number(r.count || 0));
-              }).catch(() => {});
-              supabase.from('outgate').select('ticket_no, vehicle_number, net, gross, tare, date, created_at').order('created_at', { ascending: false }).limit(10)
-                .then((r) => { if (!r?.error && mountedRef.current) setRecentOutgates(r.data || []); }).catch(() => {});
+              } catch (_) {}
+              try {
+                const r2 = await supabase.from('outgate').select('ticket_no, vehicle_number, net, gross, tare, date, created_at').order('created_at', { ascending: false }).limit(10);
+                if (!r2?.error && mountedRef.current) {
+                  setRecentOutgates(dedupeBy(r2.data || [], (o) => o.ticket_no || `${o.vehicle_number}::${o.created_at}`));
+                }
+              } catch (_) {}
             }).subscribe()
         );
 
         subs.push(
           supabase.channel('finance:appointments')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, () => {
-              supabase.from('appointments').select('id', { head: true, count: 'exact' }).then((r) => {
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, async () => {
+              try {
+                const r = await supabase.from('appointments').select('id', { head: true, count: 'exact' });
                 if (!r?.error && mountedRef.current) setTotalAppointments(Number(r.count || 0));
-              }).catch(() => {});
+              } catch (_) {}
             }).subscribe()
         );
       } else {
         // fallback older subscribe API (best-effort)
         try {
-          const s1 = supabase.from('tickets').on('*', () => {
-            supabase.from('tickets').select('id', { head: true, count: 'exact' }).then((r) => { if (!r?.error && mountedRef.current) setTotalTickets(Number(r.count || 0)); }).catch(() => {});
+          const s1 = supabase.from('tickets').on('*', async () => {
+            try {
+              const r = await supabase.from('tickets').select('id', { head: true, count: 'exact' });
+              if (!r?.error && mountedRef.current) setTotalTickets(Number(r.count || 0));
+            } catch (_) {}
           }).subscribe?.();
           if (s1) subs.push(s1);
         } catch (e) { /* ignore */ }
@@ -203,7 +241,6 @@ export default function FinanceDashboard() {
 
     return () => {
       try {
-        // remove channels/subscriptions if api available
         if (Array.isArray(subs) && subs.length && supabase.removeChannel) {
           subs.forEach((ch) => {
             try { supabase.removeChannel(ch).catch(() => {}); } catch (er) { /* ignore */ }
@@ -214,8 +251,8 @@ export default function FinanceDashboard() {
   }, [toast]);
 
   const topDiscrepancies = useMemo(() => {
-    if (!Array.isArray(sads)) return [];
-    return sads
+    const arr = Array.isArray(sads) ? sads : [];
+    return arr
       .map((s) => {
         const declared = Number(s.declared_weight || 0);
         const recorded = Number(s.total_recorded_weight || 0);
@@ -416,7 +453,7 @@ export default function FinanceDashboard() {
                     </Thead>
                     <Tbody>
                       {recentOutgates.map((o, i) => (
-                        <Tr key={i}>
+                        <Tr key={o.ticket_no || i}>
                           <Td>{o.ticket_no || '—'}</Td>
                           <Td>{o.vehicle_number || '—'}</Td>
                           <Td isNumeric>{Number(o.net ?? o.total_weight ?? 0).toLocaleString()}</Td>
