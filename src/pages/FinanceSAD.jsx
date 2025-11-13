@@ -9,28 +9,24 @@ import {
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
 } from '@chakra-ui/react';
 import {
-  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
+  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaFilePdf, FaCheck, FaEye, FaFileAlt, FaDownload as FaDownloadIcon,
 } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
 import logoUrl from '../assets/logo.png';
+import { useAuth } from '../context/AuthContext';
 
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 
 // ---------- Regime configuration ----------
-// Database now stores regime codes directly: IM4 (import), EX1 (export), IM7 (warehousing)
 const REGIME_OPTIONS = ['IM4', 'EX1', 'IM7'];
-
-// Map code -> human label
 const REGIME_LABEL_MAP = {
   IM4: 'Import',
   EX1: 'Export',
   IM7: 'Warehousing',
 };
-
-// Map common word inputs -> code (helps NL search)
 const WORD_TO_CODE = {
   import: 'IM4',
   export: 'EX1',
@@ -94,10 +90,12 @@ async function runInBatches(items = [], batchSize = 20, fn) {
 
 export default function SADDeclaration() {
   const toast = useToast();
+  const { user } = useAuth() || {};
+  const isFinance = user?.role === 'finance';
 
   // form
   const [sadNo, setSadNo] = useState('');
-  const [regime, setRegime] = useState(''); // will hold codes like IM4/EX1/IM7
+  const [regime, setRegime] = useState(''); // codes like IM4/EX1/IM7
   const [declaredWeight, setDeclaredWeight] = useState('');
   const [docs, setDocs] = useState([]);
 
@@ -126,12 +124,11 @@ export default function SADDeclaration() {
   const [statusFilter, setStatusFilter] = useState('');
   const [regimeFilter, setRegimeFilter] = useState('');
   const [sortBy, setSortBy] = useState('created_at');
-  // Ascending is default per your request (keeps newest-on-top via existing inversion logic)
   const [sortDir, setSortDir] = useState('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
-  // edit / confirmations
+  // edit / confirmations (kept for non-finance UI; we will not render them for finance)
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editModalData, setEditModalData] = useState(null);
   const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
@@ -170,7 +167,6 @@ export default function SADDeclaration() {
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
-      // when talking to DB, regime values are the codes (IM4/EX1/IM7)
       let q = supabase.from('sad_declarations').select('*').order('created_at', { ascending: false });
       if (filter) {
         if (filter.status) q = q.eq('status', filter.status);
@@ -345,6 +341,10 @@ export default function SADDeclaration() {
 
   // create SAD - now storing regime as code (IM4/EX1/IM7)
   const handleCreateSAD = async (e) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot register new SADs.', status: 'warning' });
+      return;
+    }
     if (e && e.preventDefault) e.preventDefault();
     if (!sadNo || !declaredWeight) {
       toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
@@ -356,7 +356,6 @@ export default function SADDeclaration() {
       const docRecords = await uploadDocs(sadNo, docs);
       const trimmedSad = String(sadNo).trim();
 
-      // regime should already be a code (IM4/EX1/IM7). If user accidentally typed a word, convert it.
       let regimeCode = regime;
       if (!regimeCode && typeof regime === 'string') {
         const low = regime.trim().toLowerCase();
@@ -453,6 +452,10 @@ export default function SADDeclaration() {
 
   // edit modal open
   const openEditModal = (sad) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot edit SADs.', status: 'warning' });
+      return;
+    }
     setEditModalData({
       original_sad_no: sad.sad_no,
       sad_no: sad.sad_no,
@@ -466,6 +469,13 @@ export default function SADDeclaration() {
 
   // save edit modal (handles renaming and regime/code changes)
   const saveEditModal = async () => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot edit SADs.', status: 'warning' });
+      setConfirmSaveOpen(false);
+      closeEditModal();
+      return;
+    }
+
     if (!editModalData || !editModalData.original_sad_no) return;
     const originalSad = editModalData.original_sad_no;
     const newSad = String(editModalData.sad_no ?? '').trim();
@@ -552,6 +562,10 @@ export default function SADDeclaration() {
 
   // update status quick action
   const updateSadStatus = async (sad_no, newStatus) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot change SAD status.', status: 'warning' });
+      return;
+    }
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
@@ -566,14 +580,25 @@ export default function SADDeclaration() {
     }
   };
 
-  const requestMarkCompleted = (sad_no) => { setCompleteTarget(sad_no); setCompleteOpen(true); };
+  const requestMarkCompleted = (sad_no) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot mark SADs completed.', status: 'warning' });
+      return;
+    }
+    setCompleteTarget(sad_no); setCompleteOpen(true);
+  };
   const confirmMarkCompleted = async () => {
+    if (isFinance) { setCompleteOpen(false); setCompleteTarget(null); toast({ title: 'Permission denied', status: 'warning' }); return; }
     const target = completeTarget; setCompleteOpen(false); setCompleteTarget(null);
     if (!target) return;
     try { setLoading(true); await updateSadStatus(target, 'Completed'); } catch (e) {} finally { setLoading(false); }
   };
 
   const recalcTotalForSad = async (sad_no) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot recalculate totals.', status: 'warning' });
+      return;
+    }
     try {
       const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
       const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
@@ -590,6 +615,11 @@ export default function SADDeclaration() {
   };
 
   const archiveSadConfirmed = async (sad_no) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot archive SADs.', status: 'warning' });
+      setArchiveOpen(false); setArchiveTarget(null);
+      return;
+    }
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
       if (error) throw error;
@@ -640,7 +670,6 @@ export default function SADDeclaration() {
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
-      // If user typed a regime code (IM4/EX1/IM7) or a word like "import", map to code
       if (!filter.sad_no && !filter.status) {
         const up = q.toUpperCase();
         if (REGIME_OPTIONS.includes(up)) {
@@ -648,7 +677,6 @@ export default function SADDeclaration() {
         } else if (WORD_TO_CODE[lower]) {
           filter.regime = WORD_TO_CODE[lower];
         } else {
-          // fallback: let fetchSADs use ilike — but db stores codes, so this probably won't match; still, set regimeFilter for UI filtering
           filter.regime = null;
         }
       }
@@ -967,47 +995,58 @@ export default function SADDeclaration() {
       </div>
 
       {/* Inline create form */}
-      <Box as="form" onSubmit={(e) => { e.preventDefault(); handleCreateSAD(); }} bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
-        <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
-        <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
-          <FormControl>
-            <FormLabel>SAD Number</FormLabel>
-            <Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} placeholder="e.g. 25" />
-          </FormControl>
+      {!isFinance ? (
+        <Box as="form" onSubmit={(e) => { e.preventDefault(); handleCreateSAD(); }} bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+          <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
+          <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
+            <FormControl>
+              <FormLabel>SAD Number</FormLabel>
+              <Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} placeholder="e.g. 25" />
+            </FormControl>
 
-          <FormControl>
-            <FormLabel>Regime</FormLabel>
-            <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
-              {REGIME_OPTIONS.map(code => (
-                <option key={code} value={code}>
-                  {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
-                </option>
-              ))}
-            </Select>
-          </FormControl>
+            <FormControl>
+              <FormLabel>Regime</FormLabel>
+              <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
+                {REGIME_OPTIONS.map(code => (
+                  <option key={code} value={code}>
+                    {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
+                  </option>
+                ))}
+              </Select>
+            </FormControl>
 
-          <FormControl>
-            <FormLabel>Declared Weight (kg)</FormLabel>
-            <Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} placeholder="e.g. 100000" />
-          </FormControl>
+            <FormControl>
+              <FormLabel>Declared Weight (kg)</FormLabel>
+              <Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} placeholder="e.g. 100000" />
+            </FormControl>
 
-          <FormControl>
-            <FormLabel>Attach Docs</FormLabel>
-            <Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} />
-            <Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text>
-          </FormControl>
-        </SimpleGrid>
+            <FormControl>
+              <FormLabel>Attach Docs</FormLabel>
+              <Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} />
+              <Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text>
+            </FormControl>
+          </SimpleGrid>
 
-        <HStack mt={3}>
-          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button">Register SAD</Button>
-          <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
+          <HStack mt={3}>
+            <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button">Register SAD</Button>
+            <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
 
-          <Box ml="auto" display="flex" gap={2}>
-            <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV} type="button">Export filtered CSV</Button>
-            <Button size="sm" variant="ghost" onClick={async () => { try { await handleManualBackupToStorage(); } catch (e) {} }} type="button">Backup to storage</Button>
-          </Box>
-        </HStack>
-      </Box>
+            <Box ml="auto" display="flex" gap={2}>
+              <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV} type="button">Export filtered CSV</Button>
+              <Button size="sm" variant="ghost" onClick={async () => { try { await handleManualBackupToStorage(); } catch (e) {} }} type="button">Backup to storage</Button>
+            </Box>
+          </HStack>
+        </Box>
+      ) : (
+        <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+          <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
+          <Text color="gray.600">Your account (Finance) is restricted from registering or editing SADs. You may view SADs, generate reports and export data.</Text>
+          <HStack mt={3} ml="auto" justify="flex-end">
+            <Button size="sm" leftIcon={<FaFileExport />} onClick={handleExportFilteredCSV}>Export filtered CSV</Button>
+            <Button size="sm" variant="ghost" onClick={async () => { try { await handleManualBackupToStorage(); } catch (e) {} }}>Backup to storage</Button>
+          </HStack>
+        </Box>
+      )}
 
       {/* Filters */}
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
@@ -1108,14 +1147,18 @@ export default function SADDeclaration() {
                             <MenuList>
                               <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
                               <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
-                              <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>
-                              <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
-                              {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
+
+                              {/* Edit / admin actions hidden from finance */}
+                              {!isFinance && <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>}
+                              {!isFinance && <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>}
+                              {!isFinance && readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
+
                               <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
-                              <MenuDivider />
-                              <MenuItem icon={<FaTrashAlt />} onClick={() => { setArchiveTarget(s.sad_no); setArchiveOpen(true); }}>Archive SAD</MenuItem>
+
+                              {!isFinance && <MenuDivider />}
+                              {!isFinance && <MenuItem icon={<FaTrashAlt />} onClick={() => { setArchiveTarget(s.sad_no); setArchiveOpen(true); }}>Archive SAD</MenuItem>}
                             </MenuList>
                           </Menu>
                         </HStack>
@@ -1214,96 +1257,101 @@ export default function SADDeclaration() {
         </ModalContent>
       </Modal>
 
-      {/* Edit modal */}
-      <Modal isOpen={editModalOpen} onClose={closeEditModal} size="md" isCentered>
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Edit SAD</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            {editModalData ? (
-              <Box>
-                <FormControl mb={3}>
-                  <FormLabel>SAD Number</FormLabel>
-                  <Input value={editModalData.sad_no} onChange={(e) => setEditModalData(d => ({ ...d, sad_no: e.target.value }))} />
-                  <Text fontSize="xs" color="gray.500">Changing SAD number will update child tickets and generated reports (best-effort).</Text>
-                </FormControl>
+      {/* Edit + Confirm Save + Archive + Complete modals/alerts -> only render for non-finance */}
+      {!isFinance && (
+        <>
+          {/* Edit modal */}
+          <Modal isOpen={editModalOpen} onClose={closeEditModal} size="md" isCentered>
+            <ModalOverlay />
+            <ModalContent>
+              <ModalHeader>Edit SAD</ModalHeader>
+              <ModalCloseButton />
+              <ModalBody>
+                {editModalData ? (
+                  <Box>
+                    <FormControl mb={3}>
+                      <FormLabel>SAD Number</FormLabel>
+                      <Input value={editModalData.sad_no} onChange={(e) => setEditModalData(d => ({ ...d, sad_no: e.target.value }))} />
+                      <Text fontSize="xs" color="gray.500">Changing SAD number will update child tickets and generated reports (best-effort).</Text>
+                    </FormControl>
 
-                <FormControl mb={3}>
-                  <FormLabel>Regime</FormLabel>
-                  <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
-                    <option value="">Select regime</option>
-                    {REGIME_OPTIONS.map(code => (
-                      <option key={code} value={code}>
-                        {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
-                      </option>
-                    ))}
-                  </Select>
-                </FormControl>
+                    <FormControl mb={3}>
+                      <FormLabel>Regime</FormLabel>
+                      <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
+                        <option value="">Select regime</option>
+                        {REGIME_OPTIONS.map(code => (
+                          <option key={code} value={code}>
+                            {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
+                          </option>
+                        ))}
+                      </Select>
+                    </FormControl>
 
-                <FormControl mb={3}>
-                  <FormLabel>Declared Weight (kg)</FormLabel>
-                  <Input type="text" value={formatNumber(editModalData.declared_weight)} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: parseNumberString(e.target.value) }))} />
-                </FormControl>
+                    <FormControl mb={3}>
+                      <FormLabel>Declared Weight (kg)</FormLabel>
+                      <Input type="text" value={formatNumber(editModalData.declared_weight)} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: parseNumberString(e.target.value) }))} />
+                    </FormControl>
 
-                <FormControl mb={3}>
-                  <FormLabel>Status</FormLabel>
-                  <Select value={editModalData.status} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))}>
-                    {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
-                  </Select>
-                </FormControl>
-              </Box>
-            ) : <Text>Loading...</Text>}
-          </ModalBody>
+                    <FormControl mb={3}>
+                      <FormLabel>Status</FormLabel>
+                      <Select value={editModalData.status} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))}>
+                        {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
+                      </Select>
+                    </FormControl>
+                  </Box>
+                ) : <Text>Loading...</Text>}
+              </ModalBody>
 
-          <ModalFooter>
-            <Button variant="ghost" onClick={closeEditModal} type="button">Cancel</Button>
-            <Button colorScheme="blue" ml={3} onClick={() => setConfirmSaveOpen(true)} type="button">Save</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+              <ModalFooter>
+                <Button variant="ghost" onClick={closeEditModal} type="button">Cancel</Button>
+                <Button colorScheme="blue" ml={3} onClick={() => setConfirmSaveOpen(true)} type="button">Save</Button>
+              </ModalFooter>
+            </ModalContent>
+          </Modal>
 
-      {/* Confirm Save */}
-      <AlertDialog isOpen={confirmSaveOpen} leastDestructiveRef={confirmSaveCancelRef} onClose={() => setConfirmSaveOpen(false)}>
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">Confirm Save</AlertDialogHeader>
-            <AlertDialogBody>Are you sure you want to save changes to SAD {editModalData?.original_sad_no}?</AlertDialogBody>
-            <AlertDialogFooter>
-              <Button ref={confirmSaveCancelRef} onClick={() => setConfirmSaveOpen(false)} type="button">Cancel</Button>
-              <Button colorScheme="red" onClick={saveEditModal} ml={3} type="button">Yes, Save</Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
+          {/* Confirm Save */}
+          <AlertDialog isOpen={confirmSaveOpen} leastDestructiveRef={confirmSaveCancelRef} onClose={() => setConfirmSaveOpen(false)}>
+            <AlertDialogOverlay>
+              <AlertDialogContent>
+                <AlertDialogHeader fontSize="lg" fontWeight="bold">Confirm Save</AlertDialogHeader>
+                <AlertDialogBody>Are you sure you want to save changes to SAD {editModalData?.original_sad_no}?</AlertDialogBody>
+                <AlertDialogFooter>
+                  <Button ref={confirmSaveCancelRef} onClick={() => setConfirmSaveOpen(false)} type="button">Cancel</Button>
+                  <Button colorScheme="red" onClick={saveEditModal} ml={3} type="button">Yes, Save</Button>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialogOverlay>
+          </AlertDialog>
 
-      {/* Archive confirm */}
-      <AlertDialog isOpen={archiveOpen} leastDestructiveRef={archiveCancelRef} onClose={() => setArchiveOpen(false)}>
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">Archive SAD</AlertDialogHeader>
-            <AlertDialogBody>Are you sure you want to archive SAD {archiveTarget}? Archiving marks it as Archived (soft).</AlertDialogBody>
-            <AlertDialogFooter>
-              <Button ref={archiveCancelRef} onClick={() => setArchiveOpen(false)} type="button">Cancel</Button>
-              <Button colorScheme="red" onClick={() => archiveSadConfirmed(archiveTarget)} ml={3} type="button">Archive</Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
+          {/* Archive confirm */}
+          <AlertDialog isOpen={archiveOpen} leastDestructiveRef={archiveCancelRef} onClose={() => setArchiveOpen(false)}>
+            <AlertDialogOverlay>
+              <AlertDialogContent>
+                <AlertDialogHeader fontSize="lg" fontWeight="bold">Archive SAD</AlertDialogHeader>
+                <AlertDialogBody>Are you sure you want to archive SAD {archiveTarget}? Archiving marks it as Archived (soft).</AlertDialogBody>
+                <AlertDialogFooter>
+                  <Button ref={archiveCancelRef} onClick={() => setArchiveOpen(false)} type="button">Cancel</Button>
+                  <Button colorScheme="red" onClick={() => archiveSadConfirmed(archiveTarget)} ml={3} type="button">Archive</Button>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialogOverlay>
+          </AlertDialog>
 
-      {/* Complete confirm */}
-      <AlertDialog isOpen={completeOpen} leastDestructiveRef={completeCancelRef} onClose={() => setCompleteOpen(false)}>
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">Mark as Completed</AlertDialogHeader>
-            <AlertDialogBody>Are you sure you want to mark SAD {completeTarget} as Completed? This action must be done manually.</AlertDialogBody>
-            <AlertDialogFooter>
-              <Button ref={completeCancelRef} onClick={() => setCompleteOpen(false)} type="button">Cancel</Button>
-              <Button colorScheme="green" onClick={confirmMarkCompleted} ml={3} type="button">Yes, mark Completed</Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
+          {/* Complete confirm */}
+          <AlertDialog isOpen={completeOpen} leastDestructiveRef={completeCancelRef} onClose={() => setCompleteOpen(false)}>
+            <AlertDialogOverlay>
+              <AlertDialogContent>
+                <AlertDialogHeader fontSize="lg" fontWeight="bold">Mark as Completed</AlertDialogHeader>
+                <AlertDialogBody>Are you sure you want to mark SAD {completeTarget} as Completed? This action must be done manually.</AlertDialogBody>
+                <AlertDialogFooter>
+                  <Button ref={completeCancelRef} onClick={() => setCompleteOpen(false)} type="button">Cancel</Button>
+                  <Button colorScheme="green" onClick={confirmMarkCompleted} ml={3} type="button">Yes, mark Completed</Button>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialogOverlay>
+          </AlertDialog>
+        </>
+      )}
 
       {/* Docs modal */}
       <Modal isOpen={docsModal.open} onClose={() => setDocsModal({ open: false, docs: [], sad_no: null })} size="lg" scrollBehavior="inside">
@@ -1327,7 +1375,7 @@ export default function SADDeclaration() {
                       <Td>
                         <HStack>
                           <Button size="xs" onClick={() => { window.open(d.url, '_blank', 'noopener'); }}>Open</Button>
-                          <IconButton size="xs" aria-label="Download" icon={<FaDownload />} onClick={() => { if (d.url) window.open(d.url, '_blank'); }} />
+                          <IconButton size="xs" aria-label="Download" icon={<FaDownloadIcon />} onClick={() => { if (d.url) window.open(d.url, '_blank'); }} />
                         </HStack>
                       </Td>
                     </Tr>
@@ -1355,38 +1403,42 @@ export default function SADDeclaration() {
         </VStack>
       </Box>
 
-      {/* Floating orb CTA */}
-      <div className="orb-cta" role="button" aria-label="New SAD" onClick={() => openOrb()}>
-        <FaPlus />
-      </div>
+      {/* Floating orb CTA (hidden for finance) */}
+      {!isFinance && (
+        <div className="orb-cta" role="button" aria-label="New SAD" onClick={() => openOrb()}>
+          <FaPlus />
+        </div>
+      )}
 
-      {/* Orb holographic modal */}
-      <Modal isOpen={orbOpen} onClose={closeOrb} isCentered size="lg" motionPreset="scale">
-        <ModalOverlay />
-        <ModalContent style={{ background: 'linear-gradient(180deg,#fff,#f8fbff)', borderRadius: 12, padding: 12 }}>
-          <ModalHeader>
-            <Flex align="center" gap={3}>
-              <Box style={{ width: 48, height: 48, borderRadius: 12, background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
-                ✨
-              </Box>
-              <Box><Text fontWeight="bold">Create New SAD</Text><Text fontSize="sm" color="gray.500">Holographic registration</Text></Box>
-            </Flex>
-          </ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-              <FormControl><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
-              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
-              <FormControl><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
-              <FormControl><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
-            </SimpleGrid>
-          </ModalBody>
-          <ModalFooter>
-            <Button variant="ghost" onClick={closeOrb}>Cancel</Button>
-            <Button colorScheme="teal" ml={3} onClick={handleCreateSAD} isLoading={loading}>Create SAD</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
+      {/* Orb holographic modal for create (only render for non-finance) */}
+      {!isFinance && (
+        <Modal isOpen={orbOpen} onClose={closeOrb} isCentered size="lg" motionPreset="scale">
+          <ModalOverlay />
+          <ModalContent style={{ background: 'linear-gradient(180deg,#fff,#f8fbff)', borderRadius: 12, padding: 12 }}>
+            <ModalHeader>
+              <Flex align="center" gap={3}>
+                <Box style={{ width: 48, height: 48, borderRadius: 12, background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
+                  ✨
+                </Box>
+                <Box><Text fontWeight="bold">Create New SAD</Text><Text fontSize="sm" color="gray.500">Holographic registration</Text></Box>
+              </Flex>
+            </ModalHeader>
+            <ModalCloseButton />
+            <ModalBody>
+              <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
+                <FormControl><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
+                <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
+                <FormControl><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
+                <FormControl><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
+              </SimpleGrid>
+            </ModalBody>
+            <ModalFooter>
+              <Button variant="ghost" onClick={closeOrb}>Cancel</Button>
+              <Button colorScheme="teal" ml={3} onClick={handleCreateSAD} isLoading={loading}>Create SAD</Button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
+      )}
     </Container>
   );
 }
