@@ -23,6 +23,8 @@ import HoldReleaseRequests from './pages/HoldReleaseRequests';
 import ManualEntry from './pages/ManualEntry';
 import WeightReports from './pages/WeightReports';
 import ExitTrucks from './pages/ExitTrucks';
+import Finance from './pages/FinanceDashboard';
+import FinanceSAD from './pages/FinanceSAD';
 
 import OutgateTicketDetails from './pages/OutgateTicketDetails';
 import OutgateSearchTickets from './pages/OutgateSearchTickets';
@@ -54,6 +56,8 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
         return <Navigate to="/outgate" replace />;
       case 'weighbridge':
         return <Navigate to="/weighbridge" replace />;
+      case 'finance':
+        return <Navigate to="/finance" replace />;
       default:
         return <Navigate to="/login" replace />;
     }
@@ -124,6 +128,8 @@ function App() {
                   <Navigate to="/weighbridge" replace />
                 ) : user.role === 'agent' ? (
                   <Navigate to="/agent" replace />
+                ) : user.role === 'finance' ? (
+                  <Navigate to="/finance" replace />
                 ) : (
                   <Navigate to="/dashboard" replace />
                 )
@@ -429,6 +435,32 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <AgentDashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/sads"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'finance']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <FinanceSAD />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/finance"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'finance']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Finance />
                     </Box>
                   </Layout>
                 </ProtectedRoute>

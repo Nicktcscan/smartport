@@ -72,6 +72,12 @@ const agentNavItems = [
   { path: '/agent', label: 'Reports', icon: FaChartBar },
 ];
 
+// Finance menu
+const financeNavItems = [
+  { path: '/finance', label: 'Finance Dashboard', icon: FaTachometerAlt },
+  { path: '/sads', label: 'SAD Declarations', icon: FaFileInvoice },
+];
+
 function Sidebar({ isCollapsed, toggleCollapse }) {
   const { user } = useAuth();
 
@@ -87,6 +93,8 @@ function Sidebar({ isCollapsed, toggleCollapse }) {
     navItems = customsNavItems;
   } else if (user?.role === 'agent') {
     navItems = agentNavItems;
+  } else if (user?.role === 'finance') {
+    navItems = financeNavItems;
   } else {
     navItems = []; // fallback or generic user menu
   }
