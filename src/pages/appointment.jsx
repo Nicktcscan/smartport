@@ -16,17 +16,14 @@ import {
   View as PdfView,
   StyleSheet,
   Image as PdfImage,
-  Svg,
-  Rect,
   Font
 } from '@react-pdf/renderer';
-import QRCode from 'qrcode';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
 // ---------- Assets (ensure these exist in src/assets/) ----------
 import gralogo from '../assets/gralogo.png';
 import gnswlogo from '../assets/gnswlogo.png';
-import logoImg from '../assets/logo.png'; // watermark image (logo.png) - ensure this exists
+import logo from '../assets/logo.png'; // watermark image - ensure this file exists
 
 // ---------- Monospace font registration (update path if you use a different font file) ----------
 import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists
@@ -98,10 +95,34 @@ const pdfStyles = StyleSheet.create({
 
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
 
-  infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 }
+  infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 },
+
+  watermarkCenter: {
+    position: 'absolute',
+    left: '20%',
+    top: '28%',
+    width: '60%',
+    opacity: 0.06,
+  },
 });
 
-// ---------- Code128 helpers for PDF barcode ----------
+// ---------- Code128 patterns (widths) ----------
+const CODE128_WIDTHS = [
+  "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
+  "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
+  "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
+  "212123","212321","232121","111323","131123","131321","112313","132113","132311","211313",
+  "231113","231311","112133","112331","132131","113123","113321","133121","313121","211331",
+  "231131","213113","213311","213131","311123","311321","331121","312113","312311","332111",
+  "314111","221411","431111","111224","111422","121224","121422","141122","141221","112214",
+  "112412","122114","122411","142112","142211","241211","221114","413111","241112","134111",
+  "111242","121142","121241","114212","124112","124211","411212","421112","421211","212141",
+  "214121","412121","111143","111341","131141","114113","114311","411113","411311","113141",
+  "114131","311141","411131","211412"
+];
+const CODE128_STOP = "2331112";
+
+// ---------- Helpers for Code128 ----------
 function charCodeForCode128B(ch) {
   const code = ch.charCodeAt(0);
   if (code >= 32 && code <= 127) return code - 32;
@@ -124,21 +145,6 @@ function buildCode128CodesB(text) {
   codes.push(106);
   return codes;
 }
-const CODE128_WIDTHS = [
-  "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
-  "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
-  "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
-  "212123","212321","232121","111323","131123","131321","112313","132113","132311","211313",
-  "231113","231311","112133","112331","132131","113123","113321","133121","313121","211331",
-  "231131","213113","213311","213131","311123","311321","331121","312113","312311","332111",
-  "314111","221411","431111","111224","111422","121224","121422","141122","141221","112214",
-  "112412","122114","122411","142112","142211","241211","221114","413111","241112","134111",
-  "111242","121142","121241","114212","124112","124211","411212","421112","421211","212141",
-  "214121","412121","111143","111341","131141","114113","114311","411113","411311","113141",
-  "114131","311141","411131","211412"
-];
-const CODE128_STOP = "2331112";
-
 function codesToModuleWidths(codes) {
   const widths = [];
   const quiet = 10;
@@ -159,31 +165,43 @@ function codesToModuleWidths(codes) {
   return { widths, totalModules: total };
 }
 
-// Code128 component for react-pdf (renders barcode)
-function Code128SvgPdf({ payloadStr = '', width = 260, height = 48 }) {
-  const codes = buildCode128CodesB(payloadStr);
-  const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
-  const modulePx = width / totalModules;
-  const bars = [];
-  let x = 0;
-  for (let i = 0; i < moduleWidths.length; i++) {
-    const runUnits = moduleWidths[i];
-    const runPx = runUnits * modulePx;
-    const isBar = (i % 2) === 1;
-    if (isBar) {
-      bars.push({ x, w: runPx, h: height });
-    }
-    x += runPx;
-  }
+// ---------- Generate Code128 barcode as PNG data URL (draw to canvas) ----------
+async function generateCode128DataUrl(payloadStr, width = 420, height = 72) {
+  try {
+    const codes = buildCode128CodesB(payloadStr);
+    const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
+    const modulePx = width / totalModules;
 
-  return (
-    <Svg width={width} height={height} style={{ display: 'block' }}>
-      <Rect x={0} y={0} width={width} height={height} fill="#ffffff" />
-      {bars.map((b, idx) => (
-        <Rect key={idx} x={b.x} y={0} width={b.w} height={b.h} fill="#000000" />
-      ))}
-    </Svg>
-  );
+    // create canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(width);
+    canvas.height = Math.round(height);
+    const ctx = canvas.getContext('2d');
+    // white background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // draw bars
+    let x = 0;
+    for (let i = 0; i < moduleWidths.length; i++) {
+      const runUnits = moduleWidths[i];
+      const runPx = runUnits * modulePx;
+      const isBar = (i % 2) === 1;
+      if (isBar) {
+        ctx.fillStyle = '#000000';
+        // draw full-height bar with a small top/bottom padding so it looks nice on paper
+        const pad = Math.max(1, Math.floor(height * 0.06));
+        ctx.fillRect(Math.round(x), pad, Math.ceil(runPx), Math.max(1, Math.floor(height - pad * 2)));
+      }
+      x += runPx;
+    }
+
+    // return PNG data URL
+    return canvas.toDataURL('image/png');
+  } catch (e) {
+    console.error('generateCode128DataUrl failed', e);
+    return null;
+  }
 }
 
 // ---------- Utility functions (ensure defined to avoid ESLint no-undef) ----------
@@ -225,7 +243,7 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (Barcode + watermark) ----------
+// ---------- PDF component (Barcode + watermark + beautiful layout) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
@@ -245,15 +263,11 @@ function AppointmentPdf({ ticket }) {
     createdAt: t.createdAt || '',
   };
 
-  // Build barcode payload text (plain text, human-readable) — scanners will return plain text:
-  // Format: "Appointment: <num>; Weighbridge: <num>"
-  const barcodePayload = `Appointment: ${ticketData.appointmentNumber}; Weighbridge: ${ticketData.weighbridgeNumber}`;
-
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark image (very faded, centered) */}
-        <PdfImage src={logoImg} style={{ position: 'absolute', width: 320, opacity: 0.06, left: '50%', top: '40%', transform: 'translate(-50%, -50%)' }} />
+        {/* Watermark centered */}
+        <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
         <PdfView style={pdfStyles.headerBar}>
@@ -336,19 +350,24 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
-          {/* Barcode area: show only barcode (scannable plain text). */}
+          {/* Barcode area: only show barcode and a tasteful caption.
+              The barcode encodes a simple text payload (Appointment and Weighbridge numbers). */}
           <PdfView style={pdfStyles.qrArea}>
             <PdfView style={{ width: '64%' }} />
 
             <PdfView style={pdfStyles.qrBox}>
-              <Code128SvgPdf payloadStr={barcodePayload} width={260} height={48} />
+              {t.barcodeImage ? (
+                <PdfImage src={t.barcodeImage} style={{ width: 320, height: 72 }} />
+              ) : (
+                <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
+              )}
               <PdfText style={{ fontSize: 9, marginTop: 8, color: '#374151' }}>Scan barcode to read Appointment & Weighbridge numbers</PdfText>
             </PdfView>
           </PdfView>
         </PdfView>
 
         <PdfView>
-          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the barcode for numbers.</PdfText>
+          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the barcode for the appointment identifiers.</PdfText>
         </PdfView>
       </Page>
     </Document>
@@ -835,7 +854,7 @@ export default function AppointmentPage() {
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
-  // helper to assemble the full payload used for QR and generate QR image that opens a human-friendly HTML page
+  // helper to assemble the full payload used for barcode and generate barcode image that encodes text
   async function buildPrintableTicketObject(dbAppointment) {
     // dbAppointment = the object returned from DB/insert (may be partial)
     const ticket = {
@@ -853,103 +872,26 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Build a small, elegant HTML page (inline styles) for the QR to open — human-readable table
-    const smallHtml = `
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Appointment ${escapeHtml(ticket.appointmentNumber)}</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body{font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial; padding:18px; color:#0b1220;}
-    .wrap{max-width:740px;margin:0 auto;background:#fff;padding:18px;border-radius:10px;box-shadow:0 6px 20px rgba(2,6,23,0.06);}
-    h1{font-size:18px;margin:0 0 6px;color:#0f172a;}
-    p.sub{color:#6b7280;margin:0 0 14px;font-size:13px;}
-    table{width:100%;border-collapse:collapse;margin-top:12px;}
-    td, th{padding:8px 10px;border-bottom:1px solid #eef2f7;text-align:left;font-size:13px;}
-    th{background:#f8fafc;color:#111827;font-weight:700}
-    .small{font-size:12px;color:#6b7280}
-    .t1table{margin-top:14px}
-    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700;font-size:12px}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>NICK TC-SCAN (GAMBIA) LTD. — Appointment</h1>
-    <p class="sub">Appointment No: <strong>${escapeHtml(ticket.appointmentNumber)}</strong> &nbsp;&nbsp; Weighbridge: <strong>${escapeHtml(ticket.weighbridgeNumber)}</strong></p>
-    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-      <div><span class="pill">Agent</span><div class="small">${escapeHtml(ticket.agentName)} (${escapeHtml(ticket.agentTin)})</div></div>
-      <div><span class="pill">Warehouse</span><div class="small">${escapeHtml(ticket.warehouse)}</div></div>
-      <div><span class="pill">Pickup</span><div class="small">${escapeHtml(ticket.pickupDate)}</div></div>
-    </div>
+    // Build the payload text to encode in the barcode
+    // When scanned the scanner will receive this plain text string:
+    // Appointment:<appointmentNumber>;Weighbridge:<weighbridgeNumber>
+    const barcodePayload = `Appointment:${ticket.appointmentNumber};Weighbridge:${ticket.weighbridgeNumber}`;
 
-    <table>
-      <tr><th style="width:30%">Field</th><th>Value</th></tr>
-      <tr><td>Truck</td><td>${escapeHtml(ticket.truckNumber)}</td></tr>
-      <tr><td>Driver</td><td>${escapeHtml(ticket.driverName)}</td></tr>
-      <tr><td>Driver License</td><td>${escapeHtml(ticket.driverLicense)}</td></tr>
-      <tr><td>Consolidated</td><td>${ticket.consolidated === 'Y' ? 'Yes' : 'No'}</td></tr>
-      <tr><td>Created At</td><td>${escapeHtml(ticket.createdAt)}</td></tr>
-    </table>
-
-    <div class="t1table">
-      <h3 style="margin:12px 0 6px">T1 Records (${(ticket.t1s || []).length})</h3>
-      <table>
-        <tr><th>#</th><th>SAD No</th><th>Packing</th><th>Container</th></tr>
-        ${(ticket.t1s || []).map((r, i) => `<tr><td>${i+1}</td><td>${escapeHtml(r.sadNo || r.sad_no || '')}</td><td>${escapeHtml(r.packingType || r.packing_type || '')}</td><td>${escapeHtml(r.containerNo || r.container_no || '')}</td></tr>`).join('')}
-      </table>
-    </div>
-
-    <p style="margin-top:14px;font-size:12px;color:#6b7280">Show this QR to weighbridge staff or scan to open this page on your device.</p>
-  </div>
-</body>
-</html>`.trim();
-
-    // Build data URI using base64 encoding (more compatible)
-    const base64Html = base64EncodeUnicode(smallHtml);
-    const dataUri = `data:text/html;base64,${base64Html}`;
-
-    // Generate QR image (PNG data URL) that encodes the data URI (so scanning opens the small HTML page)
-    let qrDataUrl = null;
+    // Generate Code128 barcode data URL (PNG)
+    let barcodeDataUrl = null;
     try {
-      qrDataUrl = await QRCode.toDataURL(dataUri, { margin: 1, scale: 8 });
+      barcodeDataUrl = await generateCode128DataUrl(barcodePayload, 420, 72);
     } catch (e) {
-      console.warn('QR generation failed', e);
-      // fallback: encode a compact JSON string if HTML QR fails
-      try {
-        const compact = JSON.stringify({
-          appointmentNumber: ticket.appointmentNumber,
-          weighbridgeNumber: ticket.weighbridgeNumber,
-          agentName: ticket.agentName,
-          pickupDate: ticket.pickupDate,
-        });
-        qrDataUrl = await QRCode.toDataURL(compact, { margin: 1, scale: 8 });
-      } catch (ee) {
-        qrDataUrl = null;
-      }
+      console.warn('barcode generation failed', e);
+      barcodeDataUrl = null;
     }
 
-    ticket.qrImage = qrDataUrl;
-    ticket.qrDataUri = dataUri; // optional: if you want to show or store the raw data URI elsewhere
+    ticket.barcodeImage = barcodeDataUrl;
+    ticket.barcodePayload = barcodePayload; // optional for debugging
     return ticket;
   }
 
-  // helpers for HTML escaping and base64
-  function escapeHtml(str = '') {
-    return String(str || '').replace(/[&<>"']/g, function (m) {
-      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m];
-    });
-  }
-  function base64EncodeUnicode(str) {
-    // base64 encode Unicode safely
-    try {
-      return btoa(unescape(encodeURIComponent(str)));
-    } catch (e) {
-      // fallback - smaller inputs only
-      return btoa(str);
-    }
-  }
+  // helpers for HTML escaping and base64 (not used for barcode but kept)
 
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
@@ -1020,7 +962,7 @@ export default function AppointmentPage() {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // build printable ticket (includes QR image that opens a human-friendly HTML page)
+      // build printable ticket (includes barcode image)
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
