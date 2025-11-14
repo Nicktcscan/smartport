@@ -16,6 +16,8 @@ import {
   View as PdfView,
   StyleSheet,
   Image as PdfImage,
+  Svg,
+  Rect,
   Font
 } from '@react-pdf/renderer';
 import QRCode from 'qrcode';
@@ -24,6 +26,7 @@ import { supabase } from '../supabaseClient'; // ensure this file exists and exp
 // ---------- Assets (ensure these exist in src/assets/) ----------
 import gralogo from '../assets/gralogo.png';
 import gnswlogo from '../assets/gnswlogo.png';
+import logoImg from '../assets/logo.png'; // watermark image (logo.png) - ensure this exists
 
 // ---------- Monospace font registration (update path if you use a different font file) ----------
 import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists
@@ -98,6 +101,91 @@ const pdfStyles = StyleSheet.create({
   infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 }
 });
 
+// ---------- Code128 helpers for PDF barcode ----------
+function charCodeForCode128B(ch) {
+  const code = ch.charCodeAt(0);
+  if (code >= 32 && code <= 127) return code - 32;
+  return '?'.charCodeAt(0) - 32;
+}
+function buildCode128CodesB(text) {
+  const codes = [];
+  const START_B = 104;
+  codes.push(START_B);
+  for (let i = 0; i < text.length; i++) {
+    const cv = charCodeForCode128B(text[i]);
+    codes.push(cv);
+  }
+  let sum = START_B;
+  for (let i = 0; i < text.length; i++) {
+    sum += (i + 1) * charCodeForCode128B(text[i]);
+  }
+  const check = sum % 103;
+  codes.push(check);
+  codes.push(106);
+  return codes;
+}
+const CODE128_WIDTHS = [
+  "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
+  "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
+  "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
+  "212123","212321","232121","111323","131123","131321","112313","132113","132311","211313",
+  "231113","231311","112133","112331","132131","113123","113321","133121","313121","211331",
+  "231131","213113","213311","213131","311123","311321","331121","312113","312311","332111",
+  "314111","221411","431111","111224","111422","121224","121422","141122","141221","112214",
+  "112412","122114","122411","142112","142211","241211","221114","413111","241112","134111",
+  "111242","121142","121241","114212","124112","124211","411212","421112","421211","212141",
+  "214121","412121","111143","111341","131141","114113","114311","411113","411311","113141",
+  "114131","311141","411131","211412"
+];
+const CODE128_STOP = "2331112";
+
+function codesToModuleWidths(codes) {
+  const widths = [];
+  const quiet = 10;
+  widths.push(quiet);
+  for (let i = 0; i < codes.length; i++) {
+    const cv = codes[i];
+    let wstr;
+    if (cv === 106) {
+      wstr = CODE128_STOP;
+    } else {
+      wstr = CODE128_WIDTHS[cv];
+      if (!wstr) wstr = "111111";
+    }
+    for (let j = 0; j < wstr.length; j++) widths.push(Number(wstr.charAt(j)));
+  }
+  widths.push(10);
+  const total = widths.reduce((s, v) => s + v, 0);
+  return { widths, totalModules: total };
+}
+
+// Code128 component for react-pdf (renders barcode)
+function Code128SvgPdf({ payloadStr = '', width = 260, height = 48 }) {
+  const codes = buildCode128CodesB(payloadStr);
+  const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
+  const modulePx = width / totalModules;
+  const bars = [];
+  let x = 0;
+  for (let i = 0; i < moduleWidths.length; i++) {
+    const runUnits = moduleWidths[i];
+    const runPx = runUnits * modulePx;
+    const isBar = (i % 2) === 1;
+    if (isBar) {
+      bars.push({ x, w: runPx, h: height });
+    }
+    x += runPx;
+  }
+
+  return (
+    <Svg width={width} height={height} style={{ display: 'block' }}>
+      <Rect x={0} y={0} width={width} height={height} fill="#ffffff" />
+      {bars.map((b, idx) => (
+        <Rect key={idx} x={b.x} y={0} width={b.w} height={b.h} fill="#000000" />
+      ))}
+    </Svg>
+  );
+}
+
 // ---------- Utility functions (ensure defined to avoid ESLint no-undef) ----------
 function downloadBlob(blob, filename) {
   try {
@@ -137,7 +225,7 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (QR only + beautiful human-readable layout only in QR) ----------
+// ---------- PDF component (Barcode + watermark) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
@@ -157,9 +245,16 @@ function AppointmentPdf({ ticket }) {
     createdAt: t.createdAt || '',
   };
 
+  // Build barcode payload text (plain text, human-readable) — scanners will return plain text:
+  // Format: "Appointment: <num>; Weighbridge: <num>"
+  const barcodePayload = `Appointment: ${ticketData.appointmentNumber}; Weighbridge: ${ticketData.weighbridgeNumber}`;
+
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
+        {/* Watermark image (very faded, centered) */}
+        <PdfImage src={logoImg} style={{ position: 'absolute', width: 320, opacity: 0.06, left: '50%', top: '40%', transform: 'translate(-50%, -50%)' }} />
+
         {/* Header */}
         <PdfView style={pdfStyles.headerBar}>
           <PdfView style={pdfStyles.headerLeft}>
@@ -241,23 +336,19 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
-          {/* QR area: only show QR and a tasteful caption. All human-friendly details are inside the HTML encoded by the QR. */}
+          {/* Barcode area: show only barcode (scannable plain text). */}
           <PdfView style={pdfStyles.qrArea}>
             <PdfView style={{ width: '64%' }} />
 
             <PdfView style={pdfStyles.qrBox}>
-              {t.qrImage ? (
-                <PdfImage src={t.qrImage} style={{ width: 150, height: 150 }} />
-              ) : (
-                <PdfText style={{ fontSize: 9, color: '#6b7280' }}>QR not available</PdfText>
-              )}
-              <PdfText style={{ fontSize: 9, marginTop: 8, color: '#374151' }}>Scan QR to view appointment</PdfText>
+              <Code128SvgPdf payloadStr={barcodePayload} width={260} height={48} />
+              <PdfText style={{ fontSize: 9, marginTop: 8, color: '#374151' }}>Scan barcode to read Appointment & Weighbridge numbers</PdfText>
             </PdfView>
           </PdfView>
         </PdfView>
 
         <PdfView>
-          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the QR for a readable details page.</PdfText>
+          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the barcode for numbers.</PdfText>
         </PdfView>
       </Page>
     </Document>
