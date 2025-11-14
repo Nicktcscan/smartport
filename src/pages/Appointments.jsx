@@ -37,6 +37,7 @@ import {
 import { FaFileExport, FaSearch, FaEye, FaRedoAlt } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
+import { useAuth } from '../context/AuthContext';
 
 const MotionTr = motion(Tr);
 
@@ -70,6 +71,7 @@ function exportToCSV(rows = [], filename = 'export.csv') {
 
 export default function AppointmentsPage() {
   const toast = useToast();
+  const { user } = useAuth() || {};
 
   // data
   const [appointments, setAppointments] = useState([]);
@@ -87,6 +89,9 @@ export default function AppointmentsPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [pickupDateFilter, setPickupDateFilter] = useState('');
   const [totalPages, setTotalPages] = useState(1);
+
+  // inline status updating state map { [id]: boolean }
+  const [statusUpdating, setStatusUpdating] = useState({});
 
   // modal
   const [viewing, setViewing] = useState(null);
@@ -125,9 +130,8 @@ export default function AppointmentsPage() {
         .eq('status', 'Posted');
       setTotalPosted(Number(postedResp?.count || 0));
 
-      // unique SADs from t1_records (we'll fetch a reasonably large set and dedupe on client)
+      // unique SADs from t1_records (client-side dedupe)
       try {
-        // fetch sad_no values (limit high to cover typical dataset)
         const { data: t1rows, error: t1err } = await supabase
           .from('t1_records')
           .select('sad_no')
@@ -158,15 +162,10 @@ export default function AppointmentsPage() {
       const from = (p - 1) * size;
       const to = p * size - 1;
 
-      // Build base query
-      // Select appointment columns and join child t1_records count using foreign table select if available
-      // We'll fetch appointments for the page and separately ask for total count
       let baseQuery = supabase.from('appointments').select('*, t1_records(id, sad_no)', { count: 'exact' });
 
-      // apply server-side search using or() if a query exists
       if (q && q.trim()) {
         const escaped = q.trim().replace(/"/g, '\\"');
-        // search against multiple text columns
         const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%,driver_name.ilike.%${escaped}%`;
         baseQuery = baseQuery.or(orFilter);
       }
@@ -174,7 +173,6 @@ export default function AppointmentsPage() {
       if (status) baseQuery = baseQuery.eq('status', status);
       if (pickup) baseQuery = baseQuery.eq('pickup_date', pickup);
 
-      // ordering newest first
       baseQuery = baseQuery.order('created_at', { ascending: false }).range(from, to);
 
       const resp = await baseQuery;
@@ -201,7 +199,7 @@ export default function AppointmentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // when page or pageSize changes, refetch list
+  // when page or pageSize or filters change, refetch list
   useEffect(() => {
     fetchAppointments({ page, size: pageSize });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -224,11 +222,8 @@ export default function AppointmentsPage() {
     setViewLoading(true);
     try {
       const apptId = appointment.id;
-      // fetch t1_records for this appointment
       const { data: t1s, error } = await supabase.from('t1_records').select('*').eq('appointment_id', apptId).order('created_at', { ascending: true });
-      if (error) {
-        throw error;
-      }
+      if (error) throw error;
       setViewT1s(t1s || []);
     } catch (err) {
       console.error('openView', err);
@@ -248,7 +243,6 @@ export default function AppointmentsPage() {
   // --- actions ---
   const handleExportFilteredCSV = async () => {
     try {
-      // Export currently filtered set — fetch up to 5000 results server-side
       let q = supabase.from('appointments').select('id,appointment_number,weighbridge_number,agent_tin,agent_name,warehouse_location,pickup_date,consolidated,truck_number,driver_name,total_t1s,total_documented_weight,status,created_at,updated_at').order('created_at', { ascending: false }).limit(5000);
       if (searchQ && searchQ.trim()) {
         const escaped = searchQ.trim().replace(/"/g, '\\"');
@@ -291,6 +285,32 @@ export default function AppointmentsPage() {
     } catch (err) {
       console.error('exportSingleAppointment', err);
       toast({ title: 'Export failed', description: err?.message || 'Unexpected', status: 'error' });
+    }
+  };
+
+  // change status inline (admin only)
+  const handleChangeStatus = async (apptId, newStatus) => {
+    if (!user || user.role !== 'admin') {
+      toast({ title: 'Permission denied', description: 'Only admins can change appointment status', status: 'error' });
+      return;
+    }
+    setStatusUpdating(prev => ({ ...prev, [apptId]: true }));
+    // optimistic UI update
+    setAppointments(prev => prev.map(a => (a.id === apptId ? { ...a, status: newStatus } : a)));
+    try {
+      const { error } = await supabase.from('appointments').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', apptId);
+      if (error) throw error;
+      toast({ title: 'Status updated', description: `Appointment status set to ${newStatus}`, status: 'success' });
+      // refresh stats
+      fetchStats();
+    } catch (err) {
+      console.error('update status', err);
+      toast({ title: 'Update failed', description: err?.message || 'Could not update status', status: 'error' });
+      // rollback (refetch list to be safe)
+      fetchAppointments({ page, size: pageSize, q: searchQ });
+      fetchStats();
+    } finally {
+      setStatusUpdating(prev => ({ ...prev, [apptId]: false }));
     }
   };
 
@@ -340,7 +360,6 @@ export default function AppointmentsPage() {
           <Select placeholder="Filter by status" value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
             <option value="">All</option>
             <option value="Posted">Posted</option>
-            <option value="Imported">Imported</option>
             <option value="Completed">Completed</option>
           </Select>
           <Input type="date" value={pickupDateFilter} onChange={(e) => { setPickupDateFilter(e.target.value); setPage(1); }} />
@@ -390,13 +409,34 @@ export default function AppointmentsPage() {
                   const t1count = Array.isArray(a.t1_records) ? a.t1_records.length : a.total_t1s || 0;
                   return (
                     <MotionTr key={a.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }}>
-                      <Td><Text fontWeight="bold">{a.appointment_number}</Text><Text fontSize="xs" color="gray.500">{a.weighbridge_number}</Text></Td>
+                      <Td>
+                        <Text fontWeight="bold">{a.appointment_number}</Text>
+                        <Text fontSize="xs" color="gray.500">{a.weighbridge_number}</Text>
+                      </Td>
                       <Td>{a.weighbridge_number}</Td>
                       <Td>{a.agent_name} <Badge ml={2} colorScheme="purple" variant="subtle">{a.agent_tin}</Badge></Td>
                       <Td>{a.pickup_date ? new Date(a.pickup_date).toLocaleDateString() : '—'}</Td>
                       <Td>{a.truck_number || '—'}</Td>
                       <Td isNumeric>{t1count}</Td>
-                      <Td><Badge colorScheme={a.status === 'Completed' ? 'green' : a.status === 'Posted' ? 'blue' : 'orange'}>{a.status}</Badge></Td>
+
+                      <Td>
+                        {/* Admins get inline dropdown to change status instantly; others see badge */}
+                        {user && user.role === 'admin' ? (
+                          <Select
+                            size="sm"
+                            value={a.status || 'Posted'}
+                            onChange={(e) => handleChangeStatus(a.id, e.target.value)}
+                            isDisabled={!!statusUpdating[a.id]}
+                            maxW="160px"
+                          >
+                            <option value="Posted">Posted</option>
+                            <option value="Completed">Completed</option>
+                          </Select>
+                        ) : (
+                          <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status}</Badge>
+                        )}
+                      </Td>
+
                       <Td>
                         <HStack>
                           <IconButton aria-label="View" size="sm" icon={<FaEye />} onClick={() => openView(a)} />
