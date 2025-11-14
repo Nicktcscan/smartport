@@ -4,7 +4,8 @@ import {
   Box, Button, Container, Heading, Input as ChakraInput, Select, Text, SimpleGrid,
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
-  IconButton, Badge, Divider, VStack, useBreakpointValue, Flex} from '@chakra-ui/react';
+  IconButton, Badge, Divider, VStack, useBreakpointValue, Flex
+} from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -543,131 +544,209 @@ export default function AppointmentPage() {
   };
   const closeConfirm = () => setConfirmOpen(false);
 
-  async function generateNumbersUsingSupabase(pickupDateValue) {
-    try {
-      const { count } = await supabase
-        .from('appointments')
-        .select('id', { head: true, count: 'exact' })
-        .eq('pickup_date', pickupDateValue);
+  // --- New helper: generate unique numbers with checks ---
+  async function generateUniqueNumbers(pickupDateValue) {
+    // Returns { appointmentNumber, weighbridgeNumber }
+    const maxAttempts = 10;
+    const d = new Date(pickupDateValue);
+    const YY = String(d.getFullYear()).slice(-2);
+    const MM = String(d.getMonth() + 1).padStart(2, '0');
+    const DD = String(d.getDate()).padStart(2, '0');
 
-      const existing = count || 0;
-      const seq = existing + 1;
-      const d = new Date(pickupDateValue);
-      const YY = String(d.getFullYear()).slice(-2);
-      const MM = String(d.getMonth() + 1).padStart(2, '0');
-      const DD = String(d.getDate()).padStart(2, '0');
-      const appointmentNumber = `${YY}${MM}${DD}${String(seq).padStart(4,'0')}`;
-      const weighbridgeNumber = `WB${YY}${MM}${String(seq).padStart(5,'0')}`;
-      return { appointmentNumber, weighbridgeNumber };
-    } catch (e) {
-      const d = new Date(pickupDateValue);
-      const YY = String(d.getFullYear()).slice(-2);
-      const MM = String(d.getMonth() + 1).padStart(2, '0');
-      const DD = String(d.getDate()).padStart(2, '0');
-      const rand = Math.floor(Math.random() * 9999) + 1;
-      return { appointmentNumber: `${YY}${MM}${DD}${String(rand).padStart(4,'0')}`, weighbridgeNumber: `WB${YY}${MM}${String(rand).padStart(5,'0')}` };
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        // Build base seq using count for that date (best-effort)
+        const { count } = await supabase
+          .from('appointments')
+          .select('id', { head: true, count: 'exact' })
+          .eq('pickup_date', pickupDateValue);
+
+        const existing = Number(count || 0);
+        const seq = existing + 1 + attempt; // add attempt to avoid repeating same seq if collision
+        const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
+        // add attempt-based suffix only when attempt>0 to help uniqueness
+        const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
+
+        const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
+        const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
+
+        // check both uniqueness
+        const { count: wbCount } = await supabase
+          .from('appointments')
+          .select('id', { head: true, count: 'exact' })
+          .eq('weighbridge_number', weighbridgeNumber);
+
+        const { count: apptCount } = await supabase
+          .from('appointments')
+          .select('id', { head: true, count: 'exact' })
+          .eq('appointment_number', appointmentNumber);
+
+        if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
+          return { appointmentNumber, weighbridgeNumber };
+        }
+        // else loop to try again
+      } catch (e) {
+        // if any error while checking, fallback to a timestamp + random and return it
+        console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
+        const ts = Date.now();
+        return {
+          appointmentNumber: `${YY}${MM}${DD}${ts}`,
+          weighbridgeNumber: `WB${YY}${MM}${ts}`,
+        };
+      }
     }
+
+    // If exhausted attempts, fallback to timestamp + random
+    const ts2 = Date.now();
+    return {
+      appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+    };
+  }
+
+  // eslint-disable-next-line no-unused-vars
+  async function generateNumbersUsingSupabase(pickupDateValue) {
+    // kept for backward compatibility – delegate to generateUniqueNumbers
+    return await generateUniqueNumbers(pickupDateValue);
   }
 
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
-    const { appointmentNumber, weighbridgeNumber } = await generateNumbersUsingSupabase(payload.pickupDate || new Date().toISOString().slice(0, 10));
+    // generate unique appointment & weighbridge numbers (ensured unique by checking DB)
+    let attempts = 0;
+    const maxInsertAttempts = 6;
+    let lastErr = null;
+    while (attempts < maxInsertAttempts) {
+      attempts += 1;
+      const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
 
-    const appointmentInsert = {
-      appointment_number: appointmentNumber,
-      weighbridge_number: weighbridgeNumber,
-      agent_tin: payload.agentTin,
-      agent_name: payload.agentName,
-      warehouse_location: payload.warehouse,
-      pickup_date: payload.pickupDate,
-      consolidated: payload.consolidated || 'N',
-      truck_number: payload.truckNumber,
-      driver_name: payload.driverName,
-      driver_license_no: payload.driverLicense,
-      total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
-      total_documented_weight: payload.totalDocumentedWeight || null,
-      regime: payload.regime || null,
-      barcode: null,
-      pdf_url: null,
-    };
-
-    const { data: inserted, error: insertErr } = await supabase
-      .from('appointments')
-      .insert([appointmentInsert])
-      .select()
-      .maybeSingle();
-
-    if (insertErr || !inserted) {
-      throw insertErr || new Error('Failed to insert appointment.');
-    }
-
-    const appointmentId = inserted.id;
-
-    const t1Rows = (payload.t1s || []).map((r) => ({
-      appointment_id: appointmentId,
-      sad_no: r.sadNo,
-      packing_type: r.packingType,
-      container_no: r.containerNo || null,
-    }));
-
-    if (t1Rows.length > 0) {
-      const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
-      if (t1Err) {
-        try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
-        throw t1Err;
-      }
-    }
-
-    const { data: fullAppointment, error: fetchErr } = await supabase
-      .from('appointments')
-      .select('*, t1_records(*)')
-      .eq('id', appointmentId)
-      .maybeSingle();
-
-    if (fetchErr || !fullAppointment) {
-      return {
-        appointment: {
-          id: appointmentId,
-          appointmentNumber,
-          weighbridgeNumber,
-          warehouse: appointmentInsert.warehouse_location,
-          warehouseLabel: payload.warehouseLabel || appointmentInsert.warehouse_location,
-          pickupDate: appointmentInsert.pickup_date,
-          agentName: appointmentInsert.agent_name,
-          agentTin: appointmentInsert.agent_tin,
-          consolidated: appointmentInsert.consolidated,
-          truckNumber: appointmentInsert.truck_number,
-          driverName: appointmentInsert.driver_name,
-          driverLicense: appointmentInsert.driver_license_no,
-          regime: appointmentInsert.regime,
-          totalDocumentedWeight: appointmentInsert.total_documented_weight,
-          t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
-          createdAt: inserted.created_at,
-        }
+      const appointmentInsert = {
+        appointment_number: appointmentNumber,
+        weighbridge_number: weighbridgeNumber,
+        agent_tin: payload.agentTin,
+        agent_name: payload.agentName,
+        warehouse_location: payload.warehouse,
+        pickup_date: payload.pickupDate,
+        consolidated: payload.consolidated || 'N',
+        truck_number: payload.truckNumber,
+        driver_name: payload.driverName,
+        driver_license_no: payload.driverLicense,
+        total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
+        total_documented_weight: payload.totalDocumentedWeight || null,
+        regime: payload.regime || null,
+        barcode: null,
+        pdf_url: null,
       };
+
+      try {
+        const { data: inserted, error: insertErr } = await supabase
+          .from('appointments')
+          .insert([appointmentInsert])
+          .select()
+          .maybeSingle();
+
+        if (insertErr) {
+          // If uniqueness constraint triggered, loop and try again with new numbers.
+          lastErr = insertErr;
+          const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
+          if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
+            // duplicate constraint — retry
+            console.warn('Insert conflict on unique column, retrying generation...', insertErr);
+            await new Promise(r => setTimeout(r, 120 + Math.random() * 200)); // small jitter
+            continue;
+          }
+          // other error -> throw
+          throw insertErr;
+        }
+
+        if (!inserted) {
+          throw new Error('Failed to insert appointment.');
+        }
+
+        const appointmentId = inserted.id;
+
+        const t1Rows = (payload.t1s || []).map((r) => ({
+          appointment_id: appointmentId,
+          sad_no: r.sadNo,
+          packing_type: r.packingType,
+          container_no: r.containerNo || null,
+        }));
+
+        if (t1Rows.length > 0) {
+          const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
+          if (t1Err) {
+            // roll back appointment insertion if t1 insert failed
+            try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
+            throw t1Err;
+          }
+        }
+
+        const { data: fullAppointment, error: fetchErr } = await supabase
+          .from('appointments')
+          .select('*, t1_records(*)')
+          .eq('id', appointmentId)
+          .maybeSingle();
+
+        if (fetchErr || !fullAppointment) {
+          // return a best-effort object
+          return {
+            appointment: {
+              id: appointmentId,
+              appointmentNumber,
+              weighbridgeNumber,
+              warehouse: appointmentInsert.warehouse_location,
+              warehouseLabel: payload.warehouseLabel || appointmentInsert.warehouse_location,
+              pickupDate: appointmentInsert.pickup_date,
+              agentName: appointmentInsert.agent_name,
+              agentTin: appointmentInsert.agent_tin,
+              consolidated: appointmentInsert.consolidated,
+              truckNumber: appointmentInsert.truck_number,
+              driverName: appointmentInsert.driver_name,
+              driverLicense: appointmentInsert.driver_license_no,
+              regime: appointmentInsert.regime,
+              totalDocumentedWeight: appointmentInsert.total_documented_weight,
+              t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
+              createdAt: inserted.created_at,
+            }
+          };
+        }
+
+        return {
+          appointment: {
+            id: fullAppointment.id,
+            appointmentNumber: fullAppointment.appointment_number,
+            weighbridgeNumber: fullAppointment.weighbridge_number,
+            warehouse: fullAppointment.warehouse_location,
+            warehouseLabel: payload.warehouseLabel || fullAppointment.warehouse_location,
+            pickupDate: fullAppointment.pickup_date,
+            agentName: fullAppointment.agent_name,
+            agentTin: fullAppointment.agent_tin,
+            consolidated: fullAppointment.consolidated,
+            truckNumber: fullAppointment.truck_number,
+            driverName: fullAppointment.driver_name,
+            driverLicense: fullAppointment.driver_license_no,
+            regime: fullAppointment.regime,
+            totalDocumentedWeight: fullAppointment.total_documented_weight,
+            t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
+            createdAt: fullAppointment.created_at,
+          }
+        };
+      } catch (finalErr) {
+        lastErr = finalErr;
+        // If we've exhausted attempts, throw
+        if (attempts >= maxInsertAttempts) {
+          console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
+          throw finalErr;
+        }
+        // otherwise loop to try again
+        console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
+        await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
+        continue;
+      }
     }
 
-    return {
-      appointment: {
-        id: fullAppointment.id,
-        appointmentNumber: fullAppointment.appointment_number,
-        weighbridgeNumber: fullAppointment.weighbridge_number,
-        warehouse: fullAppointment.warehouse_location,
-        warehouseLabel: payload.warehouseLabel || fullAppointment.warehouse_location,
-        pickupDate: fullAppointment.pickup_date,
-        agentName: fullAppointment.agent_name,
-        agentTin: fullAppointment.agent_tin,
-        consolidated: fullAppointment.consolidated,
-        truckNumber: fullAppointment.truck_number,
-        driverName: fullAppointment.driver_name,
-        driverLicense: fullAppointment.driver_license_no,
-        regime: fullAppointment.regime,
-        totalDocumentedWeight: fullAppointment.total_documented_weight,
-        t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
-        createdAt: fullAppointment.created_at,
-      }
-    };
+    throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
   const handleCreateAppointment = async () => {
@@ -770,7 +849,17 @@ export default function AppointmentPage() {
       setOrbOpen(false);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
-      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error' });
+      // Better error message on unique violation
+      const message = err?.message || String(err);
+      if (message.toLowerCase().includes('weighbridge_number') || message.toLowerCase().includes('appointment_number') || message.includes('duplicate')) {
+        toast({
+          title: 'Failed to create appointment — duplicate number',
+          description: 'A generated appointment or weighbridge number already exists. Please retry. If this persists contact support.',
+          status: 'error',
+        });
+      } else {
+        toast({ title: 'Failed', description: message || 'Unexpected error', status: 'error' });
+      }
     } finally {
       setLoadingCreate(false);
     }
