@@ -78,7 +78,6 @@ function Sparkline({ data = [], width = 120, height = 28 }) {
     const y = pad + (1 - (v - min) / range) * (h - pad * 2);
     return `${x},${y}`;
   }).join(' ');
-  // area path for subtle fill
   const areaPath = `M ${pad} ${h - pad} L ${points.split(' ').map(p => p.split(',')[0] + ',' + p.split(',')[1]).join(' L ')} L ${w - pad} ${h - pad} Z`;
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
@@ -228,8 +227,6 @@ export default function AppointmentsPage() {
           dayStarts.push(formatDateISO(d));
         }
 
-        // fetch created counts by day
-        // We'll pull appointments created in last 8 days and aggregate client-side
         const startDate = dayStarts[0] + 'T00:00:00Z';
         const { data: recentAppts } = await supabase
           .from('appointments')
@@ -249,8 +246,6 @@ export default function AppointmentsPage() {
             if (idx >= 0) {
               createdCounts[idx] += 1;
             }
-            // also count status-date: if status was created as Completed on same day? We don't have status timestamps.
-            // For simplicity count a.status === 'Completed' assigned to created date as an approximation (not perfect).
             if (idx >= 0 && a.status === 'Completed') completedCounts[idx] += 1;
             if (idx >= 0 && a.status === 'Posted') postedCounts[idx] += 1;
           }
@@ -258,7 +253,6 @@ export default function AppointmentsPage() {
 
         setSparkAppointments(createdCounts);
         setSparkCompleted(completedCounts);
-        // posted ratio: posted / created (0..1) scaled to counts for sparkline
         const postedRatio = dayStarts.map((_, i) => {
           const c = createdCounts[i] || 0;
           return c === 0 ? 0 : Math.round((postedCounts[i] / c) * 100);
@@ -309,18 +303,13 @@ export default function AppointmentsPage() {
 
       // compute alerts
       const alerts = {};
-      // detect duplicate appointment_number across returned set and overall (we'll check server count per appointment_number)
       const apptNumbers = data.map(a => a.appointment_number).filter(Boolean);
       const dupMap = {};
       for (const n of apptNumbers) dupMap[n] = (dupMap[n] || 0) + 1;
-
-      // But duplicates may exist beyond current page: query counts for any appointment_number that occurs more than once locally
       const dupCandidates = Object.keys(dupMap).filter(k => dupMap[k] > 1);
       const globalDupCounts = {};
       if (dupCandidates.length) {
         try {
-          // fetch counts for each candidate
-          // Using batches to avoid long queries
           for (const key of dupCandidates) {
             const { count } = await supabase.from('appointments').select('id', { head: true, count: 'exact' }).eq('appointment_number', key);
             globalDupCounts[key] = Number(count || 0);
@@ -333,7 +322,6 @@ export default function AppointmentsPage() {
       for (const a of data) {
         const id = a.id;
         alerts[id] = [];
-        // pickup overdue: pickup_date < today && status is Posted
         if (a.pickup_date) {
           const pickupIso = formatDateISO(a.pickup_date);
           const todayIso = formatDateISO(new Date());
@@ -342,14 +330,12 @@ export default function AppointmentsPage() {
           }
         }
 
-        // duplicate booking
         const num = a.appointment_number;
         const globalCount = (num && globalDupCounts[num]) ? globalDupCounts[num] : (num && dupMap[num] ? dupMap[num] : 1);
         if (num && Number(globalCount) > 1) {
           alerts[id].push('duplicate_booking');
         }
 
-        // driver license expiry < 30 days -> requires appointment.driver_license_expiry (ISO date)
         if (a.driver_license_expiry) {
           const expiry = new Date(a.driver_license_expiry);
           if (!isNaN(expiry.getTime())) {
@@ -359,7 +345,6 @@ export default function AppointmentsPage() {
           }
         }
 
-        // No T1 records linked
         const t1count = Array.isArray(a.t1_records) ? a.t1_records.length : (a.total_t1s || 0);
         if (!t1count || Number(t1count) === 0) {
           alerts[id].push('no_t1_records');
@@ -407,7 +392,6 @@ export default function AppointmentsPage() {
     setDrawerOpen(true);
     setDrawerLoading(true);
     try {
-      // fetch t1_records and activity logs for this appointment
       const apptId = appointment.id;
       const [{ data: t1s }, { data: logs }] = await Promise.allSettled([
         supabase.from('t1_records').select('*').eq('appointment_id', apptId).order('created_at', { ascending: true }),
@@ -449,7 +433,6 @@ export default function AppointmentsPage() {
       };
       const { error } = await supabase.from('appointment_logs').insert([payload]);
       if (error) throw error;
-      // refresh activity list
       const { data: logs } = await supabase.from('appointment_logs').select('*').eq('appointment_id', appointmentId).order('created_at', { ascending: false });
       setActivityLogs(logs || []);
       setNewComment('');
@@ -467,13 +450,11 @@ export default function AppointmentsPage() {
       return;
     }
     setStatusUpdating(prev => ({ ...prev, [apptId]: true }));
-    // optimistic UI update
     const before = (appointments.find(a => a.id === apptId)) || null;
     setAppointments(prev => prev.map(a => (a.id === apptId ? { ...a, status: newStatus } : a)));
     try {
       const { error } = await supabase.from('appointments').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', apptId);
       if (error) throw error;
-      // write appointment_logs audit
       try {
         await supabase.from('appointment_logs').insert([{
           appointment_id: apptId,
@@ -485,13 +466,11 @@ export default function AppointmentsPage() {
         }]);
       } catch (e) { console.warn('log write failed', e); }
       toast({ title: 'Status updated', description: `Appointment status set to ${newStatus}`, status: 'success' });
-      // refresh stats & alerts
       fetchStats();
       fetchAppointments({ page, size: pageSize, q: searchQ });
     } catch (err) {
       console.error('update status', err);
       toast({ title: 'Update failed', description: err?.message || 'Could not update status', status: 'error' });
-      // rollback (refetch list to be safe)
       fetchAppointments({ page, size: pageSize, q: searchQ });
       fetchStats();
     } finally {
@@ -531,10 +510,8 @@ export default function AppointmentsPage() {
       };
       const { data: newRow, error } = await supabase.from('appointments').insert([payload]).select().single();
       if (error) throw error;
-      // log
       try { await supabase.from('appointment_logs').insert([{ appointment_id: newRow.id, changed_by: user?.id || null, action: 'clone', message: `Cloned from ${appt.appointment_number}`, created_at: new Date().toISOString(), before: JSON.stringify(appt), after: JSON.stringify(newRow) }]); } catch (e) { /* ignore */ }
       toast({ title: 'Cloned', description: `Appointment cloned as ${newRow.appointment_number}`, status: 'success' });
-      // refresh listing
       fetchStats();
       fetchAppointments({ page: 1, size: pageSize, q: searchQ });
     } catch (err) {
@@ -555,7 +532,6 @@ export default function AppointmentsPage() {
     try {
       const { error } = await supabase.from('appointments').delete().eq('id', appt.id);
       if (error) throw error;
-      // log
       try { await supabase.from('appointment_logs').insert([{ appointment_id: appt.id, changed_by: user?.id || null, action: 'delete', message: `Deleted appointment ${appt.appointment_number}`, created_at: new Date().toISOString(), before: JSON.stringify(appt) }]); } catch (e) { /* ignore */ }
       toast({ title: 'Deleted', description: `Appointment ${appt.appointment_number} deleted`, status: 'success' });
       fetchStats();
@@ -578,7 +554,6 @@ export default function AppointmentsPage() {
 
   const handleSelectAllOnPage = () => {
     if (selectAllOnPage) {
-      // unselect all on page
       setSelectedIds(prev => {
         const s = new Set(prev);
         appointments.forEach(a => s.delete(a.id));
@@ -604,7 +579,6 @@ export default function AppointmentsPage() {
     try {
       const { error } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', ids);
       if (error) throw error;
-      // log for each (best-effort)
       try {
         const logs = ids.map(id => ({ appointment_id: id, changed_by: user?.id || null, action: 'status_change', before: null, after: JSON.stringify({ status: 'Completed' }), created_at: new Date().toISOString() }));
         await runInBatches(logs, 50, async (rec) => supabase.from('appointment_logs').insert([rec]));
@@ -621,7 +595,6 @@ export default function AppointmentsPage() {
 
   const bulkExportSelected = async () => {
     if (!selectedIds.size) { toast({ title: 'No appointments selected', status: 'info' }); return; }
-    // get selected rows data from current appointments list (if not present, fetch server)
     const ids = Array.from(selectedIds);
     const rows = appointments.filter(a => ids.includes(a.id)).map(a => ({
       appointment_number: a.appointment_number,
@@ -647,7 +620,6 @@ export default function AppointmentsPage() {
     try {
       const { error } = await supabase.from('appointments').delete().in('id', ids);
       if (error) throw error;
-      // log best-effort
       try {
         const logs = ids.map(id => ({ appointment_id: id, changed_by: user?.id || null, action: 'bulk_delete', message: `Bulk delete by ${user?.id}`, created_at: new Date().toISOString() }));
         await runInBatches(logs, 50, async (rec) => supabase.from('appointment_logs').insert([rec]));
@@ -831,7 +803,7 @@ export default function AppointmentsPage() {
             <Thead>
               <Tr>
                 <Th px={2}><Text /></Th>
-                <Th>Appointment</Th>
+                <Th>SAD(s)</Th>
                 <Th>Weighbridge #</Th>
                 <Th>Agent</Th>
                 <Th>Pickup</Th>
@@ -845,7 +817,13 @@ export default function AppointmentsPage() {
             <Tbody>
               <AnimatePresence>
                 {appointments.map((a) => {
-                  const t1count = Array.isArray(a.t1_records) ? a.t1_records.length : a.total_t1s || 0;
+                  const t1s = Array.isArray(a.t1_records) ? a.t1_records : [];
+                  // extract unique SAD numbers
+                  const sadSet = new Set(t1s.map(t => t.sad_no).filter(Boolean));
+                  const sadList = Array.from(sadSet);
+                  const sadDisplay = sadList.length ? sadList.slice(0, 3).join(', ') : (a.appointment_number || '—');
+                  const sadTooltip = sadList.length ? sadList.join(', ') : (a.appointment_number || '');
+                  const t1count = t1s.length || a.total_t1s || 0;
                   const rowAlerts = alertsMap[a.id] || [];
                   return (
                     <MotionTr key={a.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }}>
@@ -854,9 +832,21 @@ export default function AppointmentsPage() {
                       </Td>
 
                       <Td>
-                        <Text fontWeight="bold">{a.appointment_number}</Text>
-                        <Text fontSize="xs" color="gray.500">{a.weighbridge_number}</Text>
+                        {sadList.length ? (
+                          <Tooltip label={sadTooltip}>
+                            <Box>
+                              <Text fontWeight="bold">{sadDisplay}{sadList.length > 3 ? ` +${sadList.length - 3}` : ''}</Text>
+                              <Text fontSize="xs" color="gray.500">{a.appointment_number}</Text>
+                            </Box>
+                          </Tooltip>
+                        ) : (
+                          <Box>
+                            <Text fontWeight="bold">{a.appointment_number}</Text>
+                            <Text fontSize="xs" color="gray.500">No T1 SADs</Text>
+                          </Box>
+                        )}
                       </Td>
+
                       <Td>{a.weighbridge_number}</Td>
                       <Td>
                         {a.agent_name}
@@ -961,7 +951,6 @@ export default function AppointmentsPage() {
                       <Text fontSize="sm"><strong>Current status</strong></Text>
                       <Text fontSize="xs" color="gray.500">{activeAppt?.status}</Text>
                     </Box>
-                    {/* derive Completed date from logs if available */}
                     {activityLogs && activityLogs.length ? (
                       <>
                         {activityLogs.filter(l => l.action === 'status_change').map((l, i) => (
