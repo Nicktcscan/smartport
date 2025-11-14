@@ -91,7 +91,7 @@ const pdfStyles = StyleSheet.create({
   t1Col4: { width: '28%', fontSize: 10.5 },
 
   qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
-  qrBox: { width: '36%', alignItems: 'center' },
+  qrBox: { width: '34%', alignItems: 'center', marginRight: 28 },
 
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
 
@@ -99,9 +99,9 @@ const pdfStyles = StyleSheet.create({
 
   watermarkCenter: {
     position: 'absolute',
-    left: '20%',
-    top: '28%',
-    width: '60%',
+    left: '12.5%',   // shift slightly left so increased width remains centered
+    top: '18%',      // moved slightly up
+    width: '75%',    // increased by ~25% (from 60% -> 75%)
     opacity: 0.06,
   },
 });
@@ -266,7 +266,7 @@ function AppointmentPdf({ ticket }) {
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark centered */}
+        {/* Watermark centered (moved up and increased size by 25%) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
@@ -350,14 +350,13 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
-          {/* Barcode area: only show barcode and a tasteful caption.
-              The barcode encodes a simple text payload (Appointment and Weighbridge numbers). */}
+          {/* Barcode area: moved slightly left by changing filler width and adding right margin on qrBox */}
           <PdfView style={pdfStyles.qrArea}>
-            <PdfView style={{ width: '64%' }} />
+            <PdfView style={{ width: '56%' }} />
 
             <PdfView style={pdfStyles.qrBox}>
               {t.barcodeImage ? (
-                <PdfImage src={t.barcodeImage} style={{ width: 320, height: 72 }} />
+                <PdfImage src={t.barcodeImage} style={{ width: 300, height: 68 }} />
               ) : (
                 <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
               )}
