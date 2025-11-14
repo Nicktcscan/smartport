@@ -98,6 +98,45 @@ const pdfStyles = StyleSheet.create({
   infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 }
 });
 
+// ---------- Utility functions (fix: ensure these are defined) ----------
+function downloadBlob(blob, filename) {
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'file.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error('downloadBlob failed', e);
+  }
+}
+
+async function triggerConfetti(count = 140) {
+  try {
+    if (typeof window !== 'undefined' && !window.confetti) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+        s.onload = () => resolve();
+        s.onerror = reject;
+        document.head.appendChild(s);
+      });
+    }
+    if (window.confetti) {
+      window.confetti({
+        particleCount: Math.min(count, 400),
+        spread: 160,
+        origin: { y: 0.6 },
+      });
+    }
+  } catch (e) {
+    console.warn('triggerConfetti failed', e);
+  }
+}
+
 // ---------- PDF component (QR only + beautiful human-readable layout) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
