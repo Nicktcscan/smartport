@@ -1,11 +1,10 @@
 // pages/appointment.jsx
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Box, Button, Container, Heading, Input as ChakraInput, Select, Text, SimpleGrid,
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
-  IconButton, Badge, Divider, VStack, useBreakpointValue, Flex
-} from '@chakra-ui/react';
+  IconButton, Badge, Divider, VStack, useBreakpointValue, Flex} from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -39,7 +38,7 @@ const WAREHOUSES = [
 const PACKING_TYPES = [
   { value: 'container', label: 'Container' },
   { value: 'bulk', label: 'Bulk' },
-  { value: 'loose', label: 'Loose Cargo' },
+  { value: 'loose cargo', label: 'Loose Cargo' },
 ];
 
 const MotionBox = motion(Box);
@@ -673,6 +672,50 @@ export default function AppointmentPage() {
 
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
+
+    // New: verify all SADs exist in sad_declarations before creating appointment
+    try {
+      const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
+      const uniqueSads = Array.from(new Set(rawSadList));
+      if (uniqueSads.length === 0) {
+        toast({ status: 'error', title: 'Please add at least one T1 record' });
+        return;
+      }
+
+      // query sad_declarations for those SAD numbers
+      const { data: existing, error: sadErr } = await supabase
+        .from('sad_declarations')
+        .select('sad_no')
+        .in('sad_no', uniqueSads)
+        .limit(1000);
+
+      if (sadErr) {
+        console.error('Error checking sad_declarations', sadErr);
+        toast({ status: 'error', title: 'Unable to verify SADs', description: 'Could not validate SAD registration. Please try again or contact support.' });
+        return;
+      }
+
+      const present = (existing || []).map(r => String(r.sad_no).trim());
+      const missing = uniqueSads.filter(s => !present.includes(s));
+
+      if (missing.length > 0) {
+        // friendly message requested by the user
+        toast({
+          title: "This Appointment has an SAD that has not been registered. Kindly Contact App Support or Weighbridge Operators for assistance",
+          description: `Missing SAD(s): ${missing.join(', ')}`,
+          status: 'error',
+          duration: 9000,
+          isClosable: true,
+        });
+        return;
+      }
+    } catch (err) {
+      console.error('SAD validation failed', err);
+      toast({ status: 'error', title: 'Failed to verify SADs', description: err?.message || 'Unexpected error' });
+      return;
+    }
+
+    // If all SADs checked out, proceed to create
     setLoadingCreate(true);
 
     const payload = {

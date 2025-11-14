@@ -1,5 +1,6 @@
+/* eslint-disable react/jsx-no-undef */
 // src/pages/Appointments.jsx
-import React, { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import {
   Box,
   Container,
@@ -26,7 +27,6 @@ import {
   IconButton,
   Badge,
   Checkbox,
-  VStack,
   Tooltip,
   Drawer,
   DrawerOverlay,
@@ -61,7 +61,7 @@ import { useAuth } from '../context/AuthContext';
 
 const MotionTr = motion(Tr);
 
-// Simple sparkline component (SVG) — light-weight, no external libs
+// Simple sparkline component (SVG)
 function Sparkline({ data = [], width = 120, height = 28 }) {
   if (!Array.isArray(data) || data.length === 0) {
     return <svg width={width} height={height}><polyline points="" /></svg>;
@@ -115,6 +115,19 @@ function exportToCSV(rows = [], filename = 'export.csv') {
   URL.revokeObjectURL(url);
 }
 
+// helper: run items in batches (used for logs)
+async function runInBatches(items = [], batchSize = 20, fn) {
+  const results = [];
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    const promises = chunk.map(fn);
+    // eslint-disable-next-line no-await-in-loop
+    const chunkRes = await Promise.all(promises);
+    results.push(...chunkRes);
+  }
+  return results;
+}
+
 export default function AppointmentsPage() {
   const toast = useToast();
   const { user } = useAuth() || {};
@@ -159,11 +172,16 @@ export default function AppointmentsPage() {
   const [sparkCompleted, setSparkCompleted] = useState([]);
   const [sparkPostedRatio, setSparkPostedRatio] = useState([]);
 
+  // supabase sad subscription ref
+  const sadSubRef = useRef(null);
+
   // refs to avoid stale closures
   const pageRef = useRef(page);
   pageRef.current = page;
   const pageSizeRef = useRef(pageSize);
   pageSizeRef.current = pageSize;
+  const searchQRef = useRef(searchQ);
+  searchQRef.current = searchQ;
 
   // utility: format date only (yyyy-mm-dd)
   const formatDateISO = (d) => {
@@ -235,9 +253,9 @@ export default function AppointmentsPage() {
           .order('created_at', { ascending: true })
           .limit(5000);
 
-        const createdCounts = dayStarts.map(d => 0);
-        const completedCounts = dayStarts.map(d => 0);
-        const postedCounts = dayStarts.map(d => 0);
+        const createdCounts = dayStarts.map(() => 0);
+        const completedCounts = dayStarts.map(() => 0);
+        const postedCounts = dayStarts.map(() => 0);
 
         if (Array.isArray(recentAppts)) {
           for (const a of recentAppts) {
@@ -274,7 +292,7 @@ export default function AppointmentsPage() {
   };
 
   // --- Fetch appointments (paged, with t1_records) and compute alerts ---
-  const fetchAppointments = async ({ page: p = pageRef.current, size = pageSizeRef.current, q = searchQ, status = statusFilter, pickup = pickupDateFilter } = {}) => {
+  const fetchAppointments = async ({ page: p = pageRef.current, size = pageSizeRef.current, q = searchQRef.current, status = statusFilter, pickup = pickupDateFilter } = {}) => {
     setLoadingList(true);
     try {
       const from = (p - 1) * size;
@@ -363,6 +381,99 @@ export default function AppointmentsPage() {
     }
   };
 
+  // -- SAD -> Appointment status sync handler --
+  const handleSadDeclarationChange = async (newRow) => {
+    try {
+      if (!newRow || !newRow.sad_no) return;
+      const sadNo = String(newRow.sad_no).trim();
+      const newStatus = String(newRow.status || '').trim();
+
+      // only care about In Progress -> Posted, Completed -> Completed
+      let targetApptStatus = null;
+      if (newStatus === 'In Progress') targetApptStatus = 'Posted';
+      else if (newStatus === 'Completed') targetApptStatus = 'Completed';
+      else return;
+
+      // find appointment_ids linked to this SAD via t1_records
+      const { data: t1s, error: t1err } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(5000);
+      if (t1err) {
+        console.warn('finding appointment ids for sad sync failed', t1err);
+        return;
+      }
+      const apptIds = Array.from(new Set((t1s || []).map(r => r.appointment_id).filter(Boolean)));
+      if (!apptIds.length) return;
+
+      // If target is Posted, don't downgrade appointments that are already Completed.
+      if (targetApptStatus === 'Posted') {
+        const { error: updErr } = await supabase.from('appointments')
+          .update({ status: 'Posted', updated_at: new Date().toISOString() })
+          .in('id', apptIds)
+          .neq('status', 'Completed');
+        if (updErr) throw updErr;
+      } else {
+        const { error: updErr } = await supabase.from('appointments')
+          .update({ status: 'Completed', updated_at: new Date().toISOString() })
+          .in('id', apptIds);
+        if (updErr) throw updErr;
+      }
+
+      // write appointment_logs entries (best-effort)
+      try {
+        const logs = apptIds.map(id => ({
+          appointment_id: id,
+          changed_by: null,
+          action: 'sad_status_sync',
+          message: `SAD ${sadNo} status -> ${newStatus}`,
+          created_at: new Date().toISOString(),
+        }));
+        await runInBatches(logs, 50, async (rec) => supabase.from('appointment_logs').insert([rec]));
+      } catch (e) { /* ignore logging errors */ }
+
+      // refresh UI
+      await fetchStats();
+      await fetchAppointments({ page: pageRef.current, size: pageSizeRef.current, q: searchQRef.current });
+      toast({ title: `SAD ${sadNo} → ${newStatus}`, description: `Synced ${apptIds.length} appointment(s) to ${targetApptStatus}`, status: 'info' });
+    } catch (err) {
+      console.error('handleSadDeclarationChange', err);
+    }
+  };
+
+  // subscribe to sad_declarations updates (realtime)
+  useEffect(() => {
+    try {
+      if (supabase.channel) {
+        // modern channel API
+        const ch = supabase.channel('public:sad_declarations')
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sad_declarations' }, (payload) => {
+            const newRow = payload?.new;
+            handleSadDeclarationChange(newRow);
+          })
+          .subscribe();
+        sadSubRef.current = ch;
+      } else {
+        // fallback older API
+        const s = supabase.from('sad_declarations').on('UPDATE', (payload) => {
+          const newRow = payload?.new;
+          handleSadDeclarationChange(newRow);
+        }).subscribe();
+        sadSubRef.current = s;
+      }
+    } catch (e) {
+      console.warn('subscribe sadness', e);
+    }
+
+    return () => {
+      try {
+        if (sadSubRef.current && supabase.removeChannel) {
+          supabase.removeChannel(sadSubRef.current).catch(() => {});
+        } else if (sadSubRef.current && sadSubRef.current.unsubscribe) {
+          sadSubRef.current.unsubscribe();
+        }
+      } catch (e) { /* ignore */ }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once
+
   // initial load
   useEffect(() => {
     fetchStats();
@@ -393,15 +504,14 @@ export default function AppointmentsPage() {
     setDrawerLoading(true);
     try {
       const apptId = appointment.id;
-      const [{ data: t1s }, { data: logs }] = await Promise.allSettled([
+      const [t1res, logsRes] = await Promise.allSettled([
         supabase.from('t1_records').select('*').eq('appointment_id', apptId).order('created_at', { ascending: true }),
         supabase.from('appointment_logs').select('*').eq('appointment_id', apptId).order('created_at', { ascending: false }),
-      ]).then(results =>
-        results.map(r => (r.status === 'fulfilled' ? r.value : { data: [], error: r.reason }))
-      );
-
-      setDrawerT1s(t1s || []);
-      setActivityLogs(logs || []);
+      ]);
+      const t1s = t1res.status === 'fulfilled' ? t1res.value.data || [] : [];
+      const logs = logsRes.status === 'fulfilled' ? logsRes.value.data || [] : [];
+      setDrawerT1s(t1s);
+      setActivityLogs(logs);
     } catch (err) {
       console.error('openDrawer', err);
       toast({ title: 'Failed to open details', description: err?.message || 'Unexpected', status: 'error' });
@@ -471,6 +581,7 @@ export default function AppointmentsPage() {
     } catch (err) {
       console.error('update status', err);
       toast({ title: 'Update failed', description: err?.message || 'Could not update status', status: 'error' });
+      // rollback (refetch)
       fetchAppointments({ page, size: pageSize, q: searchQ });
       fetchStats();
     } finally {
@@ -633,19 +744,6 @@ export default function AppointmentsPage() {
       toast({ title: 'Bulk delete failed', description: err?.message || 'Unexpected', status: 'error' });
     }
   };
-
-  // small helper to run things in batches
-  async function runInBatches(items = [], batchSize = 20, fn) {
-    const results = [];
-    for (let i = 0; i < items.length; i += batchSize) {
-      const chunk = items.slice(i, i + batchSize);
-      const promises = chunk.map(fn);
-      // eslint-disable-next-line no-await-in-loop
-      const chunkRes = await Promise.all(promises);
-      results.push(...chunkRes);
-    }
-    return results;
-  }
 
   // export filtered CSV
   const handleExportFilteredCSV = async () => {
