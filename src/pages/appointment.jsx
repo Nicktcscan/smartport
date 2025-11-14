@@ -20,6 +20,7 @@ import {
   Rect,
   Font
 } from '@react-pdf/renderer';
+import QRCode from 'qrcode';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
 // ---------- Assets (ensure these exist in src/assets/) ----------
@@ -44,7 +45,7 @@ const PACKING_TYPES = [
 
 const MotionBox = motion(Box);
 
-// ---------- PDF styles (react-pdf) ----------
+// ---------- PDF styles (react-pdf) - enhanced for a premium look ----------
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 28,
@@ -53,43 +54,58 @@ const pdfStyles = StyleSheet.create({
     fontSize: 10.5,
     fontFamily: 'Times-Roman',
     position: 'relative',
-    color: '#000',
+    color: '#0b1220',
+    backgroundColor: '#ffffff',
   },
 
-  headerWrap: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  leftHeader: { width: '22%', alignItems: 'flex-start' },
-  centerHeader: { width: '56%', alignItems: 'center', textAlign: 'center' },
-  rightHeader: { width: '22%', alignItems: 'flex-end' },
-  logoSmall: { width: 78, height: 44, objectFit: 'contain' },
-  titleBig: { fontSize: 18, fontWeight: 700, textAlign: 'center', marginBottom: 2 },
-  subtitle: { fontSize: 9, color: '#222', marginBottom: 2 },
+  headerWrap: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  headerLeft: { width: '18%', alignItems: 'flex-start' },
+  headerCenter: { width: '62%', alignItems: 'center', textAlign: 'center' },
+  headerRight: { width: '18%', alignItems: 'flex-end' },
 
-  mainBox: { borderWidth: 0.6, borderColor: '#000', padding: 14, marginBottom: 10, position: 'relative' },
-  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  headerBar: {
+    backgroundColor: '#0f172a',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+
+  logoSmall: { width: 72, height: 40, objectFit: 'contain' },
+  titleBig: { fontSize: 16, fontWeight: 700, color: '#fff', letterSpacing: 0.6 },
+  subtitle: { fontSize: 9, color: '#d1d5db', marginTop: 2 },
+
+  mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 14, marginBottom: 12, position: 'relative', borderRadius: 8 },
+  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
 
   // label uses registered monospace font
-  label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2 },
-  value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4 },
+  label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2, color: '#0b1220' },
+  value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4, color: '#0b1220' },
 
-  groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#000', paddingTop: 6, marginTop: 6 },
+  groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#e6eef8', paddingTop: 8, marginTop: 8 },
 
-  t1Table: { width: '100%', marginTop: 6, borderTopWidth: 0.5, borderTopColor: '#000' },
-  t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.5, borderBottomColor: '#000', paddingVertical: 6 },
-  t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#444' },
-  t1Col1: { width: '10%', fontSize: 10.5 },
+  t1Table: { width: '100%', marginTop: 6, borderTopWidth: 0.5, borderTopColor: '#e6eef8' },
+  t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.6, borderBottomColor: '#e6eef8', paddingVertical: 6, backgroundColor: '#f8fafc' },
+  t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#f1f5f9' },
+  t1Col1: { width: '8%', fontSize: 10.5 },
   t1Col2: { width: '40%', fontSize: 10.5 },
-  t1Col3: { width: '25%', fontSize: 10.5 },
-  t1Col4: { width: '25%', fontSize: 10.5 },
+  t1Col3: { width: '22%', fontSize: 10.5 },
+  t1Col4: { width: '30%', fontSize: 10.5 },
 
-  watermarkInline: { width: '40%', opacity: 0.5, position: 'absolute', left: '30%', top: 18, zIndex: 0 },
+  watermarkInline: { width: '20%', opacity: 0.28, position: 'absolute', left: '38%', top: 18, zIndex: 0 }, // reduced by ~50%
 
-  barcodeBox: { marginTop: 12, width: '100%', flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
+  barcodeBox: { marginTop: 12, width: '100%', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
 
-  footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 8 },
+  footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 8, color: '#6b7280' },
+
+  badgePill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 }
 });
 
 // ---------- Code128 patterns (widths) ----------
-const CODE128_WIDTHS = [
+const CODE128_WIDTHS = [ /* same as before */ 
   "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
   "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
   "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
@@ -104,7 +120,7 @@ const CODE128_WIDTHS = [
 ];
 const CODE128_STOP = "2331112";
 
-// ---------- Helpers ----------
+// ---------- Helpers (barcode builders unchanged) ----------
 function charCodeForCode128B(ch) {
   const code = ch.charCodeAt(0);
   if (code >= 32 && code <= 127) return code - 32;
@@ -148,7 +164,7 @@ function codesToModuleWidths(codes) {
 }
 
 // ---------- Code128 Svg component (scanner-friendly) ----------
-function Code128Svg({ payloadStr, width = 315, height = 42 }) {
+function Code128Svg({ payloadStr, width = 360, height = 48 }) {
   const codes = buildCode128CodesB(payloadStr);
   const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
   const modulePx = width / totalModules;
@@ -205,10 +221,12 @@ async function triggerConfetti(count = 140) {
   } catch (e) {}
 }
 
-// ---------- PDF component ----------
+// ---------- PDF component (improved styling + QR image + richer barcode payload) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
+    appointmentNumber: t.appointmentNumber || '',
+    weighbridgeNumber: t.weighbridgeNumber || '',
     agentTin: t.agentTin || '',
     agentName: t.agentName || '',
     warehouse: t.warehouseLabel || t.warehouse || '',
@@ -220,9 +238,13 @@ function AppointmentPdf({ ticket }) {
     t1Count: (t.t1s || []).length,
     packingTypesUsed: Array.isArray(t.t1s) ? Array.from(new Set(t.t1s.map(r => r.packingType))).join(', ') : '',
     t1s: t.t1s || [],
+    createdAt: t.createdAt || '',
   };
 
-  const barcodePayloadObj = {
+  // Build full payload that will be encoded into QR and barcode
+  const fullPayload = {
+    appointmentNumber: ticketData.appointmentNumber,
+    weighbridgeNumber: ticketData.weighbridgeNumber,
     agentTin: ticketData.agentTin,
     agentName: ticketData.agentName,
     warehouse: ticketData.warehouse,
@@ -232,71 +254,72 @@ function AppointmentPdf({ ticket }) {
     driverName: ticketData.driverName,
     driverLicense: ticketData.driverLicense,
     t1s: ticketData.t1s,
+    createdAt: ticketData.createdAt,
   };
-  const barcodePayloadStr = JSON.stringify(barcodePayloadObj);
+  const barcodePayloadStr = JSON.stringify(fullPayload);
 
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        <PdfView style={pdfStyles.headerWrap}>
-          <PdfView style={pdfStyles.leftHeader}>
+        {/* Header */}
+        <PdfView style={pdfStyles.headerBar}>
+          <PdfView style={pdfStyles.headerLeft}>
             <PdfImage src={gralogo} style={pdfStyles.logoSmall} />
-            <PdfText style={{ fontSize: 9, marginTop: 2 }}>GAMBIA REVENUE AUTHORITY</PdfText>
           </PdfView>
 
-          <PdfView style={pdfStyles.centerHeader}>
-            <PdfText style={pdfStyles.titleBig}>WEIGHBRIDGE TICKET</PdfText>
-            <PdfText style={pdfStyles.subtitle}>Banjul Sea Port, Banjul, The Gambia</PdfText>
+          <PdfView style={pdfStyles.headerCenter}>
+            <PdfText style={pdfStyles.titleBig}>NICK TC-SCAN (GAMBIA) LTD.</PdfText>
+            <PdfText style={pdfStyles.subtitle}>Weighbridge Ticket / Appointment — Official Document</PdfText>
           </PdfView>
 
-          <PdfView style={pdfStyles.rightHeader}>
+          <PdfView style={pdfStyles.headerRight}>
             <PdfImage src={gnswlogo} style={pdfStyles.logoSmall} />
-            <PdfText style={{ fontSize: 9, marginTop: 2 }}>GNSW</PdfText>
           </PdfView>
         </PdfView>
 
         <PdfView style={pdfStyles.mainBox}>
+          {/* subtle watermark reduced in size */}
           <PdfImage src={coat} style={pdfStyles.watermarkInline} />
 
           <PdfView style={pdfStyles.sectionRow}>
             <PdfView style={{ width: '48%', zIndex: 1 }}>
-              <PdfText style={pdfStyles.label}>Agent TIN :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.agentTin}</PdfText>
+              <PdfText style={pdfStyles.label}>Appointment No :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.appointmentNumber}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Agent Name :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.agentName}</PdfText>
+              <PdfText style={pdfStyles.label}>Weighbridge No :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.weighbridgeNumber}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Warehouse Location :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
+              <PdfText style={pdfStyles.label}>Agent :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.agentName} — {ticketData.agentTin}</PdfText>
             </PdfView>
 
             <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Warehouse :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
+
               <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Consolidated :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.consolidated}</PdfText>
-
-              <PdfText style={pdfStyles.label}>Truck Number :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.truckNumber}</PdfText>
+              <PdfText style={pdfStyles.label}>Status :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.consolidated === 'Y' ? 'Consolidated' : 'Single'}</PdfText>
             </PdfView>
           </PdfView>
 
           <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBoxTopBorder]}>
             <PdfView style={{ width: '48%', zIndex: 1 }}>
-              <PdfText style={pdfStyles.label}>Driver Name :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.driverName}</PdfText>
+              <PdfText style={pdfStyles.label}>Truck / Driver :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.truckNumber} — {ticketData.driverName}</PdfText>
             </PdfView>
 
             <PdfView style={{ width: '48%', zIndex: 1 }}>
-              <PdfText style={pdfStyles.label}>Driver License No :</PdfText>
+              <PdfText style={pdfStyles.label}>Driver License :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
             </PdfView>
           </PdfView>
 
           <PdfView style={pdfStyles.groupBoxTopBorder}>
             <PdfText style={[pdfStyles.label, { textAlign: 'left', zIndex: 1 }]}>T1 Records Summary :</PdfText>
-            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4, zIndex: 1 }}>
+            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, zIndex: 1 }}>
               <PdfText style={pdfStyles.value}>Count : {ticketData.t1Count}</PdfText>
               <PdfText style={pdfStyles.value}>Packing types : {ticketData.packingTypesUsed || '—'}</PdfText>
             </PdfView>
@@ -314,7 +337,7 @@ function AppointmentPdf({ ticket }) {
                   <PdfView key={i} style={pdfStyles.t1Row}>
                     <PdfText style={pdfStyles.t1Col1}>{String(i + 1)}</PdfText>
                     <PdfText style={pdfStyles.t1Col2}>{r.sadNo || r.sad_no || '—'}</PdfText>
-                    <PdfText style={pdfStyles.t1Col3}>{r.packingType || r.packing_type || '—'}</PdfText>
+                    <PdfText style={pdfStyles.t1Col3}>{(r.packingType || r.packing_type || '—').toString()}</PdfText>
                     <PdfText style={pdfStyles.t1Col4}>{r.containerNo || r.container_no || '—'}</PdfText>
                   </PdfView>
                 ))}
@@ -322,13 +345,29 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
+          {/* Barcode + QR area */}
           <PdfView style={pdfStyles.barcodeBox}>
-            <Code128Svg payloadStr={barcodePayloadStr} width={315} height={42} />
+            <PdfView style={{ width: '62%' }}>
+              <PdfText style={[pdfStyles.label, { marginBottom: 6 }]}>Machine Readable Barcode</PdfText>
+              <Code128Svg payloadStr={barcodePayloadStr} width={380} height={46} />
+              <PdfText style={{ fontSize: 9, marginTop: 6, color: '#374151' }}>{ticketData.appointmentNumber} · {ticketData.weighbridgeNumber}</PdfText>
+            </PdfView>
+
+            <PdfView style={{ width: '34%', alignItems: 'center' }}>
+              {t.qrImage ? (
+                <>
+                  <PdfText style={[pdfStyles.label, { fontSize: 10 }]}>QR — Scan for Details</PdfText>
+                  <PdfImage src={t.qrImage} style={{ width: 100, height: 100, marginTop: 6 }} />
+                </>
+              ) : (
+                <PdfText style={{ fontSize: 9, color: '#6b7280' }}>QR not available</PdfText>
+              )}
+            </PdfView>
           </PdfView>
         </PdfView>
 
         <PdfView>
-          <PdfText style={pdfStyles.footerText}>- Notice -  This document is an official weighbridge ticket. Keep it safe for audits.</PdfText>
+          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Data encoded inside QR/barcode.</PdfText>
         </PdfView>
       </Page>
     </Document>
@@ -372,7 +411,7 @@ export default function AppointmentPage() {
   const containerRef = useRef(null);
   const isMobile = useBreakpointValue({ base: true, md: false });
 
-  // utility UI highlights (move above speech effect so it's available to handler)
+  // utility UI highlights
   const pulseRow = (index) => {
     const rows = document.querySelectorAll('.panel-card');
     const idx = Math.max(0, Math.min(index, rows.length - 1));
@@ -387,7 +426,7 @@ export default function AppointmentPage() {
     setTimeout(() => els.forEach((el) => el.classList.remove('highlight-flash')), 2000);
   };
 
-  // voice command handler (kept above the effect so useEffect's dependency warning is avoided)
+  // voice command handler
   const handleVoiceCommand = (text = '') => {
     const t = String(text || '').toLowerCase().trim();
     toast({ status: 'info', title: 'Voice command', description: `"${t}"`, duration: 2000 });
@@ -455,7 +494,7 @@ export default function AppointmentPage() {
     };
   }, []);
 
-  // Speech recognition setup - uses handleVoiceCommand defined above
+  // Speech recognition setup
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -476,7 +515,6 @@ export default function AppointmentPage() {
     return () => {
       try { rec.stop(); } catch (e) {}
     };
-    // intentionally empty dep array — handler is stable because it's defined above in this component scope
   }, );
 
   const startVoice = () => {
@@ -555,7 +593,6 @@ export default function AppointmentPage() {
       setConfirmOpen(true);
     } catch (err) {
       console.error('Failed to generate preview numbers', err);
-      // fallback to older generator
       try {
         const fallback = await generateNumbersUsingSupabase(pickupDate || new Date().toISOString().slice(0, 10));
         setPreviewAppointmentNumber(fallback.appointmentNumber);
@@ -790,6 +827,59 @@ export default function AppointmentPage() {
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
+  // helper to assemble the full payload used for QR/barcode and generate QR image
+  async function buildPrintableTicketObject(dbAppointment) {
+    // dbAppointment = the object returned from DB/insert (may be partial)
+    const ticket = {
+      appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number || '',
+      weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '',
+      agentTin: dbAppointment.agentTin || dbAppointment.agent_tin || '',
+      agentName: dbAppointment.agentName || dbAppointment.agent_name || '',
+      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || '',
+      pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date || '',
+      consolidated: dbAppointment.consolidated || dbAppointment.consolidated || '',
+      truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number || '',
+      driverName: dbAppointment.driverName || dbAppointment.driver_name || '',
+      driverLicense: dbAppointment.driverLicense || dbAppointment.driver_license_no || '',
+      t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
+      createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
+    };
+
+    // build a full payload JSON (human + machine friendly)
+    const fullPayload = {
+      appointmentNumber: ticket.appointmentNumber,
+      weighbridgeNumber: ticket.weighbridgeNumber,
+      agentTin: ticket.agentTin,
+      agentName: ticket.agentName,
+      warehouse: ticket.warehouse,
+      pickupDate: ticket.pickupDate,
+      consolidated: ticket.consolidated,
+      truckNumber: ticket.truckNumber,
+      driverName: ticket.driverName,
+      driverLicense: ticket.driverLicense,
+      t1s: ticket.t1s,
+      createdAt: ticket.createdAt,
+    };
+
+    // make barcode string (Code128) — JSON string but trimmed of spaces
+    const barcodePayloadStr = JSON.stringify(fullPayload);
+
+    // generate QR image as data URL
+    let qrDataUrl = null;
+    try {
+      qrDataUrl = await QRCode.toDataURL(barcodePayloadStr, { margin: 1, scale: 6 });
+    } catch (e) {
+      console.warn('QR generation failed', e);
+      qrDataUrl = null;
+    }
+
+    // attach to ticket
+    ticket.barcodePayloadStr = barcodePayloadStr;
+    ticket.qrImage = qrDataUrl;
+
+    return ticket;
+  }
+
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
@@ -857,27 +947,32 @@ export default function AppointmentPage() {
     };
 
     try {
+      // create in DB
       const result = await createDirectlyInSupabase(payload);
-      const ticket = result.appointment;
+      const dbAppointment = result.appointment;
 
-      const ticketForPdf = {
-        agentTin: ticket.agentTin || ticket.agent_tin || payload.agentTin,
-        agentName: ticket.agentName || ticket.agent_name || payload.agentName,
-        warehouse: ticket.warehouse || payload.warehouse,
-        warehouseLabel: ticket.warehouseLabel || payload.warehouseLabel,
-        pickupDate: ticket.pickupDate || payload.pickupDate,
-        consolidated: ticket.consolidated || payload.consolidated,
-        truckNumber: ticket.truckNumber || payload.truckNumber,
-        driverName: ticket.driverName || payload.driverName,
-        driverLicense: ticket.driverLicense || payload.driverLicense,
-        t1s: ticket.t1s || payload.t1s || [],
-      };
+      // build printable ticket object (includes qr image and barcode string)
+      const printable = await buildPrintableTicketObject({
+        appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
+        weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
+        agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
+        agentName: dbAppointment.agentName || dbAppointment.agent_name,
+        warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location,
+        pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
+        consolidated: dbAppointment.consolidated || dbAppointment.consolidated,
+        truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
+        driverName: dbAppointment.driverName || dbAppointment.driver_name,
+        driverLicense: dbAppointment.driverLicense || dbAppointment.driver_license_no,
+        t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
+        createdAt: dbAppointment.createdAt || dbAppointment.created_at,
+      });
 
+      // generate PDF & download
       try {
-        const doc = <AppointmentPdf ticket={ticketForPdf} />;
+        const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
-        downloadBlob(blob, `WeighbridgeTicket-${ticketForPdf.agentTin || Date.now()}.pdf`);
+        downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
@@ -1073,7 +1168,7 @@ export default function AppointmentPage() {
         </MotionBox>
       </Box>
 
-      {/* T1 Modal — cinematic holographic modal */}
+      {/* T1 Modal */}
       <Modal isOpen={isT1ModalOpen} onClose={closeT1Modal} isCentered size="md">
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
         <AnimatePresence>
