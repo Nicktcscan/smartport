@@ -359,6 +359,10 @@ export default function AppointmentPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
+  // preview states for generated numbers (shown in confirm modal)
+  const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
+  const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
+
   // only need the setter (isOrbOpen was unused)
   const [, setOrbOpen] = useState(false);
 
@@ -538,11 +542,35 @@ export default function AppointmentPage() {
 
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
-  const openConfirm = () => {
+  // Modified openConfirm: generate numbers, set preview, then open modal
+  const openConfirm = async () => {
     if (!validateMainForm()) return;
-    setConfirmOpen(true);
+
+    try {
+      const pickup = pickupDate || new Date().toISOString().slice(0, 10);
+      // generate preview numbers
+      const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(pickup);
+      setPreviewAppointmentNumber(appointmentNumber);
+      setPreviewWeighbridgeNumber(weighbridgeNumber);
+      setConfirmOpen(true);
+    } catch (err) {
+      console.error('Failed to generate preview numbers', err);
+      // fallback to older generator
+      try {
+        const fallback = await generateNumbersUsingSupabase(pickupDate || new Date().toISOString().slice(0, 10));
+        setPreviewAppointmentNumber(fallback.appointmentNumber);
+        setPreviewWeighbridgeNumber(fallback.weighbridgeNumber);
+        setConfirmOpen(true);
+      } catch (e) {
+        toast({ status: 'error', title: 'Could not generate appointment numbers', description: 'Please try again' });
+      }
+    }
   };
-  const closeConfirm = () => setConfirmOpen(false);
+  const closeConfirm = () => {
+    setConfirmOpen(false);
+    setPreviewAppointmentNumber('');
+    setPreviewWeighbridgeNumber('');
+  };
 
   // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
@@ -617,9 +645,22 @@ export default function AppointmentPage() {
     let attempts = 0;
     const maxInsertAttempts = 6;
     let lastErr = null;
+    const useProvidedNumbers = Boolean(payload.appointmentNumber && payload.weighbridgeNumber);
+
     while (attempts < maxInsertAttempts) {
       attempts += 1;
-      const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
+      let appointmentNumber;
+      let weighbridgeNumber;
+
+      // If the caller provided preview numbers, try them first (only on first attempt).
+      if (useProvidedNumbers && attempts === 1) {
+        appointmentNumber = payload.appointmentNumber;
+        weighbridgeNumber = payload.weighbridgeNumber;
+      } else {
+        const nums = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
+        appointmentNumber = nums.appointmentNumber;
+        weighbridgeNumber = nums.weighbridgeNumber;
+      }
 
       const appointmentInsert = {
         appointment_number: appointmentNumber,
@@ -651,7 +692,7 @@ export default function AppointmentPage() {
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
-            // duplicate constraint — retry
+            // duplicate constraint — retry (and if we had used provided numbers, drop reliance on them next attempts)
             console.warn('Insert conflict on unique column, retrying generation...', insertErr);
             await new Promise(r => setTimeout(r, 120 + Math.random() * 200)); // small jitter
             continue;
@@ -809,6 +850,9 @@ export default function AppointmentPage() {
       driverLicense: driverLicense.trim(),
       regime: '',
       totalDocumentedWeight: '',
+      // include preview numbers so createDirectlyInSupabase will try them first
+      appointmentNumber: previewAppointmentNumber || undefined,
+      weighbridgeNumber: previewWeighbridgeNumber || undefined,
       t1s: t1s.map(r => ({ sadNo: r.sadNo, packingType: r.packingType, containerNo: r.containerNo || '' })),
     };
 
@@ -846,6 +890,8 @@ export default function AppointmentPage() {
       setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
       setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
       setConfirmOpen(false);
+      setPreviewAppointmentNumber('');
+      setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
@@ -1081,6 +1127,25 @@ export default function AppointmentPage() {
           <ModalCloseButton />
           <ModalBody>
             <Stack spacing={3}>
+              {/* Generated numbers preview */}
+              {previewAppointmentNumber && previewWeighbridgeNumber && (
+                <Box border="1px solid" borderColor="gray.200" borderRadius="md" p={3} mb={2} bg="gray.50">
+                  <Text fontWeight="bold" mb={2}>Generated Numbers (Preview)</Text>
+
+                  <HStack mb={2} spacing={3}>
+                    <Text fontWeight="semibold" minW="150px">Appointment No:</Text>
+                    <Text color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
+                    <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewAppointmentNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
+                  </HStack>
+
+                  <HStack spacing={3}>
+                    <Text fontWeight="semibold" minW="150px">Weighbridge No:</Text>
+                    <Text color="blue.600" flex="1" wordBreak="break-all">{previewWeighbridgeNumber}</Text>
+                    <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewWeighbridgeNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
+                  </HStack>
+                </Box>
+              )}
+
               <Text><b>Agent:</b> {agentName} ({agentTin})</Text>
               <Text><b>Warehouse:</b> {(WAREHOUSES.find(w => w.value === warehouse) || {}).label}</Text>
               <Text><b>Pick-up Date:</b> {pickupDate}</Text>
