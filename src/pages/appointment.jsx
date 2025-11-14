@@ -4,12 +4,9 @@ import {
   Box, Button, Container, Heading, Input as ChakraInput, Select, Text, SimpleGrid,
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
-  IconButton, Badge, Divider, VStack, useBreakpointValue, Flex, InputGroup, InputLeftElement, FormHelperText, Icon
+  IconButton, Badge, Divider, VStack, useBreakpointValue, Flex, InputGroup, InputRightElement, RadioGroup, Radio, Tooltip
 } from '@chakra-ui/react';
-import {
-  AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon,
-  InfoOutlineIcon, CalendarIcon, AtSignIcon, CopyIcon
-} from '@chakra-ui/icons';
+import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   pdf as pdfRender,
@@ -24,10 +21,12 @@ import {
 import QRCode from 'qrcode';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
-// ---------- Assets ----------
+// ---------- Assets (ensure these exist in src/assets/) ----------
 import gralogo from '../assets/gralogo.png';
 import gnswlogo from '../assets/gnswlogo.png';
-import MonoFont from '../assets/RobotoMono-Regular.ttf';
+
+// ---------- Monospace font registration (update path if you use a different font file) ----------
+import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists
 Font.register({ family: 'Mono', src: MonoFont });
 
 // ---------- Config ----------
@@ -43,12 +42,12 @@ const PACKING_TYPES = [
 
 const MotionBox = motion(Box);
 
-// ---------- PDF styles ----------
+// ---------- PDF styles (premium look) ----------
 const pdfStyles = StyleSheet.create({
   page: {
-    paddingTop: 24,
-    paddingBottom: 32,
-    paddingHorizontal: 22,
+    paddingTop: 28,
+    paddingBottom: 36,
+    paddingHorizontal: 24,
     fontSize: 10.5,
     fontFamily: 'Times-Roman',
     position: 'relative',
@@ -91,13 +90,15 @@ const pdfStyles = StyleSheet.create({
   t1Col3: { width: '22%', fontSize: 10.5 },
   t1Col4: { width: '28%', fontSize: 10.5 },
 
-  qrAreaCenter: { marginTop: 14, alignItems: 'center', justifyContent: 'center' },
-  qrBox: { alignItems: 'center' },
+  qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
+  qrBox: { width: '36%', alignItems: 'center' },
 
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
+
+  infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 }
 });
 
-// ---------- Utility functions (defined so ESLint passes) ----------
+// ---------- Utility functions (ensure defined to avoid ESLint no-undef) ----------
 function downloadBlob(blob, filename) {
   try {
     const url = URL.createObjectURL(blob);
@@ -136,7 +137,7 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (only QR visible; human-readable page inside QR) ----------
+// ---------- PDF component (QR only + beautiful human-readable layout only in QR) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
@@ -183,52 +184,74 @@ function AppointmentPdf({ ticket }) {
 
               <PdfText style={pdfStyles.label}>Weighbridge No :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.weighbridgeNumber}</PdfText>
+
+              <PdfText style={pdfStyles.label}>Agent :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.agentName} — {ticketData.agentTin}</PdfText>
             </PdfView>
 
             <PdfView style={{ width: '48%', zIndex: 1 }}>
-              <PdfText style={pdfStyles.label}>Agent :</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.agentName} — {ticketData.agentTin}</PdfText>
-
               <PdfText style={pdfStyles.label}>Warehouse :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
+
+              <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
+
+              <PdfText style={pdfStyles.label}>Consolidated :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.consolidated === 'Y' ? 'Consolidated' : 'Single'}</PdfText>
             </PdfView>
           </PdfView>
 
           <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBoxTopBorder]}>
-            {ticketData.t1Count > 0 && (
-              <PdfView style={{ width: '100%', zIndex: 1 }}>
-                <PdfText style={[pdfStyles.label, { marginBottom: 6 }]}>T1 Records Summary :</PdfText>
-                <PdfView style={pdfStyles.t1Table}>
-                  <PdfView style={pdfStyles.t1HeaderRow}>
-                    <PdfText style={pdfStyles.t1Col1}>#</PdfText>
-                    <PdfText style={pdfStyles.t1Col2}>SAD No</PdfText>
-                    <PdfText style={pdfStyles.t1Col3}>Packing</PdfText>
-                    <PdfText style={pdfStyles.t1Col4}>Container</PdfText>
-                  </PdfView>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Truck / Driver :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.truckNumber} — {ticketData.driverName}</PdfText>
+            </PdfView>
 
-                  {ticketData.t1s.map((r, i) => (
-                    <PdfView key={i} style={pdfStyles.t1Row}>
-                      <PdfText style={pdfStyles.t1Col1}>{String(i + 1)}</PdfText>
-                      <PdfText style={pdfStyles.t1Col2}>{r.sadNo || r.sad_no || '—'}</PdfText>
-                      <PdfText style={pdfStyles.t1Col3}>{(r.packingType || r.packing_type || '—').toString()}</PdfText>
-                      <PdfText style={pdfStyles.t1Col4}>{r.containerNo || r.container_no || '—'}</PdfText>
-                    </PdfView>
-                  ))}
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Driver License :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
+            </PdfView>
+          </PdfView>
+
+          <PdfView style={pdfStyles.groupBoxTopBorder}>
+            <PdfText style={[pdfStyles.label, { textAlign: 'left', zIndex: 1 }]}>T1 Records Summary :</PdfText>
+            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, zIndex: 1 }}>
+              <PdfText style={pdfStyles.value}>Count : {ticketData.t1Count}</PdfText>
+              <PdfText style={pdfStyles.value}>Packing types : {ticketData.packingTypesUsed || '—'}</PdfText>
+            </PdfView>
+
+            {ticketData.t1Count > 0 && (
+              <PdfView style={pdfStyles.t1Table}>
+                <PdfView style={pdfStyles.t1HeaderRow}>
+                  <PdfText style={pdfStyles.t1Col1}>#</PdfText>
+                  <PdfText style={pdfStyles.t1Col2}>SAD No</PdfText>
+                  <PdfText style={pdfStyles.t1Col3}>Packing</PdfText>
+                  <PdfText style={pdfStyles.t1Col4}>Container</PdfText>
                 </PdfView>
+
+                {ticketData.t1s.map((r, i) => (
+                  <PdfView key={i} style={pdfStyles.t1Row}>
+                    <PdfText style={pdfStyles.t1Col1}>{String(i + 1)}</PdfText>
+                    <PdfText style={pdfStyles.t1Col2}>{r.sadNo || r.sad_no || '—'}</PdfText>
+                    <PdfText style={pdfStyles.t1Col3}>{(r.packingType || r.packing_type || '—').toString()}</PdfText>
+                    <PdfText style={pdfStyles.t1Col4}>{r.containerNo || r.container_no || '—'}</PdfText>
+                  </PdfView>
+                ))}
               </PdfView>
             )}
           </PdfView>
 
-          {/* Centered QR only — human-readable details only visible when QR scanned */}
-          <PdfView style={pdfStyles.qrAreaCenter}>
+          {/* QR area: only show QR and a tasteful caption. All human-friendly details are inside the HTML encoded by the QR. */}
+          <PdfView style={pdfStyles.qrArea}>
+            <PdfView style={{ width: '64%' }} />
+
             <PdfView style={pdfStyles.qrBox}>
               {t.qrImage ? (
-                <PdfImage src={t.qrImage} style={{ width: 170, height: 170 }} />
+                <PdfImage src={t.qrImage} style={{ width: 150, height: 150 }} />
               ) : (
-                <PdfText style={{ fontSize: 10, color: '#6b7280' }}>QR not available</PdfText>
+                <PdfText style={{ fontSize: 9, color: '#6b7280' }}>QR not available</PdfText>
               )}
-              <PdfText style={{ fontSize: 10, marginTop: 8, color: '#374151' }}>{ticketData.appointmentNumber}</PdfText>
-              <PdfText style={{ fontSize: 9, color: '#6b7280', marginTop: 6 }}>Scan to view appointment details (clean page, not raw JSON)</PdfText>
+              <PdfText style={{ fontSize: 9, marginTop: 8, color: '#374151' }}>Scan QR to view appointment</PdfText>
             </PdfView>
           </PdfView>
         </PdfView>
@@ -269,7 +292,11 @@ export default function AppointmentPage() {
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
   const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
 
-  // only need the setter (orb)
+  // T1 SAD check state
+  const [t1SadStatus, setT1SadStatus] = useState(null); // null | 'checking' | 'found' | 'missing'
+  const t1CheckTimer = useRef(null);
+
+  // only need the setter (isOrbOpen was unused)
   const [, setOrbOpen] = useState(false);
 
   const recognitionRef = useRef(null);
@@ -319,22 +346,33 @@ export default function AppointmentPage() {
     const css = `
       html, body, #root { background: #e6f6ff !important; }
       .appt-glass {
-        background: linear-gradient(180deg, rgba(255,255,255,0.90), rgba(255,255,255,0.80));
+        background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(255,255,255,0.75));
         border-radius: 12px;
         border: 1px solid rgba(255,255,255,0.6);
         box-shadow: 0 10px 30px rgba(2,6,23,0.06);
         backdrop-filter: blur(6px) saturate(120%);
       }
-      .floating-orb { position: fixed; right: 28px; bottom: 28px; z-index: 2200; }
-      .orb { width:72px;height:72px;border-radius:999px;display:flex;align-items:center;justify-content:center;
+      .floating-orb {
+        position: fixed;
+        right: 28px;
+        bottom: 28px;
+        z-index: 2200;
+      }
+      .orb {
+        width:72px;height:72px;border-radius:999px;display:flex;align-items:center;justify-content:center;
         box-shadow: 0 10px 30px rgba(59,130,246,0.18), inset 0 -6px 18px rgba(62,180,200,0.08);
-        background: linear-gradient(90deg,#7b61ff,#3ef4d0); color: #fff; cursor: pointer; transform-origin:center; }
+        background: linear-gradient(90deg,#7b61ff,#3ef4d0);
+        color: #fff; cursor: pointer; transform-origin:center;
+      }
       .orb:active { transform: scale(0.96); }
       .panel-3d { perspective: 1400px; }
       .panel-card { transition: transform 0.6s ease, box-shadow 0.6s ease; transform-style: preserve-3d; }
-      @media (min-width:1600px) { .panel-3d:hover .panel-card { transform: rotateY(6deg) rotateX(3deg) translateZ(8px); box-shadow: 0 30px 80px rgba(2,6,23,0.12); } }
+      @media (min-width:1600px) {
+        .panel-3d:hover .panel-card { transform: rotateY(6deg) rotateX(3deg) translateZ(8px); box-shadow: 0 30px 80px rgba(2,6,23,0.12); }
+      }
       .highlight-flash { box-shadow: 0 0 0 6px rgba(96,165,250,0.12) !important; transition: box-shadow 0.5s ease; }
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
+      .muted { color: #6b7280; font-size: 0.9rem; }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -408,9 +446,31 @@ export default function AppointmentPage() {
     setT1Sad(row.sadNo);
     setT1Packing(row.packingType);
     setT1Container(row.containerNo || '');
+    setT1SadStatus(null);
     setT1ModalOpen(true);
   };
-  const closeT1Modal = () => { setT1ModalOpen(false); setEditingIndex(null); setT1Sad(''); setT1Container(''); setT1Packing(PACKING_TYPES[0].value); };
+  const closeT1Modal = () => { setT1ModalOpen(false); setEditingIndex(null); setT1Sad(''); setT1Packing(PACKING_TYPES[0].value); setT1Container(''); setT1SadStatus(null); if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current); };
+
+  // live SAD existence check (debounced)
+  useEffect(() => {
+    if (!isT1ModalOpen) return;
+    if (!t1Sad || t1Sad.trim().length === 0) { setT1SadStatus(null); return; }
+    setT1SadStatus('checking');
+    if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current);
+    t1CheckTimer.current = setTimeout(async () => {
+      try {
+        const sadVal = t1Sad.trim();
+        const { data, error } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', sadVal).maybeSingle();
+        if (error) { setT1SadStatus(null); return; }
+        setT1SadStatus(data ? 'found' : 'missing');
+      } catch (e) {
+        setT1SadStatus(null);
+      }
+    }, 650);
+    return () => {
+      if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current);
+    };
+  }, [t1Sad, isT1ModalOpen]);
 
   const handleT1Save = () => {
     if (!t1Sad.trim()) { toast({ status: 'error', title: 'SAD No required' }); return; }
@@ -422,7 +482,7 @@ export default function AppointmentPage() {
       if (existsSamePackingIndex !== -1) { toast({ status: 'error', title: `Packing type "${t1Packing}" already added` }); return; }
     }
 
-    const newRow = { sadNo: t1Sad.trim().toUpperCase(), packingType: t1Packing, containerNo: t1Packing === 'container' ? t1Container.trim().toUpperCase() : null };
+    const newRow = { sadNo: t1Sad.trim(), packingType: t1Packing, containerNo: t1Packing === 'container' ? t1Container.trim() : null };
     if (editingIndex !== null && editingIndex >= 0) {
       const cp = [...t1s];
       cp[editingIndex] = newRow;
@@ -477,19 +537,22 @@ export default function AppointmentPage() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
+        // Build base seq using count for that date (best-effort)
         const { count } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
           .eq('pickup_date', pickupDateValue);
 
         const existing = Number(count || 0);
-        const seq = existing + 1 + attempt;
+        const seq = existing + 1 + attempt; // add attempt to avoid repeating same seq if collision
         const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
+        // add attempt-based suffix only when attempt>0 to help uniqueness
         const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
         const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
         const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
+        // check both uniqueness
         const { count: wbCount } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -503,7 +566,9 @@ export default function AppointmentPage() {
         if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
           return { appointmentNumber, weighbridgeNumber };
         }
+        // else loop to try again
       } catch (e) {
+        // if any error while checking, fallback to a timestamp + random and return it
         console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
         return {
@@ -513,6 +578,7 @@ export default function AppointmentPage() {
       }
     }
 
+    // If exhausted attempts, fallback to timestamp + random
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
@@ -521,11 +587,15 @@ export default function AppointmentPage() {
   }
 
   // eslint-disable-next-line no-unused-vars
-  async function generateNumbersUsingSupabase(pickupDateValue) { return await generateUniqueNumbers(pickupDateValue); }
+  async function generateNumbersUsingSupabase(pickupDateValue) {
+    // kept for backward compatibility – delegate to generateUniqueNumbers
+    return await generateUniqueNumbers(pickupDateValue);
+  }
 
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
+    // generate unique appointment & weighbridge numbers (ensured unique by checking DB)
     let attempts = 0;
     const maxInsertAttempts = 6;
     let lastErr = null;
@@ -536,6 +606,7 @@ export default function AppointmentPage() {
       let appointmentNumber;
       let weighbridgeNumber;
 
+      // If the caller provided preview numbers, try them first (only on first attempt).
       if (useProvidedNumbers && attempts === 1) {
         appointmentNumber = payload.appointmentNumber;
         weighbridgeNumber = payload.weighbridgeNumber;
@@ -571,13 +642,16 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (insertErr) {
+          // If uniqueness constraint triggered, loop and try again with new numbers.
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
+            // duplicate constraint — retry (and if we had used provided numbers, drop reliance on them next attempts)
             console.warn('Insert conflict on unique column, retrying generation...', insertErr);
-            await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
+            await new Promise(r => setTimeout(r, 120 + Math.random() * 200)); // small jitter
             continue;
           }
+          // other error -> throw
           throw insertErr;
         }
 
@@ -597,6 +671,7 @@ export default function AppointmentPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
+            // roll back appointment insertion if t1 insert failed
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
@@ -609,6 +684,7 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
+          // return a best-effort object
           return {
             appointment: {
               id: appointmentId,
@@ -653,10 +729,12 @@ export default function AppointmentPage() {
         };
       } catch (finalErr) {
         lastErr = finalErr;
+        // If we've exhausted attempts, throw
         if (attempts >= maxInsertAttempts) {
           console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
           throw finalErr;
         }
+        // otherwise loop to try again
         console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
         await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
         continue;
@@ -666,14 +744,15 @@ export default function AppointmentPage() {
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
-  // helper to assemble printable object & QR image (QR opens a small HTML page that is human-friendly)
+  // helper to assemble the full payload used for QR and generate QR image that opens a human-friendly HTML page
   async function buildPrintableTicketObject(dbAppointment) {
+    // dbAppointment = the object returned from DB/insert (may be partial)
     const ticket = {
       appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number || '',
       weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '',
       agentTin: dbAppointment.agentTin || dbAppointment.agent_tin || '',
       agentName: dbAppointment.agentName || dbAppointment.agent_name || '',
-      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location || '',
+      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || '',
       pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date || '',
       consolidated: dbAppointment.consolidated || dbAppointment.consolidated || '',
       truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number || '',
@@ -683,53 +762,70 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // small HTML page (clean, human-friendly) encoded into QR
+    // Build a small, elegant HTML page (inline styles) for the QR to open — human-readable table
     const smallHtml = `
-<!doctype html><html><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial;margin:0;padding:14px;color:#0b1220}
-.wrap{max-width:820px;margin:0 auto;background:#fff;padding:18px;border-radius:10px;box-shadow:0 8px 28px rgba(2,6,23,0.06)}
-h1{font-size:18px;margin:0 0 6px;color:#0f172a}
-.sub{color:#6b7280;margin:0 0 12px;font-size:13px}
-.kv{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eef2f7}
-.kv b{color:#111827}
-.t1{margin-top:14px}
-.table{width:100%;border-collapse:collapse;margin-top:8px}
-.table td,.table th{padding:8px 10px;border-bottom:1px solid #eef2f7;text-align:left;font-size:13px}
-.table th{background:#f8fafc;font-weight:700}
-.pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700;font-size:12px}
-</style></head><body>
-<div class="wrap">
-<h1>NICK TC-SCAN (GAMBIA) LTD. — Appointment</h1>
-<p class="sub">Appointment <strong>${escapeHtml(ticket.appointmentNumber)}</strong> · Weighbridge <strong>${escapeHtml(ticket.weighbridgeNumber)}</strong></p>
-<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-  <div><span class="pill">Agent</span><div style="font-size:13px;margin-top:6px">${escapeHtml(ticket.agentName)} (${escapeHtml(ticket.agentTin)})</div></div>
-  <div><span class="pill">Warehouse</span><div style="font-size:13px;margin-top:6px">${escapeHtml(ticket.warehouse)}</div></div>
-  <div><span class="pill">Pickup</span><div style="font-size:13px;margin-top:6px">${escapeHtml(ticket.pickupDate)}</div></div>
-</div>
-<div>
-  <div class="kv"><div><b>Truck</b></div><div>${escapeHtml(ticket.truckNumber)}</div></div>
-  <div class="kv"><div><b>Driver</b></div><div>${escapeHtml(ticket.driverName)}</div></div>
-  <div class="kv"><div><b>Driver License</b></div><div>${escapeHtml(ticket.driverLicense)}</div></div>
-  <div class="kv"><div><b>Consolidated</b></div><div>${ticket.consolidated === 'Y' ? 'Yes' : 'No'}</div></div>
-</div>
-<div class="t1">
-  <h3 style="margin:12px 0 6px">T1 Records (${(ticket.t1s || []).length})</h3>
-  <table class="table"><tr><th style="width:6%">#</th><th>SAD No</th><th>Packing</th><th>Container</th></tr>
-  ${(ticket.t1s || []).map((r, i) => `<tr><td>${i+1}</td><td>${escapeHtml(r.sadNo || r.sad_no || '')}</td><td>${escapeHtml(r.packingType || r.packing_type || '')}</td><td>${escapeHtml(r.containerNo || r.container_no || '')}</td></tr>`).join('')}
-  </table>
-</div>
-<p style="margin-top:12px;color:#6b7280;font-size:13px">Show this QR to weighbridge staff or scan to open this page on your device.</p>
-</div></body></html>`.trim();
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Appointment ${escapeHtml(ticket.appointmentNumber)}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial; padding:18px; color:#0b1220;}
+    .wrap{max-width:740px;margin:0 auto;background:#fff;padding:18px;border-radius:10px;box-shadow:0 6px 20px rgba(2,6,23,0.06);}
+    h1{font-size:18px;margin:0 0 6px;color:#0f172a;}
+    p.sub{color:#6b7280;margin:0 0 14px;font-size:13px;}
+    table{width:100%;border-collapse:collapse;margin-top:12px;}
+    td, th{padding:8px 10px;border-bottom:1px solid #eef2f7;text-align:left;font-size:13px;}
+    th{background:#f8fafc;color:#111827;font-weight:700}
+    .small{font-size:12px;color:#6b7280}
+    .t1table{margin-top:14px}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700;font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>NICK TC-SCAN (GAMBIA) LTD. — Appointment</h1>
+    <p class="sub">Appointment No: <strong>${escapeHtml(ticket.appointmentNumber)}</strong> &nbsp;&nbsp; Weighbridge: <strong>${escapeHtml(ticket.weighbridgeNumber)}</strong></p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <div><span class="pill">Agent</span><div class="small">${escapeHtml(ticket.agentName)} (${escapeHtml(ticket.agentTin)})</div></div>
+      <div><span class="pill">Warehouse</span><div class="small">${escapeHtml(ticket.warehouse)}</div></div>
+      <div><span class="pill">Pickup</span><div class="small">${escapeHtml(ticket.pickupDate)}</div></div>
+    </div>
 
+    <table>
+      <tr><th style="width:30%">Field</th><th>Value</th></tr>
+      <tr><td>Truck</td><td>${escapeHtml(ticket.truckNumber)}</td></tr>
+      <tr><td>Driver</td><td>${escapeHtml(ticket.driverName)}</td></tr>
+      <tr><td>Driver License</td><td>${escapeHtml(ticket.driverLicense)}</td></tr>
+      <tr><td>Consolidated</td><td>${ticket.consolidated === 'Y' ? 'Yes' : 'No'}</td></tr>
+      <tr><td>Created At</td><td>${escapeHtml(ticket.createdAt)}</td></tr>
+    </table>
+
+    <div class="t1table">
+      <h3 style="margin:12px 0 6px">T1 Records (${(ticket.t1s || []).length})</h3>
+      <table>
+        <tr><th>#</th><th>SAD No</th><th>Packing</th><th>Container</th></tr>
+        ${(ticket.t1s || []).map((r, i) => `<tr><td>${i+1}</td><td>${escapeHtml(r.sadNo || r.sad_no || '')}</td><td>${escapeHtml(r.packingType || r.packing_type || '')}</td><td>${escapeHtml(r.containerNo || r.container_no || '')}</td></tr>`).join('')}
+      </table>
+    </div>
+
+    <p style="margin-top:14px;font-size:12px;color:#6b7280">Show this QR to weighbridge staff or scan to open this page on your device.</p>
+  </div>
+</body>
+</html>`.trim();
+
+    // Build data URI using base64 encoding (more compatible)
     const base64Html = base64EncodeUnicode(smallHtml);
     const dataUri = `data:text/html;base64,${base64Html}`;
 
+    // Generate QR image (PNG data URL) that encodes the data URI (so scanning opens the small HTML page)
     let qrDataUrl = null;
     try {
       qrDataUrl = await QRCode.toDataURL(dataUri, { margin: 1, scale: 8 });
     } catch (e) {
       console.warn('QR generation failed', e);
+      // fallback: encode a compact JSON string if HTML QR fails
       try {
         const compact = JSON.stringify({
           appointmentNumber: ticket.appointmentNumber,
@@ -744,20 +840,22 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
     }
 
     ticket.qrImage = qrDataUrl;
-    ticket.qrDataUri = dataUri;
+    ticket.qrDataUri = dataUri; // optional: if you want to show or store the raw data URI elsewhere
     return ticket;
   }
 
-  // helpers
+  // helpers for HTML escaping and base64
   function escapeHtml(str = '') {
     return String(str || '').replace(/[&<>"']/g, function (m) {
       return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m];
     });
   }
   function base64EncodeUnicode(str) {
+    // base64 encode Unicode safely
     try {
       return btoa(unescape(encodeURIComponent(str)));
     } catch (e) {
+      // fallback - smaller inputs only
       return btoa(str);
     }
   }
@@ -765,7 +863,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify SADs
+    // verify all SADs exist in sad_declarations before creating appointment
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -774,6 +872,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
         return;
       }
 
+      // query sad_declarations for those SAD numbers
       const { data: existing, error: sadErr } = await supabase
         .from('sad_declarations')
         .select('sad_no')
@@ -805,6 +904,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
       return;
     }
 
+    // proceed to create
     setLoadingCreate(true);
 
     const payload = {
@@ -819,6 +919,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
       driverLicense: driverLicense.trim(),
       regime: '',
       totalDocumentedWeight: '',
+      // include preview numbers so createDirectlyInSupabase will try them first
       appointmentNumber: previewAppointmentNumber || undefined,
       weighbridgeNumber: previewWeighbridgeNumber || undefined,
       t1s: t1s.map(r => ({ sadNo: r.sadNo, packingType: r.packingType, containerNo: r.containerNo || '' })),
@@ -828,7 +929,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // build printable ticket (includes QR)
+      // build printable ticket (includes QR image that opens a human-friendly HTML page)
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
@@ -844,6 +945,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
       });
 
+      // generate PDF & download
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
@@ -855,6 +957,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
       }
 
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
+
       await triggerConfetti(160);
 
       setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
@@ -942,21 +1045,25 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
     <Container maxW="container.lg" py={8} ref={containerRef}>
       <Heading mb={4}>Weighbridge Appointment — Self Service</Heading>
 
-      <Box p={6} className="appt-glass" mb={6} borderRadius="12px">
+      <Box p={6} className="appt-glass" mb={6} borderRadius="lg">
         <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
           <FormControl isRequired>
             <FormLabel>Agent TIN</FormLabel>
             <InputGroup>
-              <InputLeftElement pointerEvents="none"><AtSignIcon color="gray.400" /></InputLeftElement>
-              <ChakraInput value={agentTin} onChange={(e) => setAgentTin(e.target.value)} placeholder="e.g. 190304409" />
+              <ChakraInput value={agentTin} onChange={(e) => setAgentTin(e.target.value)} placeholder="Enter Agent TIN" />
+              <InputRightElement width="4.5rem">
+                <Tooltip label="Clear">
+                  <IconButton size="sm" aria-label="clear" icon={<SmallCloseIcon />} variant="ghost" onClick={() => setAgentTin('')} />
+                </Tooltip>
+              </InputRightElement>
             </InputGroup>
-            <FormHelperText>Enter the agent/company TIN — used on the ticket and records.</FormHelperText>
+            <Text className="muted" mt={1}>Company or taxpayer identification number</Text>
           </FormControl>
 
           <FormControl isRequired>
             <FormLabel>Agent Name</FormLabel>
             <ChakraInput value={agentName} onChange={(e) => setAgentName(e.target.value)} placeholder="Agent / Company Name" />
-            <FormHelperText>Company name or trading name.</FormHelperText>
+            <Text className="muted" mt={1}>As printed on registration documents</Text>
           </FormControl>
 
           <FormControl isRequired>
@@ -964,16 +1071,13 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
             <Select value={warehouse} onChange={(e) => setWarehouse(e.target.value)}>
               {WAREHOUSES.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
             </Select>
-            <FormHelperText>Choose the warehouse where goods will be weighed.</FormHelperText>
+            <Text className="muted" mt={1}>Choose where the goods will be handled</Text>
           </FormControl>
 
           <FormControl isRequired>
             <FormLabel>Pick-up Date</FormLabel>
-            <InputGroup>
-              <InputLeftElement pointerEvents="none"><CalendarIcon color="gray.400" /></InputLeftElement>
-              <ChakraInput type="date" value={pickupDate} onChange={(e) => setPickupDate(e.target.value)} />
-            </InputGroup>
-            <FormHelperText>Choose the date for the appointment.</FormHelperText>
+            <ChakraInput type="date" value={pickupDate} onChange={(e) => setPickupDate(e.target.value)} />
+            <Text className="muted" mt={1}>Select the day the truck will visit the weighbridge</Text>
           </FormControl>
 
           <FormControl isRequired>
@@ -982,46 +1086,40 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
               <option value="N">NO</option>
               <option value="Y">YES</option>
             </Select>
-            <FormHelperText>If NO — only 1 T1. If YES — multiple T1s but each packing type only once.</FormHelperText>
+            <Text fontSize="sm" color="gray.600" mt={1}>
+              If <b>NO</b> only one T1 allowed. If <b>YES</b> multiple T1 allowed but each packing type only once.
+            </Text>
           </FormControl>
 
           <FormControl isRequired>
             <FormLabel>Truck Number</FormLabel>
             <ChakraInput value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} placeholder="Truck Plate / No." />
-            <FormHelperText>Enter vehicle registration (e.g. KBY 1234).</FormHelperText>
           </FormControl>
 
           <FormControl isRequired>
             <FormLabel>Driver Name</FormLabel>
             <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
-            <FormHelperText>Full name of the driver collecting the goods.</FormHelperText>
           </FormControl>
 
           <FormControl isRequired>
             <FormLabel>Driver License No</FormLabel>
-            <InputGroup>
-              <InputLeftElement pointerEvents="none"><InfoOutlineIcon color="gray.400" /></InputLeftElement>
-              <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver License No" />
-            </InputGroup>
-            <FormHelperText>License number for verification at gates.</FormHelperText>
+            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver License No" />
           </FormControl>
         </SimpleGrid>
 
         <Divider my={4} />
 
         <HStack spacing={3} mb={3}>
-          <Button leftIcon={<AddIcon />} colorScheme="teal" onClick={() => { setT1ModalOpen(true); }}>
-            Add T1 Record
-          </Button>
-
-          <Badge colorScheme="purple" px={3} py={1}>{t1s.length} T1(s) added</Badge>
-
+          <Button leftIcon={<AddIcon />} colorScheme="teal" onClick={() => { setT1ModalOpen(true); }}>Add T1 Record</Button>
+          <Badge colorScheme="purple">{t1s.length} T1(s) added</Badge>
           {consolidated === 'Y' && (
             <Text fontSize="sm" color="gray.600">Packing types used: {packingTypesUsed.join(', ') || '—'}</Text>
           )}
 
           <HStack ml="auto" spacing={2}>
-            <Button size="sm" leftIcon={<SearchIcon />} variant="ghost">Quick Search</Button>
+            <Button size="sm" leftIcon={<SearchIcon />} variant="ghost" onClick={() => { /* placeholder for quick search */ }}>
+              Quick Search
+            </Button>
 
             <Button size="sm" leftIcon={voiceActive ? <SmallCloseIcon /> : <RepeatIcon />} onClick={() => (voiceActive ? stopVoice() : startVoice())} colorScheme={voiceActive ? 'red' : 'teal'}>
               {voiceActive ? 'Stop Voice' : 'Voice'}
@@ -1044,7 +1142,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
         </HStack>
       </Box>
 
-      {/* Floating orb */}
+      {/* Floating crystal orb CTA (opens T1 modal) */}
       <Box className="floating-orb" onClick={() => { setOrbOpen(true); setT1ModalOpen(true); }} role="button" aria-label="Add T1">
         <MotionBox
           className="orb"
@@ -1058,52 +1156,83 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
         </MotionBox>
       </Box>
 
-      {/* T1 Modal */}
+      {/* T1 Modal — upgraded */}
       <Modal isOpen={isT1ModalOpen} onClose={closeT1Modal} isCentered size="md">
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
         <AnimatePresence>
           {isT1ModalOpen && (
-            <MotionBox initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}>
-              <ModalContent bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.95))" borderRadius="2xl" boxShadow="0 30px 80px rgba(2,6,23,0.12)">
-                <ModalHeader>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</ModalHeader>
+            <MotionBox
+              initial={{ opacity: 0, y: 40, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 40, scale: 0.98 }}
+            >
+              <ModalContent bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" borderRadius="2xl" boxShadow="0 30px 120px rgba(2,6,23,0.12)">
+                <ModalHeader display="flex" alignItems="center" justifyContent="space-between">
+                  <Box>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</Box>
+                  <Badge colorScheme={t1SadStatus === 'found' ? 'green' : t1SadStatus === 'checking' ? 'yellow' : t1SadStatus === 'missing' ? 'red' : 'gray'}>
+                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found' : 'SAD status'}
+                  </Badge>
+                </ModalHeader>
                 <ModalCloseButton />
                 <ModalBody>
                   <Stack spacing={3}>
                     <FormControl isRequired>
                       <FormLabel>SAD No</FormLabel>
                       <InputGroup>
-                        <InputLeftElement pointerEvents="none"><InfoOutlineIcon color="gray.400" /></InputLeftElement>
                         <ChakraInput value={t1Sad} onChange={(e) => setT1Sad(e.target.value)} placeholder="e.g. C26370" autoFocus />
+                        <InputRightElement width="5.5rem">
+                          <HStack spacing={2}>
+                            <Tooltip label="Check now">
+                              <IconButton size="sm" aria-label="check" icon={<SearchIcon />} variant="ghost" onClick={async () => {
+                                setT1SadStatus('checking');
+                                try {
+                                  const sadVal = (t1Sad || '').trim();
+                                  if (!sadVal) { setT1SadStatus(null); return; }
+                                  const { data } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', sadVal).maybeSingle();
+                                  setT1SadStatus(data ? 'found' : 'missing');
+                                  if (!data) toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' });
+                                } catch (e) {
+                                  setT1SadStatus(null);
+                                }
+                              }} />
+                            </Tooltip>
+                            <Tooltip label="Clear">
+                              <IconButton size="sm" aria-label="clear" icon={<SmallCloseIcon />} variant="ghost" onClick={() => { setT1Sad(''); setT1SadStatus(null); }} />
+                            </Tooltip>
+                          </HStack>
+                        </InputRightElement>
                       </InputGroup>
-                      <FormHelperText>Enter the SAD / declaration number. Example: C26370</FormHelperText>
+                      {t1SadStatus === 'found' && <Text color="green.600" mt={1}>SAD found in declarations.</Text>}
+                      {t1SadStatus === 'missing' && <Text color="red.600" mt={1}>SAD not found — it must be registered before creating an appointment with it.</Text>}
+                      {t1SadStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking SAD existence...</Text>}
                     </FormControl>
 
                     <FormControl isRequired>
                       <FormLabel>Packing Type</FormLabel>
-                      <Select value={t1Packing} onChange={(e) => setT1Packing(e.target.value)}>
-                        {PACKING_TYPES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-                      </Select>
-                      <FormHelperText>Select packing — if container, supply container no below.</FormHelperText>
+                      <RadioGroup onChange={setT1Packing} value={t1Packing}>
+                        <HStack spacing={4}>
+                          {PACKING_TYPES.map(p => (
+                            <Radio key={p.value} value={p.value}>
+                              {p.label}
+                            </Radio>
+                          ))}
+                        </HStack>
+                      </RadioGroup>
                     </FormControl>
 
                     {t1Packing === 'container' && (
                       <FormControl isRequired>
                         <FormLabel>Container No</FormLabel>
                         <ChakraInput value={t1Container} onChange={(e) => setT1Container(e.target.value)} placeholder="Container No (e.g. TEST1000001)" />
-                        <FormHelperText>Container ID (alphanumeric). Example: TEST1000001</FormHelperText>
+                        <Text className="muted" mt={1}>Enter container number. Accepts alphanumeric format.</Text>
                       </FormControl>
                     )}
-
-                    <HStack spacing={2}>
-                      <Badge colorScheme="green" px={3} py={1}>{editingIndex !== null ? 'Editing' : 'New'}</Badge>
-                      <Text fontSize="sm" color="gray.600">Tip: SAD will be converted to uppercase automatically.</Text>
-                    </HStack>
                   </Stack>
                 </ModalBody>
 
                 <ModalFooter>
-                  <Button onClick={closeT1Modal} mr={3} variant="ghost">Cancel</Button>
-                  <Button colorScheme="teal" onClick={handleT1Save}>{editingIndex !== null ? 'Save changes' : 'Add T1'}</Button>
+                  <Button onClick={closeT1Modal} mr={3}>Cancel</Button>
+                  <Button colorScheme="teal" onClick={handleT1Save}>{editingIndex !== null ? 'Save' : <><AddIcon mr={2} /> Add</>}</Button>
                 </ModalFooter>
               </ModalContent>
             </MotionBox>
@@ -1127,13 +1256,13 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
                   <HStack mb={2} spacing={3}>
                     <Text fontWeight="semibold" minW="150px">Appointment No:</Text>
                     <Text color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
-                    <Button size="xs" variant="outline" leftIcon={<CopyIcon />} onClick={() => { navigator.clipboard.writeText(previewAppointmentNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
+                    <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewAppointmentNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
                   </HStack>
 
                   <HStack spacing={3}>
                     <Text fontWeight="semibold" minW="150px">Weighbridge No:</Text>
                     <Text color="blue.600" flex="1" wordBreak="break-all">{previewWeighbridgeNumber}</Text>
-                    <Button size="xs" variant="outline" leftIcon={<CopyIcon />} onClick={() => { navigator.clipboard.writeText(previewWeighbridgeNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
+                    <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewWeighbridgeNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
                   </HStack>
                 </Box>
               )}
@@ -1166,7 +1295,7 @@ h1{font-size:18px;margin:0 0 6px;color:#0f172a}
             </Stack>
           </ModalBody>
           <ModalFooter>
-            <Button onClick={closeConfirm} mr={3} variant="ghost">Cancel</Button>
+            <Button onClick={closeConfirm} mr={3}>Cancel</Button>
             <Button colorScheme="blue" leftIcon={<DownloadIcon />} onClick={handleCreateAppointment} isLoading={loadingCreate}>Confirm & Download Ticket</Button>
           </ModalFooter>
         </ModalContent>
