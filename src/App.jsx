@@ -216,7 +216,7 @@ function App() {
               }
             />
             <Route
-              path="/reports"
+              path="/tickets"
               element={
                 <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
                   <Layout>

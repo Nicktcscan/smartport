@@ -34,27 +34,27 @@ import { useAuth } from './context/AuthContext';
 // Admin menu
 const adminNavItems = [
   { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
-  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
-  { path: '/reports', label: 'Upload Ticket', icon: FaUpload },
+  { path: '/tickets', label: 'Upload Ticket', icon: FaUpload },
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
   { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
   { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: FaCheckCircle },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
   { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
   { path: '/users', label: 'Manage Users', icon: FaUsers },
+  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/settings', label: 'System Settings', icon: FaCog },
 ];
 
 // Weighbridge menu
 const weighbridgeNavItems = [
   { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
-  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
   { path: '/weighbridge', label: 'Upload Ticket', icon: FaUpload },
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
   { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
+  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
 ];
 
 // Outgate Officer menu
