@@ -44,8 +44,6 @@ const adminNavItems = [
   { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
   { path: '/users', label: 'Manage Users', icon: FaUsers },
   { path: '/settings', label: 'System Settings', icon: FaCog },
-  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
-
 ];
 
 // Weighbridge menu
