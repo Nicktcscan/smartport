@@ -21,12 +21,12 @@ import {
 import QRCode from 'qrcode';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
 
-// ---------- Assets ----------
+// ---------- Assets (ensure these exist in src/assets/) ----------
 import gralogo from '../assets/gralogo.png';
 import gnswlogo from '../assets/gnswlogo.png';
 
-// ---------- Monospace font registration ----------
-import MonoFont from '../assets/RobotoMono-Regular.ttf';
+// ---------- Monospace font registration (update path if you use a different font file) ----------
+import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists
 Font.register({ family: 'Mono', src: MonoFont });
 
 // ---------- Config ----------
@@ -42,58 +42,63 @@ const PACKING_TYPES = [
 
 const MotionBox = motion(Box);
 
-// ---------- PDF styles (premium, modern) ----------
+// ---------- PDF styles (premium look) ----------
 const pdfStyles = StyleSheet.create({
   page: {
-    paddingTop: 26,
-    paddingBottom: 28,
-    paddingHorizontal: 22,
-    fontSize: 11,
+    paddingTop: 28,
+    paddingBottom: 36,
+    paddingHorizontal: 24,
+    fontSize: 10.5,
     fontFamily: 'Times-Roman',
+    position: 'relative',
     color: '#0b1220',
-    backgroundColor: '#fff',
+    backgroundColor: '#ffffff',
   },
 
   headerBar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#071230',
+    backgroundColor: '#0f172a',
     paddingVertical: 12,
     paddingHorizontal: 14,
     borderRadius: 8,
     marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between'
   },
-  logoSmall: { width: 70, height: 36, objectFit: 'contain' },
-  titleBig: { fontSize: 16, fontWeight: 700, color: '#fff', letterSpacing: 0.7 },
-  subtitle: { fontSize: 9, color: '#cbd5e1', marginTop: 4 },
 
-  mainBox: { padding: 14, marginBottom: 12, borderRadius: 10, borderWidth: 0.6, borderColor: '#eef2ff' },
+  headerLeft: { width: '18%', alignItems: 'flex-start' },
+  headerCenter: { width: '60%', alignItems: 'center', textAlign: 'center' },
+  headerRight: { width: '18%', alignItems: 'flex-end' },
 
-  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+  logoSmall: { width: 72, height: 40, objectFit: 'contain' },
+  titleBig: { fontSize: 16, fontWeight: 700, color: '#fff', letterSpacing: 0.6 },
+  subtitle: { fontSize: 9, color: '#d1d5db', marginTop: 2 },
 
-  label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 4, color: '#0b1220' },
-  value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 6, color: '#0b1220' },
+  mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 16, marginBottom: 12, position: 'relative', borderRadius: 10 },
+  sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
 
-  groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#f1f5f9', paddingTop: 8, marginTop: 8 },
+  label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2, color: '#0b1220' },
+  value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4, color: '#0b1220' },
 
-  t1Table: { width: '100%', marginTop: 8, borderTopWidth: 0.6, borderTopColor: '#eef2ff' },
-  t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.6, borderBottomColor: '#eef2ff', paddingVertical: 6, backgroundColor: '#fbfcff' },
-  t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#fbfdff' },
+  groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#e6eef8', paddingTop: 10, marginTop: 10 },
 
+  t1Table: { width: '100%', marginTop: 8, borderTopWidth: 0.5, borderTopColor: '#e6eef8' },
+  t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.6, borderBottomColor: '#e6eef8', paddingVertical: 6, backgroundColor: '#f8fafc' },
+  t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#f1f5f9' },
   t1Col1: { width: '8%', fontSize: 10.5 },
   t1Col2: { width: '42%', fontSize: 10.5 },
-  t1Col3: { width: '20%', fontSize: 10.5 },
-  t1Col4: { width: '30%', fontSize: 10.5 },
+  t1Col3: { width: '22%', fontSize: 10.5 },
+  t1Col4: { width: '28%', fontSize: 10.5 },
 
-  qrArea: { marginTop: 12, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
+  qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  qrBox: { width: '34%', alignItems: 'center' },
 
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
 
-  infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#0b1220', fontSize: 9 },
+  infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 }
 });
 
-// ---------- PDF component (only QR, no watermark) ----------
+// ---------- PDF component (QR only + beautiful human-readable layout) ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
@@ -101,7 +106,7 @@ function AppointmentPdf({ ticket }) {
     weighbridgeNumber: t.weighbridgeNumber || '',
     agentTin: t.agentTin || '',
     agentName: t.agentName || '',
-    warehouse: t.warehouse || '',
+    warehouse: t.warehouseLabel || t.warehouse || '',
     pickupDate: t.pickupDate || '',
     consolidated: t.consolidated || '',
     truckNumber: t.truckNumber || '',
@@ -113,64 +118,70 @@ function AppointmentPdf({ ticket }) {
     createdAt: t.createdAt || '',
   };
 
-  const qrImage = t.qrImage || null;
-
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
         {/* Header */}
         <PdfView style={pdfStyles.headerBar}>
-          <PdfView>
+          <PdfView style={pdfStyles.headerLeft}>
             <PdfImage src={gralogo} style={pdfStyles.logoSmall} />
           </PdfView>
 
-          <PdfView style={{ alignItems: 'center' }}>
+          <PdfView style={pdfStyles.headerCenter}>
             <PdfText style={pdfStyles.titleBig}>NICK TC-SCAN (GAMBIA) LTD.</PdfText>
-            <PdfText style={pdfStyles.subtitle}>Weighbridge Appointment — Official Ticket</PdfText>
+            <PdfText style={pdfStyles.subtitle}>Weighbridge Ticket — Official Appointment Document</PdfText>
           </PdfView>
 
-          <PdfView>
+          <PdfView style={pdfStyles.headerRight}>
             <PdfImage src={gnswlogo} style={pdfStyles.logoSmall} />
           </PdfView>
         </PdfView>
 
         <PdfView style={pdfStyles.mainBox}>
           <PdfView style={pdfStyles.sectionRow}>
-            <PdfView style={{ width: '58%' }}>
-              <PdfText style={pdfStyles.label}>Appointment</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.appointmentNumber} · <PdfText style={{ fontSize: 9, color: '#6b7280' }}>{ticketData.createdAt || ''}</PdfText></PdfText>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Appointment No :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.appointmentNumber}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Agent</PdfText>
+              <PdfText style={pdfStyles.label}>Weighbridge No :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.weighbridgeNumber}</PdfText>
+
+              <PdfText style={pdfStyles.label}>Agent :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.agentName} — {ticketData.agentTin}</PdfText>
-
-              <PdfText style={pdfStyles.label}>Warehouse</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '40%' }}>
-              <PdfText style={pdfStyles.label}>Weighbridge No</PdfText>
-              <PdfText style={[pdfStyles.value, { fontWeight: 700, fontSize: 12 }]}>{ticketData.weighbridgeNumber}</PdfText>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Warehouse :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Pick-up Date</PdfText>
+              <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Status</PdfText>
+              <PdfText style={pdfStyles.label}>Consolidated :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.consolidated === 'Y' ? 'Consolidated' : 'Single'}</PdfText>
             </PdfView>
           </PdfView>
 
-          <PdfView style={[pdfStyles.groupBoxTopBorder]}>
-            <PdfText style={[pdfStyles.label]}>Truck & Driver</PdfText>
-            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-              <PdfText style={pdfStyles.value}>{ticketData.truckNumber || '—'}</PdfText>
-              <PdfText style={pdfStyles.value}>{ticketData.driverName || '—'} — {ticketData.driverLicense || '—'}</PdfText>
+          <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBoxTopBorder]}>
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Truck / Driver :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.truckNumber} — {ticketData.driverName}</PdfText>
+            </PdfView>
+
+            <PdfView style={{ width: '48%', zIndex: 1 }}>
+              <PdfText style={pdfStyles.label}>Driver License :</PdfText>
+              <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
             </PdfView>
           </PdfView>
 
-          <PdfView style={[pdfStyles.groupBoxTopBorder]}>
-            <PdfText style={[pdfStyles.label]}>T1 Records ({ticketData.t1Count})</PdfText>
+          <PdfView style={pdfStyles.groupBoxTopBorder}>
+            <PdfText style={[pdfStyles.label, { textAlign: 'left', zIndex: 1 }]}>T1 Records Summary :</PdfText>
+            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, zIndex: 1 }}>
+              <PdfText style={pdfStyles.value}>Count : {ticketData.t1Count}</PdfText>
+              <PdfText style={pdfStyles.value}>Packing types : {ticketData.packingTypesUsed || '—'}</PdfText>
+            </PdfView>
 
-            {ticketData.t1Count > 0 ? (
+            {ticketData.t1Count > 0 && (
               <PdfView style={pdfStyles.t1Table}>
                 <PdfView style={pdfStyles.t1HeaderRow}>
                   <PdfText style={pdfStyles.t1Col1}>#</PdfText>
@@ -188,32 +199,54 @@ function AppointmentPdf({ ticket }) {
                   </PdfView>
                 ))}
               </PdfView>
-            ) : (
-              <PdfText style={pdfStyles.value}>No T1 records</PdfText>
             )}
           </PdfView>
 
-          {/* QR area: large and centered */}
+          {/* QR area (prominent) */}
           <PdfView style={pdfStyles.qrArea}>
-            <PdfView style={{ width: '68%' }}>
-              <PdfText style={[pdfStyles.label]}>Scan QR — View Appointment</PdfText>
-              <PdfText style={{ fontSize: 9, color: '#6b7280', marginBottom: 8 }}>
-                Scan the QR code to open a beautiful, human-readable page with the appointment data.
-              </PdfText>
+            <PdfView style={{ width: '62%' }}>
+              <PdfText style={[pdfStyles.label, { marginBottom: 6 }]}>Appointment Details (Human-friendly)</PdfText>
+
+              {/* Small human-friendly table printed in the PDF as well */}
+              <PdfView style={{ marginBottom: 8 }}>
+                <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <PdfText style={{ fontFamily: 'Mono', fontSize: 10, width: '30%' }}>Appointment</PdfText>
+                  <PdfText style={{ fontSize: 10 }}>{ticketData.appointmentNumber}</PdfText>
+                </PdfView>
+                <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <PdfText style={{ fontFamily: 'Mono', fontSize: 10, width: '30%' }}>Weighbridge</PdfText>
+                  <PdfText style={{ fontSize: 10 }}>{ticketData.weighbridgeNumber}</PdfText>
+                </PdfView>
+                <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <PdfText style={{ fontFamily: 'Mono', fontSize: 10, width: '30%' }}>Agent</PdfText>
+                  <PdfText style={{ fontSize: 10 }}>{ticketData.agentName} ({ticketData.agentTin})</PdfText>
+                </PdfView>
+                <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <PdfText style={{ fontFamily: 'Mono', fontSize: 10, width: '30%' }}>Warehouse</PdfText>
+                  <PdfText style={{ fontSize: 10 }}>{ticketData.warehouse}</PdfText>
+                </PdfView>
+                <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                  <PdfText style={{ fontFamily: 'Mono', fontSize: 10, width: '30%' }}>Pickup Date</PdfText>
+                  <PdfText style={{ fontSize: 10 }}>{ticketData.pickupDate}</PdfText>
+                </PdfView>
+              </PdfView>
+
+              <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Scan the QR on the right with your phone to open a clean, readable appointment page (no JSON). Works offline — the QR encodes a tiny HTML page.</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '28%', alignItems: 'center' }}>
-              {qrImage ? (
-                <PdfImage src={qrImage} style={{ width: 110, height: 110 }} />
+            <PdfView style={pdfStyles.qrBox}>
+              {t.qrImage ? (
+                <PdfImage src={t.qrImage} style={{ width: 140, height: 140 }} />
               ) : (
                 <PdfText style={{ fontSize: 9, color: '#6b7280' }}>QR not available</PdfText>
               )}
+              <PdfText style={{ fontSize: 9, marginTop: 6, color: '#374151' }}>{ticketData.appointmentNumber}</PdfText>
             </PdfView>
           </PdfView>
         </PdfView>
 
         <PdfView>
-          <PdfText style={pdfStyles.footerText}>NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits.</PdfText>
+          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the QR for a readable details page.</PdfText>
         </PdfView>
       </Page>
     </Document>
@@ -244,11 +277,11 @@ export default function AppointmentPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
-  // preview states
+  // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
   const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
 
-  // orb state
+  // only need the setter (isOrbOpen was unused)
   const [, setOrbOpen] = useState(false);
 
   const recognitionRef = useRef(null);
@@ -257,7 +290,7 @@ export default function AppointmentPage() {
   const containerRef = useRef(null);
   const isMobile = useBreakpointValue({ base: true, md: false });
 
-  // helpers for UI
+  // utility UI highlights
   const pulseRow = (index) => {
     const rows = document.querySelectorAll('.panel-card');
     const idx = Math.max(0, Math.min(index, rows.length - 1));
@@ -272,6 +305,7 @@ export default function AppointmentPage() {
     setTimeout(() => els.forEach((el) => el.classList.remove('highlight-flash')), 2000);
   };
 
+  // voice command handler
   const handleVoiceCommand = (text = '') => {
     const t = String(text || '').toLowerCase().trim();
     toast({ status: 'info', title: 'Voice command', description: `"${t}"`, duration: 2000 });
@@ -297,7 +331,7 @@ export default function AppointmentPage() {
     const css = `
       html, body, #root { background: #e6f6ff !important; }
       .appt-glass {
-        background: linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,255,255,0.92));
+        background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(255,255,255,0.75));
         border-radius: 12px;
         border: 1px solid rgba(255,255,255,0.6);
         box-shadow: 0 10px 30px rgba(2,6,23,0.06);
@@ -425,8 +459,38 @@ export default function AppointmentPage() {
 
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
-  // --- Number generation helpers (same solid approach as before) ---
+  // Modified openConfirm: generate numbers, set preview, then open modal
+  const openConfirm = async () => {
+    if (!validateMainForm()) return;
+
+    try {
+      const pickup = pickupDate || new Date().toISOString().slice(0, 10);
+      // generate preview numbers
+      const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(pickup);
+      setPreviewAppointmentNumber(appointmentNumber);
+      setPreviewWeighbridgeNumber(weighbridgeNumber);
+      setConfirmOpen(true);
+    } catch (err) {
+      console.error('Failed to generate preview numbers', err);
+      try {
+        const fallback = await generateNumbersUsingSupabase(pickupDate || new Date().toISOString().slice(0, 10));
+        setPreviewAppointmentNumber(fallback.appointmentNumber);
+        setPreviewWeighbridgeNumber(fallback.weighbridgeNumber);
+        setConfirmOpen(true);
+      } catch (e) {
+        toast({ status: 'error', title: 'Could not generate appointment numbers', description: 'Please try again' });
+      }
+    }
+  };
+  const closeConfirm = () => {
+    setConfirmOpen(false);
+    setPreviewAppointmentNumber('');
+    setPreviewWeighbridgeNumber('');
+  };
+
+  // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
+    // Returns { appointmentNumber, weighbridgeNumber }
     const maxAttempts = 10;
     const d = new Date(pickupDateValue);
     const YY = String(d.getFullYear()).slice(-2);
@@ -435,18 +499,22 @@ export default function AppointmentPage() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
+        // Build base seq using count for that date (best-effort)
         const { count } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
           .eq('pickup_date', pickupDateValue);
 
         const existing = Number(count || 0);
-        const seq = existing + 1 + attempt;
+        const seq = existing + 1 + attempt; // add attempt to avoid repeating same seq if collision
         const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
+        // add attempt-based suffix only when attempt>0 to help uniqueness
         const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
+
         const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
         const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
+        // check both uniqueness
         const { count: wbCount } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -460,8 +528,10 @@ export default function AppointmentPage() {
         if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
           return { appointmentNumber, weighbridgeNumber };
         }
+        // else loop to try again
       } catch (e) {
-        console.warn('generateUniqueNumbers fallback', e);
+        // if any error while checking, fallback to a timestamp + random and return it
+        console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
         return {
           appointmentNumber: `${YY}${MM}${DD}${ts}`,
@@ -469,18 +539,25 @@ export default function AppointmentPage() {
         };
       }
     }
+
+    // If exhausted attempts, fallback to timestamp + random
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
       weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
     };
   }
-  // eslint-disable-next-line no-unused-vars
-  async function generateNumbersUsingSupabase(pickupDateValue) { return await generateUniqueNumbers(pickupDateValue); }
 
-  // create appointment with retry on unique collisions
+  // eslint-disable-next-line no-unused-vars
+  async function generateNumbersUsingSupabase(pickupDateValue) {
+    // kept for backward compatibility – delegate to generateUniqueNumbers
+    return await generateUniqueNumbers(pickupDateValue);
+  }
+
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
+
+    // generate unique appointment & weighbridge numbers (ensured unique by checking DB)
     let attempts = 0;
     const maxInsertAttempts = 6;
     let lastErr = null;
@@ -491,6 +568,7 @@ export default function AppointmentPage() {
       let appointmentNumber;
       let weighbridgeNumber;
 
+      // If the caller provided preview numbers, try them first (only on first attempt).
       if (useProvidedNumbers && attempts === 1) {
         appointmentNumber = payload.appointmentNumber;
         weighbridgeNumber = payload.weighbridgeNumber;
@@ -526,19 +604,25 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (insertErr) {
+          // If uniqueness constraint triggered, loop and try again with new numbers.
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
-            console.warn('Insert conflict, retrying...', insertErr);
-            await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
+            // duplicate constraint — retry (and if we had used provided numbers, drop reliance on them next attempts)
+            console.warn('Insert conflict on unique column, retrying generation...', insertErr);
+            await new Promise(r => setTimeout(r, 120 + Math.random() * 200)); // small jitter
             continue;
           }
+          // other error -> throw
           throw insertErr;
         }
 
-        if (!inserted) throw new Error('Failed to insert appointment.');
+        if (!inserted) {
+          throw new Error('Failed to insert appointment.');
+        }
 
         const appointmentId = inserted.id;
+
         const t1Rows = (payload.t1s || []).map((r) => ({
           appointment_id: appointmentId,
           sad_no: r.sadNo,
@@ -549,6 +633,7 @@ export default function AppointmentPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
+            // roll back appointment insertion if t1 insert failed
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
@@ -561,6 +646,7 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
+          // return a best-effort object
           return {
             appointment: {
               id: appointmentId,
@@ -605,20 +691,24 @@ export default function AppointmentPage() {
         };
       } catch (finalErr) {
         lastErr = finalErr;
+        // If we've exhausted attempts, throw
         if (attempts >= maxInsertAttempts) {
           console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
           throw finalErr;
         }
+        // otherwise loop to try again
         console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
         await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
         continue;
       }
     }
+
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
-  // Build a nice HTML page (small) and generate QR that encodes a data URL to that page
+  // helper to assemble the full payload used for QR and generate QR image that opens a human-friendly HTML page
   async function buildPrintableTicketObject(dbAppointment) {
+    // dbAppointment = the object returned from DB/insert (may be partial)
     const ticket = {
       appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number || '',
       weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '',
@@ -634,120 +724,108 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Create an elegant HTML snippet that will be embedded in the QR as a data URL.
-    // Keep it small, but beautiful — inline minimal CSS, responsive table, clear labels.
-    const sanitize = (v) => {
-      if (v === null || typeof v === 'undefined') return '';
-      return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    };
-
-    const t1rowsHtml = ticket.t1s.map((r, i) => `
-      <tr>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;">${i + 1}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sanitize(r.sadNo || r.sad_no || '—')}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sanitize(r.packingType || r.packing_type || '—')}</td>
-        <td style="padding:8px 12px;border-bottom:1px solid #eee;">${sanitize(r.containerNo || r.container_no || '—')}</td>
-      </tr>
-    `).join('');
-
-    const html = `<!doctype html>
+    // Build a small, elegant HTML page (inline styles) for the QR to open — human-readable table
+    const smallHtml = `
+<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Appointment ${sanitize(ticket.appointmentNumber)}</title>
+  <meta charset="utf-8" />
+  <title>Appointment ${ticket.appointmentNumber}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:#0b1220; padding:18px; background:#f8fafc}
-    .card{max-width:720px;margin:0 auto;background:#fff;padding:14px;border-radius:10px;box-shadow:0 6px 30px rgba(2,6,23,0.06)}
-    .hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-    .title{font-weight:700;font-size:16px;color:#071230}
-    .sub{font-size:12px;color:#475569}
-    .grid{display:flex;gap:12px;margin-top:8px}
-    .col{flex:1}
-    .label{font-size:11px;color:#334155;font-weight:700;margin-bottom:4px}
-    .val{font-size:13px;color:#0b1220;margin-bottom:6px}
-    table{width:100%;border-collapse:collapse;margin-top:8px}
-    th{text-align:left;padding:10px;background:#f1f5f9;border-bottom:1px solid #e6eef8;font-size:12px;color:#334155}
-    td{font-size:13px;color:#0b1220}
-    .muted{font-size:12px;color:#64748b}
-    .badge{display:inline-block;padding:6px 10px;background:#eef2ff;color:#0b1220;border-radius:8px;font-weight:700}
+    body{font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial; padding:18px; color:#0b1220;}
+    .wrap{max-width:740px;margin:0 auto;background:#fff;padding:18px;border-radius:10px;box-shadow:0 6px 20px rgba(2,6,23,0.06);}
+    h1{font-size:18px;margin:0 0 6px;color:#0f172a;}
+    p.sub{color:#6b7280;margin:0 0 14px;font-size:13px;}
+    table{width:100%;border-collapse:collapse;margin-top:12px;}
+    td, th{padding:8px 10px;border-bottom:1px solid #eef2f7;text-align:left;font-size:13px;}
+    th{background:#f8fafc;color:#111827;font-weight:700}
+    .small{font-size:12px;color:#6b7280}
+    .t1table{margin-top:14px}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700;font-size:12px}
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="hdr">
-      <div>
-        <div class="title">NICK TC-SCAN (GAMBIA) LTD.</div>
-        <div class="sub">Weighbridge Appointment</div>
-      </div>
-      <div style="text-align:right">
-        <div class="badge">Appointment: ${sanitize(ticket.appointmentNumber)}</div>
-        <div style="margin-top:6px" class="muted">${sanitize(ticket.createdAt)}</div>
-      </div>
+  <div class="wrap">
+    <h1>NICK TC-SCAN (GAMBIA) LTD. — Appointment</h1>
+    <p class="sub">Appointment No: <strong>${escapeHtml(ticket.appointmentNumber)}</strong> &nbsp;&nbsp; Weighbridge: <strong>${escapeHtml(ticket.weighbridgeNumber)}</strong></p>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+      <div><span class="pill">Agent</span><div class="small">${escapeHtml(ticket.agentName)} (${escapeHtml(ticket.agentTin)})</div></div>
+      <div><span class="pill">Warehouse</span><div class="small">${escapeHtml(ticket.warehouse)}</div></div>
+      <div><span class="pill">Pickup</span><div class="small">${escapeHtml(ticket.pickupDate)}</div></div>
     </div>
 
-    <div class="grid">
-      <div class="col">
-        <div class="label">Agent</div>
-        <div class="val">${sanitize(ticket.agentName)} — ${sanitize(ticket.agentTin)}</div>
+    <table>
+      <tr><th style="width:30%">Field</th><th>Value</th></tr>
+      <tr><td>Truck</td><td>${escapeHtml(ticket.truckNumber)}</td></tr>
+      <tr><td>Driver</td><td>${escapeHtml(ticket.driverName)}</td></tr>
+      <tr><td>Driver License</td><td>${escapeHtml(ticket.driverLicense)}</td></tr>
+      <tr><td>Consolidated</td><td>${ticket.consolidated === 'Y' ? 'Yes' : 'No'}</td></tr>
+      <tr><td>Created At</td><td>${escapeHtml(ticket.createdAt)}</td></tr>
+    </table>
 
-        <div class="label">Warehouse</div>
-        <div class="val">${sanitize(ticket.warehouse)}</div>
-      </div>
-      <div class="col">
-        <div class="label">Weighbridge No</div>
-        <div class="val" style="font-weight:700">${sanitize(ticket.weighbridgeNumber)}</div>
-
-        <div class="label">Pick-up Date</div>
-        <div class="val">${sanitize(ticket.pickupDate)}</div>
-      </div>
-    </div>
-
-    <div style="margin-top:12px">
-      <div class="label">Truck & Driver</div>
-      <div class="val">${sanitize(ticket.truckNumber)} — ${sanitize(ticket.driverName)} (${sanitize(ticket.driverLicense)})</div>
-    </div>
-
-    <div style="margin-top:12px">
-      <div class="label">T1 Records (${ticket.t1s.length})</div>
+    <div class="t1table">
+      <h3 style="margin:12px 0 6px">T1 Records (${(ticket.t1s || []).length})</h3>
       <table>
-        <thead><tr><th style="width:6%">#</th><th style="width:34%">SAD No</th><th style="width:30%">Packing</th><th style="width:30%">Container</th></tr></thead>
-        <tbody>
-          ${t1rowsHtml || '<tr><td colspan="4" style="padding:10px;color:#64748b">No T1 records</td></tr>'}
-        </tbody>
+        <tr><th>#</th><th>SAD No</th><th>Packing</th><th>Container</th></tr>
+        ${(ticket.t1s || []).map((r, i) => `<tr><td>${i+1}</td><td>${escapeHtml(r.sadNo || r.sad_no || '')}</td><td>${escapeHtml(r.packingType || r.packing_type || '')}</td><td>${escapeHtml(r.containerNo || r.container_no || '')}</td></tr>`).join('')}
       </table>
     </div>
 
-    <div style="margin-top:14px;font-size:12px;color:#475569">
-      <em>Show this page to weighbridge staff or save it. This QR opened a human-readable version of the appointment.</em>
-    </div>
+    <p style="margin-top:14px;font-size:12px;color:#6b7280">Show this QR to weighbridge staff or scan to open this page on your device.</p>
   </div>
 </body>
-</html>`;
+</html>`.trim();
 
-    // Create a data URL (small) and then generate a QR image for embedding
-    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html);
+    // Build data URI using base64 encoding (more compatible)
+    const base64Html = base64EncodeUnicode(smallHtml);
+    const dataUri = `data:text/html;base64,${base64Html}`;
+
+    // Generate QR image (PNG data URL) that encodes the data URI (so scanning opens the small HTML page)
     let qrDataUrl = null;
     try {
-      // generate QR image encoding the data URL
-      qrDataUrl = await QRCode.toDataURL(dataUrl, { margin: 1, scale: 6 });
+      qrDataUrl = await QRCode.toDataURL(dataUri, { margin: 1, scale: 8 });
     } catch (e) {
       console.warn('QR generation failed', e);
-      qrDataUrl = null;
+      // fallback: encode a compact JSON string if HTML QR fails
+      try {
+        const compact = JSON.stringify({
+          appointmentNumber: ticket.appointmentNumber,
+          weighbridgeNumber: ticket.weighbridgeNumber,
+          agentName: ticket.agentName,
+          pickupDate: ticket.pickupDate,
+        });
+        qrDataUrl = await QRCode.toDataURL(compact, { margin: 1, scale: 8 });
+      } catch (ee) {
+        qrDataUrl = null;
+      }
     }
 
-    // attach QR and the human payload to ticket object
     ticket.qrImage = qrDataUrl;
-    ticket.qrDataUrl = dataUrl; // optional: the actual URL encoded
-
+    ticket.qrDataUri = dataUri; // optional: if you want to show or store the raw data URI elsewhere
     return ticket;
   }
 
-  // handle create: validate SADs, create, build printable ticket, make pdf
+  // helpers for HTML escaping and base64
+  function escapeHtml(str = '') {
+    return String(str || '').replace(/[&<>"']/g, function (m) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[m];
+    });
+  }
+  function base64EncodeUnicode(str) {
+    // base64 encode Unicode safely
+    try {
+      return btoa(unescape(encodeURIComponent(str)));
+    } catch (e) {
+      // fallback - smaller inputs only
+      return btoa(str);
+    }
+  }
+
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify SADs
+    // verify all SADs exist in sad_declarations before creating appointment
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -756,6 +834,7 @@ export default function AppointmentPage() {
         return;
       }
 
+      // query sad_declarations for those SAD numbers
       const { data: existing, error: sadErr } = await supabase
         .from('sad_declarations')
         .select('sad_no')
@@ -787,6 +866,7 @@ export default function AppointmentPage() {
       return;
     }
 
+    // proceed to create
     setLoadingCreate(true);
 
     const payload = {
@@ -801,6 +881,7 @@ export default function AppointmentPage() {
       driverLicense: driverLicense.trim(),
       regime: '',
       totalDocumentedWeight: '',
+      // include preview numbers so createDirectlyInSupabase will try them first
       appointmentNumber: previewAppointmentNumber || undefined,
       weighbridgeNumber: previewWeighbridgeNumber || undefined,
       t1s: t1s.map(r => ({ sadNo: r.sadNo, packingType: r.packingType, containerNo: r.containerNo || '' })),
@@ -810,7 +891,7 @@ export default function AppointmentPage() {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // build printable ticket (contains qrImage)
+      // build printable ticket (includes QR image that opens a human-friendly HTML page)
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
@@ -833,14 +914,14 @@ export default function AppointmentPage() {
         const blob = await asPdf.toBlob();
         downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
       } catch (pdfErr) {
-        console.error('PDF generation failed', pdfErr);
+        console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
       }
 
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
+
       await triggerConfetti(160);
 
-      // clear form
       setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
       setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
       setConfirmOpen(false);
@@ -848,7 +929,7 @@ export default function AppointmentPage() {
       setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
     } catch (err) {
-      console.error('Create appointment failed', err);
+      console.error('Create appointment (DB) failed', err);
       const message = err?.message || String(err);
       if (message.toLowerCase().includes('weighbridge_number') || message.toLowerCase().includes('appointment_number') || message.includes('duplicate')) {
         toast({
@@ -864,30 +945,12 @@ export default function AppointmentPage() {
     }
   };
 
-  // When opening Confirm: generate preview numbers and show them
-  const openConfirm = async () => {
-    if (!validateMainForm()) return;
-    try {
-      const pickup = pickupDate || new Date().toISOString().slice(0, 10);
-      const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(pickup);
-      setPreviewAppointmentNumber(appointmentNumber);
-      setPreviewWeighbridgeNumber(weighbridgeNumber);
-      setConfirmOpen(true);
-    } catch (err) {
-      console.error('Failed to generate preview numbers', err);
-      toast({ status: 'error', title: 'Could not generate appointment numbers', description: 'Please try again' });
-    }
-  };
-  const closeConfirm = () => {
-    setConfirmOpen(false);
-    setPreviewAppointmentNumber('');
-    setPreviewWeighbridgeNumber('');
-  };
-
   const packingTypesUsed = useMemo(() => (t1s || []).map(t => t.packingType), [t1s]);
 
   const renderRecords = () => {
-    if (t1s.length === 0) return <Box p={6}><Text color="gray.600">No T1 records added yet.</Text></Box>;
+    if (t1s.length === 0) {
+      return <Box p={6}><Text color="gray.600">No T1 records added yet.</Text></Box>;
+    }
     if (isMobile) {
       return (
         <VStack spacing={3}>
@@ -912,7 +975,13 @@ export default function AppointmentPage() {
     return (
       <Table variant="simple" size="sm">
         <Thead>
-          <Tr><Th>#</Th><Th>SAD No</Th><Th>Packing</Th><Th>Container No</Th><Th>Actions</Th></Tr>
+          <Tr>
+            <Th>#</Th>
+            <Th>SAD No</Th>
+            <Th>Packing</Th>
+            <Th>Container No</Th>
+            <Th>Actions</Th>
+          </Tr>
         </Thead>
         <Tbody>
           {t1s.map((r, i) => (
@@ -940,15 +1009,53 @@ export default function AppointmentPage() {
 
       <Box p={5} className="appt-glass" mb={6}>
         <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-          <FormControl isRequired><FormLabel>Agent TIN</FormLabel><ChakraInput value={agentTin} onChange={(e) => setAgentTin(e.target.value)} placeholder="Enter Agent TIN" /></FormControl>
-          <FormControl isRequired><FormLabel>Agent Name</FormLabel><ChakraInput value={agentName} onChange={(e) => setAgentName(e.target.value)} placeholder="Agent / Company Name" /></FormControl>
-          <FormControl isRequired><FormLabel>Warehouse Location</FormLabel><Select value={warehouse} onChange={(e) => setWarehouse(e.target.value)}>{WAREHOUSES.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}</Select></FormControl>
-          <FormControl isRequired><FormLabel>Pick-up Date</FormLabel><ChakraInput type="date" value={pickupDate} onChange={(e) => setPickupDate(e.target.value)} /></FormControl>
-          <FormControl isRequired><FormLabel>Consolidated</FormLabel><Select value={consolidated} onChange={(e) => setConsolidated(e.target.value)}><option value="N">NO</option><option value="Y">YES</option></Select>
-            <Text fontSize="sm" color="gray.600" mt={1}>If <b>NO</b> only one T1 allowed. If <b>YES</b> multiple T1 allowed but each packing type only once.</Text></FormControl>
-          <FormControl isRequired><FormLabel>Truck Number</FormLabel><ChakraInput value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} placeholder="Truck Plate / No." /></FormControl>
-          <FormControl isRequired><FormLabel>Driver Name</FormLabel><ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" /></FormControl>
-          <FormControl isRequired><FormLabel>Driver License No</FormLabel><ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver License No" /></FormControl>
+          <FormControl isRequired>
+            <FormLabel>Agent TIN</FormLabel>
+            <ChakraInput value={agentTin} onChange={(e) => setAgentTin(e.target.value)} placeholder="Enter Agent TIN" />
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Agent Name</FormLabel>
+            <ChakraInput value={agentName} onChange={(e) => setAgentName(e.target.value)} placeholder="Agent / Company Name" />
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Warehouse Location</FormLabel>
+            <Select value={warehouse} onChange={(e) => setWarehouse(e.target.value)}>
+              {WAREHOUSES.map(w => <option key={w.value} value={w.value}>{w.label}</option>)}
+            </Select>
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Pick-up Date</FormLabel>
+            <ChakraInput type="date" value={pickupDate} onChange={(e) => setPickupDate(e.target.value)} />
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Consolidated</FormLabel>
+            <Select value={consolidated} onChange={(e) => setConsolidated(e.target.value)}>
+              <option value="N">NO</option>
+              <option value="Y">YES</option>
+            </Select>
+            <Text fontSize="sm" color="gray.600" mt={1}>
+              If <b>NO</b> only one T1 allowed. If <b>YES</b> multiple T1 allowed but each packing type only once.
+            </Text>
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Truck Number</FormLabel>
+            <ChakraInput value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} placeholder="Truck Plate / No." />
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Driver Name</FormLabel>
+            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
+          </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Driver License No</FormLabel>
+            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver License No" />
+          </FormControl>
         </SimpleGrid>
 
         <Divider my={4} />
@@ -956,26 +1063,46 @@ export default function AppointmentPage() {
         <HStack spacing={3} mb={3}>
           <Button leftIcon={<AddIcon />} colorScheme="teal" onClick={() => { setT1ModalOpen(true); }}>Add T1 Record</Button>
           <Badge colorScheme="purple">{t1s.length} T1(s) added</Badge>
-          {consolidated === 'Y' && (<Text fontSize="sm" color="gray.600">Packing types used: {packingTypesUsed.join(', ') || '—'}</Text>)}
+          {consolidated === 'Y' && (
+            <Text fontSize="sm" color="gray.600">Packing types used: {packingTypesUsed.join(', ') || '—'}</Text>
+          )}
+
           <HStack ml="auto" spacing={2}>
-            <Button size="sm" leftIcon={<SearchIcon />} variant="ghost">Quick Search</Button>
+            <Button size="sm" leftIcon={<SearchIcon />} variant="ghost" onClick={() => { /* placeholder for quick search */ }}>
+              Quick Search
+            </Button>
+
             <Button size="sm" leftIcon={voiceActive ? <SmallCloseIcon /> : <RepeatIcon />} onClick={() => (voiceActive ? stopVoice() : startVoice())} colorScheme={voiceActive ? 'red' : 'teal'}>
               {voiceActive ? 'Stop Voice' : 'Voice'}
             </Button>
           </HStack>
         </HStack>
 
-        <Box overflowX="auto" mb={4}>{renderRecords()}</Box>
+        <Box overflowX="auto" mb={4}>
+          {renderRecords()}
+        </Box>
 
         <HStack justify="flex-end" mt={6}>
-          <Button variant="outline" onClick={() => { setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value); setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]); toast({ status: 'info', title: 'Form cleared' }); }}>Clear</Button>
+          <Button variant="outline" onClick={() => {
+            setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
+            setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
+            toast({ status: 'info', title: 'Form cleared' });
+          }}>Clear</Button>
+
           <Button colorScheme="blue" onClick={openConfirm}>Create Weighbridge</Button>
         </HStack>
       </Box>
 
-      {/* Floating orb */}
+      {/* Floating crystal orb CTA (opens T1 modal) */}
       <Box className="floating-orb" onClick={() => { setOrbOpen(true); setT1ModalOpen(true); }} role="button" aria-label="Add T1">
-        <MotionBox className="orb" whileHover={{ scale: 1.08, rotate: 6 }} whileTap={{ scale: 0.96 }} animate={{ y: [0, -8, 0] }} transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }} title="Add T1">
+        <MotionBox
+          className="orb"
+          whileHover={{ scale: 1.08, rotate: 6 }}
+          whileTap={{ scale: 0.96 }}
+          animate={{ y: [0, -8, 0] }}
+          transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
+          title="Add T1"
+        >
           <Box fontSize="22px" fontWeight="700">✺</Box>
         </MotionBox>
       </Box>
@@ -983,28 +1110,50 @@ export default function AppointmentPage() {
       {/* T1 Modal */}
       <Modal isOpen={isT1ModalOpen} onClose={closeT1Modal} isCentered size="md">
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
-        <AnimatePresence>{isT1ModalOpen && (
-          <MotionBox initial={{ opacity: 0, y: 40, scale: 0.96 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 40, scale: 0.96 }}>
-            <ModalContent bg="linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,255,255,0.85))" borderRadius="2xl" boxShadow="0 30px 80px rgba(2,6,23,0.12)">
-              <ModalHeader>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</ModalHeader>
-              <ModalCloseButton />
-              <ModalBody>
-                <Stack spacing={3}>
-                  <FormControl isRequired><FormLabel>SAD No</FormLabel><ChakraInput value={t1Sad} onChange={(e) => setT1Sad(e.target.value)} placeholder="e.g. C26370" /></FormControl>
-                  <FormControl isRequired><FormLabel>Packing Type</FormLabel><Select value={t1Packing} onChange={(e) => setT1Packing(e.target.value)}>{PACKING_TYPES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}</Select></FormControl>
-                  {t1Packing === 'container' && (<FormControl isRequired><FormLabel>Container No</FormLabel><ChakraInput value={t1Container} onChange={(e) => setT1Container(e.target.value)} placeholder="Container No (e.g. TEST1000001)" /></FormControl>)}
-                </Stack>
-              </ModalBody>
-              <ModalFooter>
-                <Button onClick={closeT1Modal} mr={3}>Cancel</Button>
-                <Button colorScheme="teal" onClick={handleT1Save}>{editingIndex !== null ? 'Save' : 'Add'}</Button>
-              </ModalFooter>
-            </ModalContent>
-          </MotionBox>
-        )}</AnimatePresence>
+        <AnimatePresence>
+          {isT1ModalOpen && (
+            <MotionBox
+              initial={{ opacity: 0, y: 40, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 40, scale: 0.96 }}
+            >
+              <ModalContent bg="linear-gradient(180deg, rgba(255,255,255,0.95), rgba(255,255,255,0.85))" borderRadius="2xl" boxShadow="0 30px 80px rgba(2,6,23,0.12)">
+                <ModalHeader>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</ModalHeader>
+                <ModalCloseButton />
+                <ModalBody>
+                  <Stack spacing={3}>
+                    <FormControl isRequired>
+                      <FormLabel>SAD No</FormLabel>
+                      <ChakraInput value={t1Sad} onChange={(e) => setT1Sad(e.target.value)} placeholder="e.g. C26370" />
+                    </FormControl>
+
+                    <FormControl isRequired>
+                      <FormLabel>Packing Type</FormLabel>
+                      <Select value={t1Packing} onChange={(e) => setT1Packing(e.target.value)}>
+                        {PACKING_TYPES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                      </Select>
+                    </FormControl>
+
+                    {t1Packing === 'container' && (
+                      <FormControl isRequired>
+                        <FormLabel>Container No</FormLabel>
+                        <ChakraInput value={t1Container} onChange={(e) => setT1Container(e.target.value)} placeholder="Container No (e.g. TEST1000001)" />
+                      </FormControl>
+                    )}
+                  </Stack>
+                </ModalBody>
+
+                <ModalFooter>
+                  <Button onClick={closeT1Modal} mr={3}>Cancel</Button>
+                  <Button colorScheme="teal" onClick={handleT1Save}>{editingIndex !== null ? 'Save' : 'Add'}</Button>
+                </ModalFooter>
+              </ModalContent>
+            </MotionBox>
+          )}
+        </AnimatePresence>
       </Modal>
 
-      {/* Confirm modal with preview numbers */}
+      {/* Confirm Modal */}
       <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered>
         <ModalOverlay />
         <ModalContent maxW="lg" borderRadius="lg" className="appt-glass">
@@ -1012,14 +1161,17 @@ export default function AppointmentPage() {
           <ModalCloseButton />
           <ModalBody>
             <Stack spacing={3}>
+              {/* Generated numbers preview */}
               {previewAppointmentNumber && previewWeighbridgeNumber && (
                 <Box border="1px solid" borderColor="gray.200" borderRadius="md" p={3} mb={2} bg="gray.50">
                   <Text fontWeight="bold" mb={2}>Generated Numbers (Preview)</Text>
+
                   <HStack mb={2} spacing={3}>
                     <Text fontWeight="semibold" minW="150px">Appointment No:</Text>
                     <Text color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
                     <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewAppointmentNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
                   </HStack>
+
                   <HStack spacing={3}>
                     <Text fontWeight="semibold" minW="150px">Weighbridge No:</Text>
                     <Text color="blue.600" flex="1" wordBreak="break-all">{previewWeighbridgeNumber}</Text>
@@ -1042,7 +1194,12 @@ export default function AppointmentPage() {
                     <Thead><Tr><Th>#</Th><Th>SAD</Th><Th>Packing</Th><Th>Container</Th></Tr></Thead>
                     <Tbody>
                       {t1s.map((r, i) => (
-                        <Tr key={i}><Td>{i + 1}</Td><Td>{r.sadNo}</Td><Td>{r.packingType}</Td><Td>{r.containerNo || '—'}</Td></Tr>
+                        <Tr key={i}>
+                          <Td>{i + 1}</Td>
+                          <Td>{r.sadNo}</Td>
+                          <Td>{r.packingType}</Td>
+                          <Td>{r.containerNo || '—'}</Td>
+                        </Tr>
                       ))}
                     </Tbody>
                   </Table>
@@ -1058,32 +1215,4 @@ export default function AppointmentPage() {
       </Modal>
     </Container>
   );
-}
-
-// ---------- small utilities (download & confetti) ----------
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-async function triggerConfetti(count = 140) {
-  try {
-    if (typeof window !== 'undefined' && !window.confetti) {
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
-        s.onload = () => resolve();
-        s.onerror = reject;
-        document.head.appendChild(s);
-      });
-    }
-    if (window.confetti) {
-      window.confetti({ particleCount: Math.min(count, 400), spread: 160, origin: { y: 0.6 } });
-    }
-  } catch (e) {}
 }
