@@ -25,6 +25,7 @@ import WeightReports from './pages/WeightReports';
 import ExitTrucks from './pages/ExitTrucks';
 import Finance from './pages/FinanceDashboard';
 import FinanceSAD from './pages/FinanceSAD';
+import Appointments from './pages/Appointments';
 
 import OutgateTicketDetails from './pages/OutgateTicketDetails';
 import OutgateSearchTickets from './pages/OutgateSearchTickets';
@@ -250,6 +251,20 @@ function App() {
                 </ProtectedRoute>
               }
             />
+
+              <Route
+              path="/appointments"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Appointments />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
             <Route
               path="/exit-trucks"
               element={

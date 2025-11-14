@@ -13,7 +13,9 @@ import {
   FaFileInvoice,
   FaCog,
   FaChartBar,
+  FaCalendarCheck,   // ✅ Added for Appointments
 } from 'react-icons/fa';
+
 
 import {
   Box,
@@ -32,20 +34,24 @@ import { useAuth } from './context/AuthContext';
 // Admin menu
 const adminNavItems = [
   { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
-  { path: '/users', label: 'User Management', icon: FaUsers },
   { path: '/reports', label: 'Upload Ticket', icon: FaUpload },
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
   { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
   { path: '/outgate/confirm-exit', label: 'Confirm Exit', icon: FaCheckCircle },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
   { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
+  { path: '/users', label: 'Manage Users', icon: FaUsers },
   { path: '/settings', label: 'System Settings', icon: FaCog },
+  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
+
 ];
 
 // Weighbridge menu
 const weighbridgeNavItems = [
   { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
+  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
   { path: '/weighbridge', label: 'Upload Ticket', icon: FaUpload },
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
