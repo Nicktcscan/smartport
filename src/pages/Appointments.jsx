@@ -306,7 +306,7 @@ export default function AppointmentsPage() {
 
   return (
     <Container maxW="8xl" py={6}>
-      <Heading mb={4}>Manage Appointments — Dashboard</Heading>
+      <Heading mb={4}>Manage Appointments</Heading>
 
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
         <Stat p={4} borderRadius="md" boxShadow="sm" bg="linear-gradient(90deg,#7b61ff,#3ef4d0)" color="white">
