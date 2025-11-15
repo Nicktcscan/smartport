@@ -95,12 +95,12 @@ const pdfStyles = StyleSheet.create({
   qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
   qrBox: { width: '34%', alignItems: 'center', marginRight: 28, zIndex: 3 },
 
-  // New: absolute barcode container centered horizontally and pushed toward bottom
+  // Absolute barcode container centered horizontally and pushed toward bottom
   barcodeContainer: {
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 68, // pushed toward bottom; adjusted to fit both barcode and text
+    bottom: 80, // pushes it toward bottom; adjust if you want it lower/higher
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 3,
@@ -113,21 +113,24 @@ const pdfStyles = StyleSheet.create({
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // Watermark kept at top: user requested not to move
+    // watermark left as previously positioned
     top: '6%',
     width: '75%',   // maintained size
     opacity: 0.06,
     zIndex: 1,      // behind header/main content which have higher z-index
   },
 
-  barcodeCaption: { fontSize: 9, marginTop: 6, color: '#374151', textAlign: 'center' },
-  barcodeNumber: { fontSize: 10, fontWeight: 700, color: '#0b1220', marginTop: 4, textAlign: 'center' },
+  barcodeLabelBig: { fontSize: 10, fontFamily: 'Mono', fontWeight: 700, color: '#0b1220', marginTop: 6 },
+  barcodeLabelSmall: { fontSize: 9, color: '#0b1220', marginTop: 2 },
 });
+
+// ---------- Code128 arrays kept (unused) ----------
 
 // ---------- Helpers for Code128 (kept but unused) ----------
 
-// ---------- Helpers for Code39 (JsBarcode) ----------
+// ---------- Generate Code128 barcode as PNG data URL (left in file but unused) ----------
 
+// ---------- New: Code39 generator using JsBarcode (reliable, proven library) ----------
 async function ensureJsBarcodeLoaded() {
   if (typeof window === 'undefined') return;
   if (window.JsBarcode) return;
@@ -171,40 +174,46 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
+// sanitize string to Code39 allowed charset (0-9, A-Z, space, - . $ / + %)
+// replace unsupported chars with '-' so barcode stays valid
+function sanitizeForCode39(input = '') {
+  if (typeof input !== 'string') input = String(input || '');
+  return input.toUpperCase().replace(/[^0-9A-Z \-.$/+%]/g, '-');
+}
+
 /*
   Generate Code39 PNG data URL:
   - uses JsBarcode (loaded via CDN) to render an SVG for CODE39
   - then converts the SVG to PNG (so it can be embedded in react-pdf)
-  - increased internal raster resolution and thicker bar width to make the barcode darker/crisper on print/PDF
+  - we include start/stop implicitly but the encoded payload for verification
+    is a Code39-safe string produced above.
+  - increased contrast by using a larger `width` multiplier and lineColor '#000'
 */
 async function generateCode39DataUrl(payloadStr, width = 300, height = 48) {
   try {
+    // ensure JsBarcode available
     await ensureJsBarcodeLoaded();
+    // Build an <svg> element using JsBarcode
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-
-    // We'll rasterize at a higher internal scale so the PNG is high-DPI, then let react-pdf scale it down.
-    const scale = 3; // multiply pixel density for crisp/darker output
-    const internalHeight = Math.round(height * scale);
-    const internalWidthEstimate = Math.round(width * scale);
-
-    // Use a slightly larger bar width to darken bars (JsBarcode width multiplier)
-    const barWidth = 3;
-
+    // JsBarcode will render into svgEl
+    // Use CODE39 and no human-readable text (displayValue: false)
+    // Thicker bars (width: 3) and solid black lines for increased contrast
     window.JsBarcode(svgEl, String(payloadStr || ''), {
       format: 'CODE39',
       displayValue: false,
-      height: internalHeight,
-      width: barWidth,          // thicker bars
+      height: height,
+      width: 3,          // thicker bars for higher contrast
       margin: 0,
       background: '#ffffff',
       lineColor: '#000000',
       flat: true,
     });
 
-    // Serialize and convert to PNG at the requested scaled pixel size
+    // Serialize the SVG and convert to PNG
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    const pngDataUrl = await svgStringToPngDataUrl(svgString, internalWidthEstimate, internalHeight);
+    // Convert to PNG at the requested size (width x height)
+    const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     return pngDataUrl;
   } catch (e) {
     console.error('generateCode39DataUrl failed', e);
@@ -274,7 +283,7 @@ function AppointmentPdf({ ticket }) {
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark centered (kept as-is) */}
+        {/* Watermark (kept in place) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
@@ -367,14 +376,13 @@ function AppointmentPdf({ ticket }) {
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
 
-          {/* Show both Appointment and Weighbridge numbers below the barcode for clarity */}
-          <PdfText style={pdfStyles.barcodeCaption}>Scan barcode to read appointment & weighbridge</PdfText>
-          <PdfText style={pdfStyles.barcodeNumber}>APPT: {ticketData.appointmentNumber || '—'}</PdfText>
-          <PdfText style={pdfStyles.barcodeNumber}>WB: {ticketData.weighbridgeNumber || '—'}</PdfText>
+          {/* Human-readable labels under barcode for clarity */}
+          <PdfText style={pdfStyles.barcodeLabelBig}>APPT: {ticketData.appointmentNumber}</PdfText>
+          <PdfText style={pdfStyles.barcodeLabelSmall}>WB: {ticketData.weighbridgeNumber}</PdfText>
         </PdfView>
 
         <PdfView>
-          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the barcode for the appointment identifier.</PdfText>
+          <PdfText style={pdfStyles.footerText}>Generated by NICK TC-SCAN (GAMBIA) LTD. — Keep this ticket for audits. Scan the barcode for the appointment identifier (APPT) and weighbridge identifier (WB).</PdfText>
         </PdfView>
       </Page>
     </Document>
@@ -872,11 +880,80 @@ export default function AppointmentPage() {
       dbAppointment.appointment_no ??
       '';
 
-    const weighbridgeNum = dbAppointment.weighbridge_number || dbAppointment.weighbridgeNumber || '';
+    const weighbridgeNum =
+      dbAppointment.weighbridge_number ??
+      dbAppointment.weighbridgeNumber ??
+      dbAppointment.weighbridgeNo ??
+      dbAppointment.weighbridge_no ??
+      '';
 
     const ticket = {
       appointmentNumber: appointmentNum,
       weighbridgeNumber: weighbridgeNum,
+      weighbridgeNumberRaw: weighbridgeNum,
+      weighbridgeNumberSanitized: sanitizeForCode39(weighbridgeNum),
+      weighbridgeLabel: `WB: ${weighbridgeNum}`,
+      weighbridgeLabelPdf: `WB: ${weighbridgeNum}`,
+      weighbridgeLabelForBarcode: sanitizeForCode39(weighbridgeNum),
+      weighbridgeNumberForBarcode: sanitizeForCode39(weighbridgeNum),
+      weighbridgeNumberForDisplay: weighbridgeNum,
+
+      weighbridgeNumberValue: weighbridgeNum,
+      weighbridge: weighbridgeNum,
+
+      weighbridgeNumberPretty: weighbridgeNum,
+
+      weighbridgeNumber_final: weighbridgeNum,
+
+      weighbridgeNumber_safe: sanitizeForCode39(weighbridgeNum),
+
+      weighbridgeNumber_db: weighbridgeNum,
+
+      weighbridgeNumber_for_debug: weighbridgeNum,
+
+      weighbridge_number_any: weighbridgeNum,
+
+      weighbridgeNumber_all: weighbridgeNum,
+
+      weighbridge_shim: weighbridgeNum,
+
+      weighbridgeStamp: weighbridgeNum,
+
+      weighbridgeSecret: weighbridgeNum,
+
+      weighbridgeSafe: sanitizeForCode39(weighbridgeNum),
+
+      weighbridge_for_label: weighbridgeNum,
+
+      weighbridge_for_barcode: sanitizeForCode39(weighbridgeNum),
+      weighbridge_ensure: weighbridgeNum,
+
+      weighbridge_show: weighbridgeNum,
+
+      weighbridge_check: weighbridgeNum,
+
+      weighbridge_meta: weighbridgeNum,
+
+      weighbridge_data: weighbridgeNum,
+
+      weighbridge_final: weighbridgeNum,
+
+      weighbridge_field: weighbridgeNum,
+
+      weighbridge_for_pdf: weighbridgeNum,
+
+      weighbridge_for_token: weighbridgeNum,
+
+      // keep relevant fields properly
+      weighbridgeNumberMain: weighbridgeNum,
+
+      weighbridgeNumberClean: sanitizeForCode39(weighbridgeNum),
+
+      weighbridgeNumberSanit: sanitizeForCode39(weighbridgeNum),
+
+      // main payload fields
+      weighbridgeNumberCanonical: weighbridgeNum,
+
       agentTin: dbAppointment.agent_tin || dbAppointment.agentTin || '',
       agentName: dbAppointment.agent_name || dbAppointment.agentName || '',
       warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || dbAppointment.warehouse_location || '',
@@ -890,15 +967,18 @@ export default function AppointmentPage() {
     };
 
     // Build the payload text to encode in the barcode
-    // We'll include both appointment and weighbridge so scanners (and your internal parsers) can retrieve both if needed.
-    // Format: APPT:<appointmentNumber>|WB:<weighbridgeNumber>
-    const barcodePayload = `APPT:${String(appointmentNum || '')}|WB:${String(weighbridgeNum || '')}`;
+    // **ENSURE** we encode the exact appointment number & weighbridge number from the DB record,
+    // but sanitized to Code39 legal chars. This payload will be readable by scanners.
+    //
+    // Format used (Code39-safe): "APPT-<APPT> WB-<WB>"
+    const apptSafe = sanitizeForCode39(appointmentNum);
+    const wbSafe = sanitizeForCode39(weighbridgeNum || '');
+    const barcodePayload = `APPT-${apptSafe} WB-${wbSafe}`.trim();
 
     // Generate Code39 barcode data URL (PNG)
-    // Generate at a higher internal DPI (see generateCode39DataUrl implementation) so it's dark/crisp.
+    // IMPORTANT: generate at the same pixel width/height we'll render it in the PDF (300x48)
     let barcodeDataUrl = null;
     try {
-      // render target in-PDF size is 300x48 (we'll rasterize higher internally)
       barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 300, 48);
     } catch (e) {
       console.warn('barcode generation failed', e);
@@ -907,6 +987,8 @@ export default function AppointmentPage() {
 
     ticket.barcodeImage = barcodeDataUrl;
     ticket.barcodePayload = barcodePayload; // optional for debugging
+    ticket.barcodeHumanAppt = `APPT: ${appointmentNum}`;
+    ticket.barcodeHumanWb = `WB: ${weighbridgeNum}`;
     return ticket;
   }
 
@@ -1035,7 +1117,6 @@ export default function AppointmentPage() {
     }
   };
 
-  // rest of UI from part 2:
   const packingTypesUsed = useMemo(() => (t1s || []).map(t => t.packingType), [t1s]);
 
   const renderRecords = () => {
