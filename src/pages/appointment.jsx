@@ -56,7 +56,7 @@ const pdfStyles = StyleSheet.create({
   },
 
   headerBar: {
-    // Changed from dark blue to light ash color (kept from previous change)
+    // light ash background as requested earlier
     backgroundColor: '#f3f4f6',
     paddingVertical: 12,
     paddingHorizontal: 14,
@@ -72,7 +72,6 @@ const pdfStyles = StyleSheet.create({
   headerRight: { width: '18%', alignItems: 'flex-end' },
 
   logoSmall: { width: 72, height: 40, objectFit: 'contain' },
-  // Title readable on light ash background
   titleBig: { fontSize: 16, fontWeight: 700, color: '#0b1220', letterSpacing: 0.6 },
   subtitle: { fontSize: 9, color: '#6b7280', marginTop: 2 },
 
@@ -102,9 +101,9 @@ const pdfStyles = StyleSheet.create({
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // MOVED: positioned slightly toward the top of the appointment info table (was '18%')
-    top: '15%',
-    width: '75%',   // maintained size (same width as before)
+    // moved back to 18% per your request
+    top: '18%',
+    width: '75%',   // kept size the same
     opacity: 0.06,
   },
 });
@@ -169,22 +168,30 @@ function codesToModuleWidths(codes) {
 }
 
 // ---------- Generate Code128 barcode as PNG data URL (draw to canvas) ----------
+/*
+  Important change: ensure modulePx >= 1 (integer) so runs never round to zero pixels.
+  The canvas width is set to modulePx * totalModules so the generated PNG always contains full bars.
+  Default pixel size used here is 300x72; pdf renders the image at 300x72 as well.
+*/
 async function generateCode128DataUrl(payloadStr, width = 300, height = 72) {
   try {
     const codes = buildCode128CodesB(payloadStr);
     const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
-    const modulePx = width / totalModules;
 
-    // create canvas
+    // ensure at least 1 pixel per module (integer) to avoid rounding to zero on narrow canvases
+    const modulePx = Math.max(1, Math.floor(width / totalModules));
+    const canvasWidth = modulePx * totalModules;
+
+    // create canvas sized to fit modules exactly
     const canvas = document.createElement('canvas');
-    canvas.width = Math.round(width);
+    canvas.width = Math.round(canvasWidth);
     canvas.height = Math.round(height);
     const ctx = canvas.getContext('2d');
     // white background
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // draw bars
+    // draw bars using integer pixel widths
     let x = 0;
     for (let i = 0; i < moduleWidths.length; i++) {
       const runUnits = moduleWidths[i];
@@ -269,7 +276,7 @@ function AppointmentPdf({ ticket }) {
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark centered (moved slightly up into the appointment info area; size preserved) */}
+        {/* Watermark centered (moved back to top: 18% as requested; size preserved) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
@@ -353,7 +360,7 @@ function AppointmentPdf({ ticket }) {
             )}
           </PdfView>
 
-          {/* Barcode area: moved slightly left by changing filler width and adding right margin on qrBox */}
+          {/* Barcode area */}
           <PdfView style={pdfStyles.qrArea}>
             <PdfView style={{ width: '56%' }} />
 
@@ -876,7 +883,7 @@ export default function AppointmentPage() {
     };
 
     // Build the payload text to encode in the barcode
-    // **Changed previously**: encode ONLY the Appointment Number (plain text) so scanners show only that.
+    // encode ONLY the Appointment Number (plain text)
     const barcodePayload = String(ticket.appointmentNumber || '');
 
     // Generate Code128 barcode data URL (PNG)
