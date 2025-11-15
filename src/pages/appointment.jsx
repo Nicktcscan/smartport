@@ -100,7 +100,7 @@ const pdfStyles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 80, // pushes it toward bottom; adjust if you want it lower/higher
+    bottom: 68, // pushed toward bottom; adjusted to fit both barcode and text
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 3,
@@ -119,15 +119,15 @@ const pdfStyles = StyleSheet.create({
     opacity: 0.06,
     zIndex: 1,      // behind header/main content which have higher z-index
   },
-});
 
-// ---------- Code128 arrays kept (unused) ----------
+  barcodeCaption: { fontSize: 9, marginTop: 6, color: '#374151', textAlign: 'center' },
+  barcodeNumber: { fontSize: 10, fontWeight: 700, color: '#0b1220', marginTop: 4, textAlign: 'center' },
+});
 
 // ---------- Helpers for Code128 (kept but unused) ----------
 
-// ---------- Generate Code128 barcode as PNG data URL (left in file but unused) ----------
+// ---------- Helpers for Code39 (JsBarcode) ----------
 
-// ---------- New: Code39 generator using JsBarcode (reliable, proven library) ----------
 async function ensureJsBarcodeLoaded() {
   if (typeof window === 'undefined') return;
   if (window.JsBarcode) return;
@@ -175,34 +175,36 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   Generate Code39 PNG data URL:
   - uses JsBarcode (loaded via CDN) to render an SVG for CODE39
   - then converts the SVG to PNG (so it can be embedded in react-pdf)
-  - we include start/stop '*' in the rendered barcode but the encoded payload
-    for comparison and security is the raw appointment number (no asterisks).
+  - increased internal raster resolution and thicker bar width to make the barcode darker/crisper on print/PDF
 */
 async function generateCode39DataUrl(payloadStr, width = 300, height = 48) {
   try {
-    // ensure JsBarcode available
     await ensureJsBarcodeLoaded();
-    // Build an <svg> element using JsBarcode
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-    // JsBarcode will render into svgEl
-    // Use CODE39 and no human-readable text (displayValue: false)
-    // We'll render with minimal margins so resulting PNG is compact
+
+    // We'll rasterize at a higher internal scale so the PNG is high-DPI, then let react-pdf scale it down.
+    const scale = 3; // multiply pixel density for crisp/darker output
+    const internalHeight = Math.round(height * scale);
+    const internalWidthEstimate = Math.round(width * scale);
+
+    // Use a slightly larger bar width to darken bars (JsBarcode width multiplier)
+    const barWidth = 3;
+
     window.JsBarcode(svgEl, String(payloadStr || ''), {
       format: 'CODE39',
       displayValue: false,
-      height: height,
-      width: 2,          // bar width multiplier; final width controlled when we rasterize
+      height: internalHeight,
+      width: barWidth,          // thicker bars
       margin: 0,
       background: '#ffffff',
       lineColor: '#000000',
       flat: true,
     });
 
-    // Serialize the SVG and convert to PNG
+    // Serialize and convert to PNG at the requested scaled pixel size
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    // Convert to PNG at the requested size (width x height)
-    const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
+    const pngDataUrl = await svgStringToPngDataUrl(svgString, internalWidthEstimate, internalHeight);
     return pngDataUrl;
   } catch (e) {
     console.error('generateCode39DataUrl failed', e);
@@ -364,7 +366,11 @@ function AppointmentPdf({ ticket }) {
           ) : (
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
-          <PdfText style={{ fontSize: 9, marginTop: 8, color: '#374151' }}>Scan barcode to read Appointment number</PdfText>
+
+          {/* Show both Appointment and Weighbridge numbers below the barcode for clarity */}
+          <PdfText style={pdfStyles.barcodeCaption}>Scan barcode to read appointment & weighbridge</PdfText>
+          <PdfText style={pdfStyles.barcodeNumber}>APPT: {ticketData.appointmentNumber || '—'}</PdfText>
+          <PdfText style={pdfStyles.barcodeNumber}>WB: {ticketData.weighbridgeNumber || '—'}</PdfText>
         </PdfView>
 
         <PdfView>
@@ -866,9 +872,11 @@ export default function AppointmentPage() {
       dbAppointment.appointment_no ??
       '';
 
+    const weighbridgeNum = dbAppointment.weighbridge_number || dbAppointment.weighbridgeNumber || '';
+
     const ticket = {
       appointmentNumber: appointmentNum,
-      weighbridgeNumber: dbAppointment.weighbridge_number || dbAppointment.weighbridgeNumber || '',
+      weighbridgeNumber: weighbridgeNum,
       agentTin: dbAppointment.agent_tin || dbAppointment.agentTin || '',
       agentName: dbAppointment.agent_name || dbAppointment.agentName || '',
       warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || dbAppointment.warehouse_location || '',
@@ -882,14 +890,15 @@ export default function AppointmentPage() {
     };
 
     // Build the payload text to encode in the barcode
-    // **ENSURE** we encode the exact appointment number from the DB record.
-    // This corresponds to the PHP variable commonly named: $appointment_number
-    const barcodePayload = String(appointmentNum || '');
+    // We'll include both appointment and weighbridge so scanners (and your internal parsers) can retrieve both if needed.
+    // Format: APPT:<appointmentNumber>|WB:<weighbridgeNumber>
+    const barcodePayload = `APPT:${String(appointmentNum || '')}|WB:${String(weighbridgeNum || '')}`;
 
     // Generate Code39 barcode data URL (PNG)
-    // IMPORTANT: generate at the same pixel width/height we'll render it in the PDF (300x48)
+    // Generate at a higher internal DPI (see generateCode39DataUrl implementation) so it's dark/crisp.
     let barcodeDataUrl = null;
     try {
+      // render target in-PDF size is 300x48 (we'll rasterize higher internally)
       barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 300, 48);
     } catch (e) {
       console.warn('barcode generation failed', e);
@@ -1026,6 +1035,7 @@ export default function AppointmentPage() {
     }
   };
 
+  // rest of UI from part 2:
   const packingTypesUsed = useMemo(() => (t1s || []).map(t => t.packingType), [t1s]);
 
   const renderRecords = () => {
