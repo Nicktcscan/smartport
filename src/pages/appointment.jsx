@@ -67,15 +67,16 @@ const pdfStyles = StyleSheet.create({
     justifyContent: 'space-between'
   },
 
-  headerLeft: { width: '18%', alignItems: 'flex-start' },
-  headerCenter: { width: '60%', alignItems: 'center', textAlign: 'center' },
-  headerRight: { width: '18%', alignItems: 'flex-end' },
+  headerLeft: { width: '18%', alignItems: 'flex-start', zIndex: 2 },
+  headerCenter: { width: '60%', alignItems: 'center', textAlign: 'center', zIndex: 2 },
+  headerRight: { width: '18%', alignItems: 'flex-end', zIndex: 2 },
 
   logoSmall: { width: 72, height: 40, objectFit: 'contain' },
+  // Title readable on light ash background
   titleBig: { fontSize: 16, fontWeight: 700, color: '#0b1220', letterSpacing: 0.6 },
   subtitle: { fontSize: 9, color: '#6b7280', marginTop: 2 },
 
-  mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 16, marginBottom: 12, position: 'relative', borderRadius: 10 },
+  mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 16, marginBottom: 12, position: 'relative', borderRadius: 10, zIndex: 3 },
   sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
 
   label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2, color: '#0b1220' },
@@ -92,7 +93,7 @@ const pdfStyles = StyleSheet.create({
   t1Col4: { width: '28%', fontSize: 10.5 },
 
   qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
-  qrBox: { width: '34%', alignItems: 'center', marginRight: 28 },
+  qrBox: { width: '34%', alignItems: 'center', marginRight: 28, zIndex: 3 },
 
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
 
@@ -101,10 +102,11 @@ const pdfStyles = StyleSheet.create({
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // moved back to 18% per your request
-    top: '18%',
-    width: '75%',   // kept size the same
+    // MOVED: placed near top as requested (closer to header)
+    top: '6%',
+    width: '75%',   // maintained size
     opacity: 0.06,
+    zIndex: 1,      // behind header/main content which have higher z-index
   },
 });
 
@@ -169,8 +171,8 @@ function codesToModuleWidths(codes) {
 
 // ---------- Generate Code128 barcode as PNG data URL (draw to canvas) ----------
 /*
-  Important change: ensure modulePx >= 1 (integer) so runs never round to zero pixels.
-  The canvas width is set to modulePx * totalModules so the generated PNG always contains full bars.
+  Important change retained: ensure modulePx >= 1 (integer) so runs never round to zero pixels.
+  Canvas width set to modulePx * totalModules so the generated PNG always contains full bars.
   Default pixel size used here is 300x72; pdf renders the image at 300x72 as well.
 */
 async function generateCode128DataUrl(payloadStr, width = 300, height = 72) {
@@ -257,26 +259,26 @@ async function triggerConfetti(count = 140) {
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
-    appointmentNumber: t.appointmentNumber || '',
-    weighbridgeNumber: t.weighbridgeNumber || '',
-    agentTin: t.agentTin || '',
-    agentName: t.agentName || '',
+    appointmentNumber: t.appointmentNumber || t.appointment_number || '',
+    weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
+    agentTin: t.agentTin || t.agent_tin || '',
+    agentName: t.agentName || t.agent_name || '',
     warehouse: t.warehouseLabel || t.warehouse || '',
-    pickupDate: t.pickupDate || '',
-    consolidated: t.consolidated || '',
-    truckNumber: t.truckNumber || '',
-    driverName: t.driverName || '',
-    driverLicense: t.driverLicense || '',
+    pickupDate: t.pickupDate || t.pickup_date || '',
+    consolidated: t.consolidated || t.consolidated || '',
+    truckNumber: t.truckNumber || t.truck_number || '',
+    driverName: t.driverName || t.driver_name || '',
+    driverLicense: t.driverLicense || t.driver_license_no || '',
     t1Count: (t.t1s || []).length,
-    packingTypesUsed: Array.isArray(t.t1s) ? Array.from(new Set(t.t1s.map(r => r.packingType))).join(', ') : '',
-    t1s: t.t1s || [],
-    createdAt: t.createdAt || '',
+    packingTypesUsed: Array.isArray(t.t1s) ? Array.from(new Set(t.t1s.map(r => r.packingType || r.packing_type))).join(', ') : '',
+    t1s: t.t1s || t.t1_records || [],
+    createdAt: t.createdAt || t.created_at || '',
   };
 
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark centered (moved back to top: 18% as requested; size preserved) */}
+        {/* Watermark centered (moved to top: '6%') */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
@@ -297,7 +299,7 @@ function AppointmentPdf({ ticket }) {
 
         <PdfView style={pdfStyles.mainBox}>
           <PdfView style={pdfStyles.sectionRow}>
-            <PdfView style={{ width: '48%', zIndex: 1 }}>
+            <PdfView style={{ width: '48%', zIndex: 3 }}>
               <PdfText style={pdfStyles.label}>Appointment No :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.appointmentNumber}</PdfText>
 
@@ -308,7 +310,7 @@ function AppointmentPdf({ ticket }) {
               <PdfText style={pdfStyles.value}>{ticketData.agentName} — {ticketData.agentTin}</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '48%', zIndex: 1 }}>
+            <PdfView style={{ width: '48%', zIndex: 3 }}>
               <PdfText style={pdfStyles.label}>Warehouse :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
 
@@ -321,20 +323,20 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
 
           <PdfView style={[pdfStyles.sectionRow, pdfStyles.groupBoxTopBorder]}>
-            <PdfView style={{ width: '48%', zIndex: 1 }}>
+            <PdfView style={{ width: '48%', zIndex: 3 }}>
               <PdfText style={pdfStyles.label}>Truck / Driver :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.truckNumber} — {ticketData.driverName}</PdfText>
             </PdfView>
 
-            <PdfView style={{ width: '48%', zIndex: 1 }}>
+            <PdfView style={{ width: '48%', zIndex: 3 }}>
               <PdfText style={pdfStyles.label}>Driver License :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
             </PdfView>
           </PdfView>
 
           <PdfView style={pdfStyles.groupBoxTopBorder}>
-            <PdfText style={[pdfStyles.label, { textAlign: 'left', zIndex: 1 }]}>T1 Records Summary :</PdfText>
-            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, zIndex: 1 }}>
+            <PdfText style={[pdfStyles.label, { textAlign: 'left', zIndex: 3 }]}>T1 Records Summary :</PdfText>
+            <PdfView style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6, zIndex: 3 }}>
               <PdfText style={pdfStyles.value}>Count : {ticketData.t1Count}</PdfText>
               <PdfText style={pdfStyles.value}>Packing types : {ticketData.packingTypesUsed || '—'}</PdfText>
             </PdfView>
@@ -865,26 +867,34 @@ export default function AppointmentPage() {
   };
 
   // helper to assemble the full payload used for barcode and generate barcode image that encodes text
+  // IMPORTANT: use appointment_number (or appointmentNumber) from the DB object directly to generate barcode
   async function buildPrintableTicketObject(dbAppointment) {
     // dbAppointment = the object returned from DB/insert (may be partial)
+    const appointmentNum =
+      dbAppointment.appointment_number ??
+      dbAppointment.appointmentNumber ??
+      dbAppointment.appointmentNo ??
+      dbAppointment.appointment_no ??
+      '';
+
     const ticket = {
-      appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number || '',
-      weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '',
-      agentTin: dbAppointment.agentTin || dbAppointment.agent_tin || '',
-      agentName: dbAppointment.agentName || dbAppointment.agent_name || '',
-      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || '',
-      pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date || '',
+      appointmentNumber: appointmentNum,
+      weighbridgeNumber: dbAppointment.weighbridge_number || dbAppointment.weighbridgeNumber || '',
+      agentTin: dbAppointment.agent_tin || dbAppointment.agentTin || '',
+      agentName: dbAppointment.agent_name || dbAppointment.agentName || '',
+      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || dbAppointment.warehouse_location || '',
+      pickupDate: dbAppointment.pickup_date || dbAppointment.pickupDate || '',
       consolidated: dbAppointment.consolidated || dbAppointment.consolidated || '',
-      truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number || '',
-      driverName: dbAppointment.driverName || dbAppointment.driver_name || '',
-      driverLicense: dbAppointment.driverLicense || dbAppointment.driver_license_no || '',
+      truckNumber: dbAppointment.truck_number || dbAppointment.truckNumber || '',
+      driverName: dbAppointment.driver_name || dbAppointment.driverName || '',
+      driverLicense: dbAppointment.driver_license_no || dbAppointment.driverLicense || '',
       t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
     // Build the payload text to encode in the barcode
-    // encode ONLY the Appointment Number (plain text)
-    const barcodePayload = String(ticket.appointmentNumber || '');
+    // **ENSURE** we encode the exact appointment number from the DB record.
+    const barcodePayload = String(appointmentNum || '');
 
     // Generate Code128 barcode data URL (PNG)
     // IMPORTANT: generate at the same pixel width/height we'll render it in the PDF (300x72)
@@ -978,7 +988,7 @@ export default function AppointmentPage() {
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
         agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
         agentName: dbAppointment.agentName || dbAppointment.agent_name,
-        warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location,
+        warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location || dbAppointment.warehouse,
         pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
         consolidated: dbAppointment.consolidated || dbAppointment.consolidated,
         truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
