@@ -102,8 +102,8 @@ const pdfStyles = StyleSheet.create({
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // MOVED: placed near top as requested (closer to header)
-    top: '6%',
+    // MOVED: placed very near the top as requested (preserve size)
+    top: '2%',
     width: '75%',   // maintained size
     opacity: 0.06,
     zIndex: 1,      // behind header/main content which have higher z-index
@@ -171,8 +171,7 @@ function codesToModuleWidths(codes) {
 
 // ---------- Generate Code128 barcode as PNG data URL (draw to canvas) ----------
 /*
-  Important change retained: ensure modulePx >= 1 (integer) so runs never round to zero pixels.
-  Canvas width set to modulePx * totalModules so the generated PNG always contains full bars.
+  Ensure modulePx >= 1 and canvas width = modulePx * totalModules so bars are drawn reliably.
   Default pixel size used here is 300x72; pdf renders the image at 300x72 as well.
 */
 async function generateCode128DataUrl(payloadStr, width = 300, height = 72) {
@@ -259,26 +258,26 @@ async function triggerConfetti(count = 140) {
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
-    appointmentNumber: t.appointmentNumber || t.appointment_number || '',
-    weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
-    agentTin: t.agentTin || t.agent_tin || '',
-    agentName: t.agentName || t.agent_name || '',
+    appointmentNumber: t.appointmentNumber || '',
+    weighbridgeNumber: t.weighbridgeNumber || '',
+    agentTin: t.agentTin || '',
+    agentName: t.agentName || '',
     warehouse: t.warehouseLabel || t.warehouse || '',
-    pickupDate: t.pickupDate || t.pickup_date || '',
-    consolidated: t.consolidated || t.consolidated || '',
-    truckNumber: t.truckNumber || t.truck_number || '',
-    driverName: t.driverName || t.driver_name || '',
-    driverLicense: t.driverLicense || t.driver_license_no || '',
+    pickupDate: t.pickupDate || '',
+    consolidated: t.consolidated || '',
+    truckNumber: t.truckNumber || '',
+    driverName: t.driverName || '',
+    driverLicense: t.driverLicense || '',
     t1Count: (t.t1s || []).length,
     packingTypesUsed: Array.isArray(t.t1s) ? Array.from(new Set(t.t1s.map(r => r.packingType || r.packing_type))).join(', ') : '',
-    t1s: t.t1s || t.t1_records || [],
-    createdAt: t.createdAt || t.created_at || '',
+    t1s: t.t1s || [],
+    createdAt: t.createdAt || '',
   };
 
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark centered (moved to top: '6%') */}
+        {/* Watermark centered (moved very near top) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
@@ -867,33 +866,27 @@ export default function AppointmentPage() {
   };
 
   // helper to assemble the full payload used for barcode and generate barcode image that encodes text
-  // IMPORTANT: use appointment_number (or appointmentNumber) from the DB object directly to generate barcode
+  // IMPORTANT: use the exact appointment_number field coming from the DB (the same variable your PHP uses)
   async function buildPrintableTicketObject(dbAppointment) {
-    // dbAppointment = the object returned from DB/insert (may be partial)
-    const appointmentNum =
-      dbAppointment.appointment_number ??
-      dbAppointment.appointmentNumber ??
-      dbAppointment.appointmentNo ??
-      dbAppointment.appointment_no ??
-      '';
-
+    // **PRIMARY SOURCE**: appointment_number (exact DB column)
+    const appointmentNum = dbAppointment && (dbAppointment.appointment_number ?? dbAppointment.appointmentNumber ?? dbAppointment.appointmentNo ?? '');
     const ticket = {
       appointmentNumber: appointmentNum,
       weighbridgeNumber: dbAppointment.weighbridge_number || dbAppointment.weighbridgeNumber || '',
       agentTin: dbAppointment.agent_tin || dbAppointment.agentTin || '',
       agentName: dbAppointment.agent_name || dbAppointment.agentName || '',
-      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || dbAppointment.warehouse_location || '',
+      warehouse: dbAppointment.warehouse_location || dbAppointment.warehouseLabel || dbAppointment.warehouse || '',
       pickupDate: dbAppointment.pickup_date || dbAppointment.pickupDate || '',
       consolidated: dbAppointment.consolidated || dbAppointment.consolidated || '',
       truckNumber: dbAppointment.truck_number || dbAppointment.truckNumber || '',
       driverName: dbAppointment.driver_name || dbAppointment.driverName || '',
       driverLicense: dbAppointment.driver_license_no || dbAppointment.driverLicense || '',
       t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
-      createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
+      createdAt: dbAppointment.created_at || dbAppointment.createdAt || new Date().toISOString(),
     };
 
     // Build the payload text to encode in the barcode
-    // **ENSURE** we encode the exact appointment number from the DB record.
+    // **ABSOLUTE**: encode EXACT appointment_number string from DB
     const barcodePayload = String(appointmentNum || '');
 
     // Generate Code128 barcode data URL (PNG)
@@ -982,21 +975,9 @@ export default function AppointmentPage() {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // build printable ticket (includes barcode image)
-      const printable = await buildPrintableTicketObject({
-        appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
-        weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
-        agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
-        agentName: dbAppointment.agentName || dbAppointment.agent_name,
-        warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location || dbAppointment.warehouse,
-        pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
-        consolidated: dbAppointment.consolidated || dbAppointment.consolidated,
-        truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
-        driverName: dbAppointment.driverName || dbAppointment.driver_name,
-        driverLicense: dbAppointment.driverLicense || dbAppointment.driver_license_no,
-        t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
-        createdAt: dbAppointment.createdAt || dbAppointment.created_at,
-      });
+      // IMPORTANT CHANGE: pass the DB appointment object directly to buildPrintableTicketObject
+      // so the generator uses dbAppointment.appointment_number (the exact DB / PHP variable) for the barcode.
+      const printable = await buildPrintableTicketObject(dbAppointment);
 
       // generate PDF & download
       try {
