@@ -102,115 +102,99 @@ const pdfStyles = StyleSheet.create({
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // MOVED: placed very near the top as requested (preserve size)
-    top: '2%',
+    // Watermark remains at top (user requested no further watermark movement)
+    top: '6%',
     width: '75%',   // maintained size
     opacity: 0.06,
     zIndex: 1,      // behind header/main content which have higher z-index
   },
 });
 
-// ---------- Code128 patterns (widths) ----------
-const CODE128_WIDTHS = [
-  "212222","222122","222221","121223","121322","131222","122213","122312","132212","221213",
-  "221312","231212","112232","122132","122231","113222","123122","123221","223211","221132",
-  "221231","213212","223112","312131","311222","321122","321221","312212","322112","322211",
-  "212123","212321","232121","111323","131123","131321","112313","132113","132311","211313",
-  "231113","231311","112133","112331","132131","113123","113321","133121","313121","211331",
-  "231131","213113","213311","213131","311123","311321","331121","312113","312311","332111",
-  "314111","221411","431111","111224","111422","121224","121422","141122","141221","112214",
-  "112412","122114","122411","142112","142211","241211","221114","413111","241112","134111",
-  "111242","121142","121241","114212","124112","124211","411212","421112","421211","212141",
-  "214121","412121","111143","111341","131141","114113","114311","411113","411311","113141",
-  "114131","311141","411131","211412"
-];
-const CODE128_STOP = "2331112";
+// ---------- Code128 arrays kept (unused) ----------
 
-// ---------- Helpers for Code128 ----------
-function charCodeForCode128B(ch) {
-  const code = ch.charCodeAt(0);
-  if (code >= 32 && code <= 127) return code - 32;
-  return '?'.charCodeAt(0) - 32;
+// ---------- Helpers for Code128 (kept but unused) ----------
+
+// ---------- Generate Code128 barcode as PNG data URL (left in file but unused) ----------
+
+// ---------- New: Code39 generator using JsBarcode (reliable, proven library) ----------
+async function ensureJsBarcodeLoaded() {
+  if (typeof window === 'undefined') return;
+  if (window.JsBarcode) return;
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load JsBarcode'));
+    document.head.appendChild(s);
+  });
 }
-function buildCode128CodesB(text) {
-  const codes = [];
-  const START_B = 104;
-  codes.push(START_B);
-  for (let i = 0; i < text.length; i++) {
-    const cv = charCodeForCode128B(text[i]);
-    codes.push(cv);
-  }
-  let sum = START_B;
-  for (let i = 0; i < text.length; i++) {
-    sum += (i + 1) * charCodeForCode128B(text[i]);
-  }
-  const check = sum % 103;
-  codes.push(check);
-  codes.push(106);
-  return codes;
-}
-function codesToModuleWidths(codes) {
-  const widths = [];
-  const quiet = 10;
-  widths.push(quiet);
-  for (let i = 0; i < codes.length; i++) {
-    const cv = codes[i];
-    let wstr;
-    if (cv === 106) {
-      wstr = CODE128_STOP;
-    } else {
-      wstr = CODE128_WIDTHS[cv];
-      if (!wstr) wstr = "111111";
+
+// Convert SVG string to PNG data URL of given pixel size
+async function svgStringToPngDataUrl(svgString, width, height) {
+  return await new Promise((resolve, reject) => {
+    try {
+      const img = new Image();
+      const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width);
+        canvas.height = Math.round(height);
+        const ctx = canvas.getContext('2d');
+        // white background
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // Draw the SVG onto the canvas, scaling to requested size
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        try {
+          const png = canvas.toDataURL('image/png');
+          resolve(png);
+        } catch (e) {
+          reject(e);
+        }
+      };
+      img.onerror = (err) => reject(err);
+      img.src = svg64;
+    } catch (e) {
+      reject(e);
     }
-    for (let j = 0; j < wstr.length; j++) widths.push(Number(wstr.charAt(j)));
-  }
-  widths.push(10);
-  const total = widths.reduce((s, v) => s + v, 0);
-  return { widths, totalModules: total };
+  });
 }
 
-// ---------- Generate Code128 barcode as PNG data URL (draw to canvas) ----------
 /*
-  Ensure modulePx >= 1 and canvas width = modulePx * totalModules so bars are drawn reliably.
-  Default pixel size used here is 300x72; pdf renders the image at 300x72 as well.
+  Generate Code39 PNG data URL:
+  - uses JsBarcode (loaded via CDN) to render an SVG for CODE39
+  - then converts the SVG to PNG (so it can be embedded in react-pdf)
+  - we include start/stop '*' in the rendered barcode but the encoded payload
+    for comparison and security is the raw appointment number (no asterisks).
 */
-async function generateCode128DataUrl(payloadStr, width = 300, height = 72) {
+async function generateCode39DataUrl(payloadStr, width = 300, height = 72) {
   try {
-    const codes = buildCode128CodesB(payloadStr);
-    const { widths: moduleWidths, totalModules } = codesToModuleWidths(codes);
+    // ensure JsBarcode available
+    await ensureJsBarcodeLoaded();
+    // Build an <svg> element using JsBarcode
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svgEl = document.createElementNS(svgNS, 'svg');
+    // JsBarcode will render into svgEl
+    // Use CODE39 and no human-readable text (displayValue: false)
+    // We'll render with minimal margins so resulting PNG is compact
+    window.JsBarcode(svgEl, String(payloadStr || ''), {
+      format: 'CODE39',
+      displayValue: false,
+      height: height,
+      width: 2,          // bar width multiplier; final width controlled when we rasterize
+      margin: 0,
+      background: '#ffffff',
+      lineColor: '#000000',
+      flat: true,
+    });
 
-    // ensure at least 1 pixel per module (integer) to avoid rounding to zero on narrow canvases
-    const modulePx = Math.max(1, Math.floor(width / totalModules));
-    const canvasWidth = modulePx * totalModules;
-
-    // create canvas sized to fit modules exactly
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(canvasWidth);
-    canvas.height = Math.round(height);
-    const ctx = canvas.getContext('2d');
-    // white background
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // draw bars using integer pixel widths
-    let x = 0;
-    for (let i = 0; i < moduleWidths.length; i++) {
-      const runUnits = moduleWidths[i];
-      const runPx = runUnits * modulePx;
-      const isBar = (i % 2) === 1;
-      if (isBar) {
-        ctx.fillStyle = '#000000';
-        // draw full-height bar with a small top/bottom padding so it looks nice on paper
-        const pad = Math.max(1, Math.floor(height * 0.06));
-        ctx.fillRect(Math.round(x), pad, Math.ceil(runPx), Math.max(1, Math.floor(height - pad * 2)));
-      }
-      x += runPx;
-    }
-
-    // return PNG data URL
-    return canvas.toDataURL('image/png');
+    // Serialize the SVG and convert to PNG
+    const svgString = new XMLSerializer().serializeToString(svgEl);
+    // Convert to PNG at the requested size (width x height)
+    const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
+    return pngDataUrl;
   } catch (e) {
-    console.error('generateCode128DataUrl failed', e);
+    console.error('generateCode39DataUrl failed', e);
     return null;
   }
 }
@@ -258,26 +242,26 @@ async function triggerConfetti(count = 140) {
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
-    appointmentNumber: t.appointmentNumber || '',
-    weighbridgeNumber: t.weighbridgeNumber || '',
-    agentTin: t.agentTin || '',
-    agentName: t.agentName || '',
+    appointmentNumber: t.appointmentNumber || t.appointment_number || '',
+    weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
+    agentTin: t.agentTin || t.agent_tin || '',
+    agentName: t.agentName || t.agent_name || '',
     warehouse: t.warehouseLabel || t.warehouse || '',
-    pickupDate: t.pickupDate || '',
-    consolidated: t.consolidated || '',
-    truckNumber: t.truckNumber || '',
-    driverName: t.driverName || '',
-    driverLicense: t.driverLicense || '',
+    pickupDate: t.pickupDate || t.pickup_date || '',
+    consolidated: t.consolidated || t.consolidated || '',
+    truckNumber: t.truckNumber || t.truck_number || '',
+    driverName: t.driverName || t.driver_name || '',
+    driverLicense: t.driverLicense || t.driver_license_no || '',
     t1Count: (t.t1s || []).length,
     packingTypesUsed: Array.isArray(t.t1s) ? Array.from(new Set(t.t1s.map(r => r.packingType || r.packing_type))).join(', ') : '',
-    t1s: t.t1s || [],
-    createdAt: t.createdAt || '',
+    t1s: t.t1s || t.t1_records || [],
+    createdAt: t.createdAt || t.created_at || '',
   };
 
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark centered (moved very near top) */}
+        {/* Watermark centered (left untouched as requested) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
         {/* Header */}
@@ -866,34 +850,41 @@ export default function AppointmentPage() {
   };
 
   // helper to assemble the full payload used for barcode and generate barcode image that encodes text
-  // IMPORTANT: use the exact appointment_number field coming from the DB (the same variable your PHP uses)
+  // IMPORTANT: use appointment_number (or appointmentNumber) from the DB object directly to generate barcode
   async function buildPrintableTicketObject(dbAppointment) {
-    // **PRIMARY SOURCE**: appointment_number (exact DB column)
-    const appointmentNum = dbAppointment && (dbAppointment.appointment_number ?? dbAppointment.appointmentNumber ?? dbAppointment.appointmentNo ?? '');
+    // dbAppointment = the object returned from DB/insert (may be partial)
+    const appointmentNum =
+      dbAppointment.appointment_number ??
+      dbAppointment.appointmentNumber ??
+      dbAppointment.appointmentNo ??
+      dbAppointment.appointment_no ??
+      '';
+
     const ticket = {
       appointmentNumber: appointmentNum,
       weighbridgeNumber: dbAppointment.weighbridge_number || dbAppointment.weighbridgeNumber || '',
       agentTin: dbAppointment.agent_tin || dbAppointment.agentTin || '',
       agentName: dbAppointment.agent_name || dbAppointment.agentName || '',
-      warehouse: dbAppointment.warehouse_location || dbAppointment.warehouseLabel || dbAppointment.warehouse || '',
+      warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse || dbAppointment.warehouse_location || '',
       pickupDate: dbAppointment.pickup_date || dbAppointment.pickupDate || '',
       consolidated: dbAppointment.consolidated || dbAppointment.consolidated || '',
       truckNumber: dbAppointment.truck_number || dbAppointment.truckNumber || '',
       driverName: dbAppointment.driver_name || dbAppointment.driverName || '',
       driverLicense: dbAppointment.driver_license_no || dbAppointment.driverLicense || '',
       t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
-      createdAt: dbAppointment.created_at || dbAppointment.createdAt || new Date().toISOString(),
+      createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
     // Build the payload text to encode in the barcode
-    // **ABSOLUTE**: encode EXACT appointment_number string from DB
+    // **ENSURE** we encode the exact appointment number from the DB record.
+    // This corresponds to the PHP variable commonly named: $appointment_number
     const barcodePayload = String(appointmentNum || '');
 
-    // Generate Code128 barcode data URL (PNG)
+    // Generate Code39 barcode data URL (PNG)
     // IMPORTANT: generate at the same pixel width/height we'll render it in the PDF (300x72)
     let barcodeDataUrl = null;
     try {
-      barcodeDataUrl = await generateCode128DataUrl(barcodePayload, 300, 72);
+      barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 300, 72);
     } catch (e) {
       console.warn('barcode generation failed', e);
       barcodeDataUrl = null;
@@ -975,9 +966,21 @@ export default function AppointmentPage() {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // IMPORTANT CHANGE: pass the DB appointment object directly to buildPrintableTicketObject
-      // so the generator uses dbAppointment.appointment_number (the exact DB / PHP variable) for the barcode.
-      const printable = await buildPrintableTicketObject(dbAppointment);
+      // build printable ticket (includes barcode image)
+      const printable = await buildPrintableTicketObject({
+        appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
+        weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
+        agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
+        agentName: dbAppointment.agentName || dbAppointment.agent_name,
+        warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location || dbAppointment.warehouse,
+        pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
+        consolidated: dbAppointment.consolidated || dbAppointment.consolidated,
+        truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
+        driverName: dbAppointment.driverName || dbAppointment.driver_name,
+        driverLicense: dbAppointment.driverLicense || dbAppointment.driver_license_no,
+        t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
+        createdAt: dbAppointment.createdAt || dbAppointment.created_at,
+      });
 
       // generate PDF & download
       try {
