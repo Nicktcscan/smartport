@@ -56,7 +56,8 @@ const pdfStyles = StyleSheet.create({
   },
 
   headerBar: {
-    backgroundColor: '#0f172a',
+    // Changed from dark blue to light ash color
+    backgroundColor: '#f3f4f6',
     paddingVertical: 12,
     paddingHorizontal: 14,
     borderRadius: 8,
@@ -71,8 +72,10 @@ const pdfStyles = StyleSheet.create({
   headerRight: { width: '18%', alignItems: 'flex-end' },
 
   logoSmall: { width: 72, height: 40, objectFit: 'contain' },
-  titleBig: { fontSize: 16, fontWeight: 700, color: '#fff', letterSpacing: 0.6 },
-  subtitle: { fontSize: 9, color: '#d1d5db', marginTop: 2 },
+  // Title color changed from white to dark so it is readable on the light ash background
+  titleBig: { fontSize: 16, fontWeight: 700, color: '#0b1220', letterSpacing: 0.6 },
+  // Subtitle color adjusted to muted dark
+  subtitle: { fontSize: 9, color: '#6b7280', marginTop: 2 },
 
   mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 16, marginBottom: 12, position: 'relative', borderRadius: 10 },
   sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
@@ -1041,6 +1044,7 @@ export default function AppointmentPage() {
         </VStack>
       );
     }
+
     return (
       <Table variant="simple" size="sm">
         <Thead>
