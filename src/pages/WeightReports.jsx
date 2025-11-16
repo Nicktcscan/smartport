@@ -1,217 +1,193 @@
 // src/pages/WeightReports.jsx
 /* eslint-disable no-unused-vars */
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Box,
+  Container,
+  Heading,
+  Input as ChakraInput,
   Button,
+  IconButton,
   Table,
   Thead,
   Tbody,
   Tr,
   Th,
   Td,
-  Input,
   Text,
-  Flex,
-  Spinner,
   useToast,
   Modal,
   ModalOverlay,
   ModalContent,
   ModalHeader,
-  ModalBody,
-  ModalFooter,
   ModalCloseButton,
+  ModalBody,
   useDisclosure,
+  ModalFooter,
   Stack,
-  Divider,
+  Flex,
+  Icon,
   SimpleGrid,
-  FormLabel,
-  Select,
-  IconButton,
-  Badge,
   HStack,
+  VStack,
+  FormControl,
+  FormLabel,
+  FormErrorMessage,
+  AlertDialog,
+  AlertDialogOverlay,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogBody,
+  AlertDialogFooter,
+  Spinner,
   Stat,
   StatLabel,
   StatNumber,
   StatHelpText,
-  Tooltip,
+  StatGroup,
+  useBreakpointValue,
   Menu,
   MenuButton,
   MenuList,
   MenuItem,
-  VStack,
 } from '@chakra-ui/react';
-import {
-  RepeatIcon,
-  DownloadIcon,
-  SearchIcon,
-} from '@chakra-ui/icons';
-import { FaFilePdf, FaEllipsisV, FaEye, FaFileAlt } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowForwardIcon } from '@chakra-ui/icons';
+import {
+  FaFileInvoice,
+  FaFilePdf,
+  FaExternalLinkAlt,
+  FaShareAlt,
+  FaEnvelope,
+  FaUserTie,
+  FaTruck,
+  FaBox,
+  FaBalanceScale,
+  FaTrashAlt,
+  FaEdit,
+  FaCheck,
+  FaRedo,
+  FaFilter,
+  FaSearch,
+  FaTimes,
+  FaEllipsisV,
+  FaFileCsv,
+  FaSort,
+  FaSortUp,
+  FaSortDown,
+  FaMicrophone,
+  FaMicrophoneSlash,
+  FaFileAlt,
+} from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
-import logoUrl from '../assets/logo.png';
-import { useAuth } from '../context/AuthContext';
+import {
+  pdf as pdfRender,
+  Document,
+  Page,
+  Text as PdfText,
+  View as PdfView,
+  Image as PdfImage,
+  StyleSheet,
+} from '@react-pdf/renderer';
 
-/* -----------------------
-   Styling helpers + constants
------------------------ */
-const MotionBox = motion(Box);
-const ITEMS_PER_PAGE = 5;
+const MotionModalContent = motion.create(ModalContent);
 
-/* -----------------------
-   Utilities
------------------------ */
-function parseNumber(val) {
-  if (val === null || val === undefined || val === '') return null;
-  const n = Number(String(val).toString().replace(/[, ]+/g, ''));
+// (PDF styles + helpers unchanged — omitted comment for brevity in this header)
+const pdfStyles = StyleSheet.create({
+  page: { paddingTop: 18, paddingBottom: 36, paddingHorizontal: 18, fontSize: 9, fontFamily: 'Helvetica', display: 'flex', flexDirection: 'column', color: '#071126', backgroundColor: '#ffffff' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  companyBlock: { flexDirection: 'column', marginLeft: 8 },
+  companyName: { fontSize: 13, fontWeight: 'bold', color: '#071126' },
+  reportTitle: { fontSize: 12, fontWeight: '800', marginBottom: 8, textAlign: 'center', color: '#071126' },
+  summaryBox: { marginBottom: 10, padding: 10, borderWidth: 1, borderColor: '#e6eef8', backgroundColor: '#fbfdff', borderRadius: 6 },
+  metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  tableOuter: { borderWidth: 1, borderColor: '#dbeafe', borderRadius: 4, overflow: 'hidden', marginBottom: 6 },
+  tableHeader: { flexDirection: 'row', backgroundColor: '#eef2ff', borderBottomWidth: 1, borderBottomColor: '#dbeafe', alignItems: 'center', paddingVertical: 6 },
+  tableRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#f1f5f9', alignItems: 'center', paddingVertical: 6 },
+  cellBase: { paddingHorizontal: 6, paddingVertical: 2, borderRightWidth: 1, borderRightColor: '#e6eef8' },
+  colTicket: { width: '12%', fontSize: 8 },
+  colTruck: { width: '14%', fontSize: 8 },
+  colDate: { width: '16%', fontSize: 8 },
+  colGross: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
+  colTare: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
+  colNet: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
+  colDriver: { width: '14%', fontSize: 8, paddingLeft: 4 },
+  colCreated: { width: '14%', fontSize: 8, paddingLeft: 4 },
+  footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
+  logo: { width: 64, height: 64, objectFit: 'contain' },
+});
+
+// =======================================
+// Helpers (parsing / numeric / weights)
+// =======================================
+function numericValue(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const cleaned = String(v).replace(/[,\s]+/g, '').replace(/kg/i, '').trim();
+  const n = Number(cleaned);
   return Number.isFinite(n) ? n : null;
 }
-
-function computeWeights(row) {
-  const gross = parseNumber(row.gross ?? row.gross_value ?? row.grossValue ?? row.gross_val);
-  const tare = parseNumber(row.tare ?? row.tare_value ?? row.tareValue ?? row.tare_val);
-  const net = parseNumber(row.net ?? row.net_value ?? row.netValue ?? row.net_val);
-
-  let G = gross;
-  let T = tare;
-  let N = net;
-
-  if ((G === null || G === undefined) && T != null && N != null) G = T + N;
-  if ((T === null || T === undefined) && G != null && N != null) T = G - N;
-  if ((N === null || N === undefined) && G != null && T != null) N = G - T;
-
-  return { gross: G, tare: T, net: N };
+function formatNumber(v) {
+  const n = numericValue(v);
+  if (n === null) return '';
+  return Number.isInteger(n) ? n.toLocaleString('en-US') : Number(n.toFixed(2)).toLocaleString('en-US');
 }
+function computeWeightsFromObj({ gross, tare, net }) {
+  let G = numericValue(gross);
+  let T = numericValue(tare);
+  let N = numericValue(net);
 
-function formatWeight(v) {
-  if (v === null || v === undefined) return '—';
-  if (Number.isInteger(v)) return Number(v).toLocaleString();
-  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if ((G === null || G === undefined) && T !== null && N !== null) G = T + N;
+  if ((N === null || N === undefined) && G !== null && T !== null) N = G - T;
+  if ((T === null || T === undefined) && G !== null && N !== null) T = G - N;
+
+  return {
+    grossValue: G !== null && G !== undefined ? G : null,
+    tareValue: T !== null && T !== undefined ? T : null,
+    netValue: N !== null && N !== undefined ? N : null,
+    grossDisplay: G !== null && G !== undefined ? formatNumber(G) : '',
+    tareDisplay: T !== null && T !== undefined ? formatNumber(T) : '',
+    netDisplay: N !== null && N !== undefined ? formatNumber(N) : '',
+  };
 }
-
-function exportToCSV(rows = [], filename = 'export.csv') {
-  if (!rows || rows.length === 0) return;
-  const headers = Object.keys(rows[0]);
-  const csv = [
-    headers.join(','),
-    ...rows.map((r) =>
-      headers
-        .map((h) => {
-          const v = r[h] ?? '';
-          const s = typeof v === 'string' ? v : String(v);
-          return `"${s.replace(/"/g, '""')}"`;
-        })
-        .join(',')
-    ),
-  ].join('\n');
-
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-function openPrintableWindow(html, title = 'Report') {
-  const w = window.open('', '_blank', 'width=900,height=700');
-  if (!w) return;
-  w.document.write(`
-    <html>
-      <head>
-        <title>${title}</title>
-        <style>
-          body{ font-family: Arial, Helvetica, sans-serif; padding: 18px; color: #111 }
-          .header{ display:flex; align-items:center; gap:12px; margin-bottom:18px }
-          .logo{ height:60px; width:auto; }
-          .company{ font-size:18px; font-weight:700; color:#0a6b63 }
-          table{ border-collapse: collapse; width: 100% }
-          th, td{ border: 1px solid #ddd; padding: 6px; font-size: 12px }
-          th{ background: #f7fafc; text-align: left }
-        </style>
-      </head>
-      <body>${html}</body>
-    </html>
-  `);
-  w.document.close();
-  w.focus();
-  setTimeout(() => {
-    w.print();
-  }, 300);
-}
-
-/* Deduplicate outgate rows by ticket number.
-*/
-function dedupeReportsByTicketNo(rows = []) {
-  const map = new Map();
-  const manualRows = [];
-
-  for (const r of rows) {
-    const tn = (r.ticketNo ?? r.ticket_no ?? r.rawRow?.ticket_no ?? '').toString().trim();
-    if (tn) {
-      const existing = map.get(tn);
-      const rTime = r.outgateDateTime ? new Date(r.outgateDateTime).getTime() : 0;
-      if (!existing) map.set(tn, r);
-      else {
-        const existingTime = existing.outgateDateTime ? new Date(existing.outgateDateTime).getTime() : 0;
-        if (rTime >= existingTime) map.set(tn, r);
-      }
-    } else {
-      manualRows.push(r);
-    }
-  }
-
-  return [...Array.from(map.values()), ...manualRows];
-}
-
-/* -----------------------
-   Robust date parsing helpers
------------------------ */
 
 /**
- * parseTicketDate accepts:
- * - Date objects
- * - epoch numbers
- * - "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS(.mmm)"
- * - "DD/MM/YYYY" and "DD/MM/YYYY HH:MM[:SS]"
- * - ISO strings
+ * Robust date parser — understands:
+ * - ISO
+ * - "YYYY-MM-DD HH:MM:SS(.mmm)"
+ * - "DD/MM/YYYY", "DD/MM/YY", with optional time
+ * - JS Date fallback
  */
 function parseTicketDate(raw) {
-  if (!raw && raw !== 0) return null;
-  if (raw instanceof Date) {
-    return isNaN(raw.getTime()) ? null : raw;
-  }
-  // numbers / epoch
+  if (!raw) return null;
+  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
   if (typeof raw === 'number') {
     const d = new Date(raw);
     return isNaN(d.getTime()) ? null : d;
   }
-  let s = String(raw).trim();
-  if (!s) return null;
+  const s0 = String(raw).trim();
+  if (s0 === '') return null;
 
-  // normalize common separators
-  // handle "YYYY-MM-DD HH:MM:SS(.mmm)" -> safe ISO
-  const ymdHms = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
-  if (ymdHms.test(s)) {
-    const iso = s.replace(' ', 'T');
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+    const d = new Date(`${s0}T00:00:00`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // ISO-like with space between date/time -> convert to T
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
+    const iso = s0.replace(' ', 'T');
     const d = new Date(iso);
     if (!isNaN(d.getTime())) return d;
+    // fallback: drop ms
+    const withoutMs = s0.replace(/\.\d+$/, '');
+    const iso2 = withoutMs.replace(' ', 'T');
+    const d2 = new Date(iso2);
+    if (!isNaN(d2.getTime())) return d2;
   }
 
-  // handle "YYYY-MM-DD" (date only)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d = new Date(`${s}T00:00:00`);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  // handle "DD/MM/YYYY" or "D/M/YY" with optional time
-  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?$/;
-  const m = s.match(dmRegex);
+  // DD/MM/YYYY or DD-MM-YYYY with optional time
+  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+  const m = s0.match(dmRegex);
   if (m) {
     let day = parseInt(m[1], 10);
     let month = parseInt(m[2], 10);
@@ -219,1097 +195,2093 @@ function parseTicketDate(raw) {
     let hh = m[4] ? parseInt(m[4], 10) : 0;
     let mm = m[5] ? parseInt(m[5], 10) : 0;
     let ss = m[6] ? parseInt(m[6], 10) : 0;
-    let ms = m[7] ? Number((m[7] + '000').slice(0, 3)) : 0;
     if (year < 100) year += 2000;
-    const d = new Date(year, month - 1, day, hh, mm, ss, ms);
-    if (!isNaN(d.getTime())) return d;
+    const dd = new Date(year, month - 1, day, hh, mm, ss);
+    if (!isNaN(dd.getTime())) return dd;
   }
 
-  // last resort: Date constructor (ISO or other)
-  let d0 = new Date(s);
+  // Generic JS parse
+  const d0 = new Date(s0);
   if (!isNaN(d0.getTime())) return d0;
 
-  // numeric string epoch?
-  const maybeNum = Number(s);
+  // numeric epoch string?
+  const maybeNum = Number(s0);
   if (!Number.isNaN(maybeNum)) {
-    const d1 = new Date(maybeNum);
-    if (!isNaN(d1.getTime())) return d1;
+    const d2 = new Date(maybeNum);
+    if (!isNaN(d2.getTime())) return d2;
   }
 
   return null;
 }
 
+// parseTimeToMinutes used for time-only filtering
+function parseTimeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const parts = String(timeStr).split(':');
+  if (parts.length < 2) return null;
+  const hh = parseInt(parts[0], 10);
+  const mm = parseInt(parts[1], 10);
+  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+  return hh * 60 + mm;
+}
+
 /**
- * makeDateTime(dateStr, timeStr, defaultTimeIsStart)
- * dateStr can be "DD/MM/YYYY" or "YYYY-MM-DD" (or Date-like string)
- * timeStr: "HH:MM" or "HH:MM:SS"
+ * makeDateTime: robust — accepts dateStr in either DD/MM/YYYY or YYYY-MM-DD
+ * and timeStr 'HH:MM' or 'HH:MM:SS'. Builds a local Date object with
+ * time applied to the given date (so no timezone-shift surprises).
  *
- * Returns a local Date object.
+ * defaultTimeIsStart determines default time: 00:00:00 (start) or 23:59:59.999 (end).
  */
 function makeDateTime(dateStr, timeStr, defaultTimeIsStart = true) {
   if (!dateStr) return null;
 
-  // If dateStr is already an ISO or parseable date, parse it first
-  const parsedDate = parseTicketDate(dateStr);
-  if (!parsedDate) return null;
+  // Try to parse date-only using parseTicketDate (which handles DD/MM/YYYY)
+  const parsedDateOnly = parseTicketDate(dateStr);
+  if (!parsedDateOnly) return null;
 
-  const Y = parsedDate.getFullYear();
-  const M = parsedDate.getMonth();
-  const D = parsedDate.getDate();
+  // Extract date components (local)
+  const Y = parsedDateOnly.getFullYear();
+  const M = parsedDateOnly.getMonth();
+  const D = parsedDateOnly.getDate();
 
-  let hh = defaultTimeIsStart ? 0 : 23;
-  let mm = defaultTimeIsStart ? 0 : 59;
-  let ss = defaultTimeIsStart ? 0 : 59;
+  // Determine time components
+  let hh = 0;
+  let mm = 0;
+  let ss = 0;
   let ms = defaultTimeIsStart ? 0 : 999;
 
   if (timeStr && String(timeStr).trim()) {
     const parts = String(timeStr).split(':');
     hh = Number(parts[0] || 0);
     mm = Number(parts[1] || 0);
-    ss = Number(parts[2] || 0);
-    if (!Number.isFinite(hh)) hh = defaultTimeIsStart ? 0 : 23;
-    if (!Number.isFinite(mm)) mm = defaultTimeIsStart ? 0 : 59;
-    if (!Number.isFinite(ss)) ss = defaultTimeIsStart ? 0 : 59;
-    ms = defaultTimeIsStart ? 0 : 999;
+    if (parts[2]) {
+      const secParts = parts[2].split('.');
+      ss = Number(secParts[0] || 0);
+      if (secParts[1]) {
+        const msStr = (secParts[1] + '000').slice(0, 3);
+        ms = Number(msStr);
+      }
+    } else {
+      // default subsecond behavior
+      ms = defaultTimeIsStart ? 0 : 999;
+    }
+    if (Number.isNaN(hh)) hh = 0;
+    if (Number.isNaN(mm)) mm = 0;
+    if (Number.isNaN(ss)) ss = 0;
+    if (Number.isNaN(ms)) ms = defaultTimeIsStart ? 0 : 999;
   }
 
+  // Build local date/time without ambiguity
   return new Date(Y, M, D, hh, mm, ss, ms);
 }
 
-/* -----------------------
-   Main component
------------------------ */
+// -------------------------------------------
+// PDF components (unchanged from prior file)
+// -------------------------------------------
+function PdfTicketRow({ ticket }) {
+  const d = ticket.data || {};
+  const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
+  const ticketNo = d.ticketNo ?? ticket.ticketId ?? 'N/A';
+  const truckText = d.gnswTruckNo ?? d.anpr ?? d.truckOnWb ?? d.truckNo ?? 'N/A';
+  const dateText = d.submitted_at ? new Date(d.submitted_at).toLocaleString() : 'N/A';
+  const driverText = d.driver ?? 'N/A';
+  const createdByText = d.createdBy ?? d.operator ?? 'N/A';
+
+  const cell = (style, content, rightAlign = false) => (
+    <PdfView style={[pdfStyles.cellBase, style]}>
+      <PdfText style={{ fontSize: 8, textAlign: rightAlign ? 'right' : 'left' }}>{content}</PdfText>
+    </PdfView>
+  );
+
+  return (
+    <PdfView style={pdfStyles.tableRow} wrap={false}>
+      {cell(pdfStyles.colTicket, ticketNo)}
+      {cell(pdfStyles.colTruck, truckText)}
+      {cell(pdfStyles.colDate, dateText)}
+      {cell(pdfStyles.colGross, computed.grossDisplay || '0', true)}
+      {cell(pdfStyles.colTare, computed.tareDisplay || '0', true)}
+      {cell(pdfStyles.colNet, computed.netDisplay || '0', true)}
+      {cell(pdfStyles.colDriver, driverText)}
+      {cell(pdfStyles.colCreated, createdByText)}
+    </PdfView>
+  );
+}
+
+function CombinedDocument({ tickets = [], reportMeta = {}, generatedBy = 'N/A' }) {
+  const totalNet = tickets.reduce((sum, t) => {
+    const c = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+    return sum + (c.netValue || 0);
+  }, 0);
+
+  const numberOfTransactions = tickets.length;
+  const logoUrl = (typeof window !== 'undefined' && window.location ? `${window.location.origin}/logo.png` : '/logo.png');
+  const declaredWeight = reportMeta?.declaredWeight ?? null;
+  const sadStatus = reportMeta?.sadStatus ?? 'Unknown';
+
+  const rowsPerPage = 30;
+  const pages = [];
+  for (let i = 0; i < tickets.length; i += rowsPerPage) {
+    pages.push(tickets.slice(i, i + rowsPerPage));
+  }
+
+  const headerCell = (style, title) => (
+    <PdfView style={[pdfStyles.cellBase, style]}>
+      <PdfText style={{ fontSize: 8, fontWeight: 'bold', textAlign: 'left' }}>{title}</PdfText>
+    </PdfView>
+  );
+
+  return (
+    <Document>
+      {pages.map((pageTickets, idx) => (
+        <Page key={`page-${idx}`} size="A4" style={pdfStyles.page}>
+          <PdfView style={pdfStyles.header}>
+            <PdfView style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <PdfImage src={logoUrl} style={pdfStyles.logo} />
+              <PdfView style={pdfStyles.companyBlock}>
+                <PdfText style={pdfStyles.companyName}>NICK TC-SCAN (GAMBIA) LTD</PdfText>
+                <PdfText style={{ fontSize: 10, color: '#6b7280' }}>WEIGHBRIDGE SITUATION REPORT</PdfText>
+              </PdfView>
+            </PdfView>
+
+            <PdfView>
+              <PdfText style={{ fontSize: 10, textAlign: 'right', color: '#374151' }}>{new Date().toLocaleString()}</PdfText>
+            </PdfView>
+          </PdfView>
+
+          {idx === 0 && (
+            <>
+              <PdfText style={pdfStyles.reportTitle}>WEIGHBRIDGE SITUATION REPORT</PdfText>
+
+              <PdfView style={pdfStyles.summaryBox}>
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>SAD: {reportMeta?.sad ?? 'N/A'}</PdfText>
+                  <PdfText>DATE RANGE: {reportMeta.dateRangeText || 'All'}</PdfText>
+                </PdfView>
+
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>Declared Weight: {declaredWeight != null ? `${formatNumber(String(declaredWeight))} KG` : 'N/A'}</PdfText>
+                  <PdfText>Total Discharged (KG): {formatNumber(String(totalNet))} KG</PdfText>
+                </PdfView>
+
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>Start: {reportMeta.startTimeLabel || 'N/A'}</PdfText>
+                  <PdfText>End: {reportMeta.endTimeLabel || 'N/A'}</PdfText>
+                </PdfView>
+
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>Transactions: {numberOfTransactions}</PdfText>
+                  <PdfText>SAD Status: {sadStatus}</PdfText>
+                </PdfView>
+
+                <PdfView style={pdfStyles.metaRow}>
+                  <PdfText>Generated by: {generatedBy || 'N/A'}</PdfText>
+                  <PdfText />
+                </PdfView>
+              </PdfView>
+            </>
+          )}
+
+          <PdfView style={pdfStyles.tableOuter}>
+            <PdfView style={pdfStyles.tableHeader}>
+              {headerCell(pdfStyles.colTicket, 'Ticket No')}
+              {headerCell(pdfStyles.colTruck, 'Truck No')}
+              {headerCell(pdfStyles.colDate, 'Date')}
+              {headerCell(pdfStyles.colGross, 'Gross')}
+              {headerCell(pdfStyles.colTare, 'Tare')}
+              {headerCell(pdfStyles.colNet, 'Net')}
+              {headerCell(pdfStyles.colDriver, 'Driver')}
+              {headerCell(pdfStyles.colCreated, 'Created By')}
+            </PdfView>
+
+            {pageTickets.map((t) => <PdfTicketRow key={t.ticketId || t.data.ticketNo || Math.random()} ticket={t} />)}
+          </PdfView>
+
+          <PdfText style={pdfStyles.footer} render={({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`} />
+        </Page>
+      ))}
+    </Document>
+  );
+}
+
+// =======================================
+// Main component
+// =======================================
 export default function WeightReports() {
-  const { user } = useAuth();
-  const [reports, setReports] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
+  // Filters & state
+  const [searchSAD, setSearchSAD] = useState('');
+  const [searchDriver, setSearchDriver] = useState('');
+  const [searchTruck, setSearchTruck] = useState('');
+
+  const [originalTickets, setOriginalTickets] = useState([]);
+  const [filteredTickets, setFilteredTickets] = useState([]);
+
+  const [sortBy, setSortBy] = useState('date');
+  const [sortDir, setSortDir] = useState('desc');
+
+  const [selectedTicket, setSelectedTicket] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const toast = useToast();
+  const modalRef = useRef();
+
+  const [loggedInUsername, setLoggedInUsername] = useState('');
+  const [currentUserId, setCurrentUserId] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editData, setEditData] = useState({});
+  const [editErrors, setEditErrors] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const { isOpen: isDeleteOpen, onOpen: onDeleteOpen, onClose: onDeleteClose } = useDisclosure();
+  const cancelRef = useRef();
+  const [deleting] = useState(false);
+  const [, setPendingDelete] = useState(null);
+
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
   const [timeTo, setTimeTo] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage, setItemsPerPage] = useState(ITEMS_PER_PAGE);
-  const [loading, setLoading] = useState(true);
-  const toast = useToast();
+  const [reportMeta, setReportMeta] = useState({});
 
-  // details modal & docs modal
-  const { isOpen: isDetailsOpen, onOpen: onDetailsOpen, onClose: onDetailsClose } = useDisclosure();
-  const { isOpen: isDocsOpen, onOpen: onDocsOpen, onClose: onDocsClose } = useDisclosure();
-  const [selectedReport, setSelectedReport] = useState(null);
-  const [docsForView, setDocsForView] = useState([]);
-
-  // SAD search results
-  const [sadResults, setSadResults] = useState([]);
-  const [sadLoading, setSadLoading] = useState(false);
-  const sadDebounceRef = useRef(null);
-
-  const [ticketStatusMap, setTicketStatusMap] = useState({});
-  const [totalTransactions, setTotalTransactions] = useState(0);
-
-  const [sadDeclaration, setSadDeclaration] = useState({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-
-  // orb modal (generate report)
-  const { isOpen: isOrbOpen, onOpen: onOrbOpen, onClose: onOrbClose } = useDisclosure();
-  const [orbGenerating, setOrbGenerating] = useState(false);
-
-  // voice recognition
+  const [voiceActive, setVoiceActive] = useState(false);
   const recognitionRef = useRef(null);
-  const [listening, setListening] = useState(false);
 
-  // NEW stats values
-  const [totalSADs, setTotalSADs] = useState(null);
-  const [exitedCount, setExitedCount] = useState(0); // will be total rows in outgate
-  const [totalTickets, setTotalTickets] = useState(null);
-  const [totalDeclaredWeight, setTotalDeclaredWeight] = useState(null);
-  const [totalDischargedWeight, setTotalDischargedWeight] = useState(null); // sum of total_recorded_weight
+  const isMobile = useBreakpointValue({ base: true, md: false });
+  const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
+  const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
 
-  // helper: convert date + time to Date - kept as wrapper but uses robust makeDateTime above
-  // (Time From -> Date From; Time To -> Date To)
+  const searchDebounceRef = useRef(null);
+
+  // Style injection (kept)
   useEffect(() => {
-    // nothing here — leave compute in memo below
+    const css = `
+      .wr-container { --muted: rgba(7,17,25,0.55); --text-dark:#071126; background: radial-gradient(circle at 10% 10%, rgba(99,102,241,0.03), transparent 10%), linear-gradient(180deg,#eaf5ff 0%, #ffffff 60%); padding-bottom: 60px; }
+      .glass-card { background: linear-gradient(180deg, rgba(255,255,255,0.75), rgba(255,255,255,0.6)); border-radius: 14px; border: 1px solid rgba(2,6,23,0.06); box-shadow: 0 10px 40px rgba(2,6,23,0.06); backdrop-filter: blur(6px); padding: 16px; }
+      .neon-btn { background: linear-gradient(135deg,#6D28D9 0%, #06B6D4 100%); color: white; box-shadow: 0 8px 30px rgba(6,182,212,0.14); }
+      .orb { width:72px;height:72px;border-radius:999px;display:flex;align-items:center;justify-content:center;box-shadow: 0 8px 40px rgba(109,40,217,0.18), inset 0 -6px 18px rgba(6,182,212,0.08); cursor:pointer; transform: translateY(0); transition: transform 0.24s ease; }
+      .orb:hover{ transform: translateY(-6px) rotate(-6deg); }
+      .orb .spark { width:34px;height:34px;border-radius:999px;background: radial-gradient(circle at 30% 30%, #fff, rgba(255,255,255,0.08)); box-shadow: 0 8px 24px rgba(6,182,212,0.12); }
+      .floating-orb { position: fixed; right: 28px; bottom: 28px; z-index: 2200; }
+      .highlight-flash { box-shadow: 0 0 0 3px rgba(96,165,250,0.18) !important; transition: box-shadow 0.5s ease; }
+      @media (min-width:1600px) {
+        .panel-3d { perspective: 1400px; }
+        .panel-3d .glass-card { transform-style: preserve-3d; transition: transform 0.8s ease; }
+        .panel-3d:hover .glass-card { transform: rotateY(6deg) rotateX(3deg) translateZ(8px); box-shadow: 0 30px 80px rgba(2,6,23,0.12); }
+      }
+    `;
+    const styleEl = document.createElement('style');
+    styleEl.setAttribute('id', 'wr-styles');
+    styleEl.innerHTML = css;
+    document.head.appendChild(styleEl);
+    return () => {
+      const el = document.getElementById('wr-styles');
+      if (el) el.remove();
+    };
   }, []);
 
+  // load current user
   useEffect(() => {
     let mounted = true;
-
-    const fetchReportsAndTickets = async () => {
+    async function loadUser() {
       try {
-        setLoading(true);
-
-        // fetch outgate reports (all rows)
-        const { data: outData, error: outErr } = await supabase
-          .from('outgate')
-          .select('*')
-          .order('created_at', { ascending: false });
-
-        if (outErr) throw outErr;
-
-        const mapped = (outData || []).map((og) => {
-          const computed = computeWeights(og);
-          return {
-            id: og.id,
-            ticketId: og.ticket_id,
-            ticketNo: og.ticket_no || og.ticketNo || null,
-            vehicleNumber: og.vehicle_number || og.vehicleNo || '',
-            outgateDateTime: og.created_at || og.outgate_at || null,
-            driverName: og.driver || og.driverName || null,
-            destination: og.consignee || og.destination || null,
-            remarks: og.remarks || '',
-            declaredWeight: og.declared_weight ?? null,
-            gross: computed.gross,
-            tare: computed.tare,
-            net: computed.net,
-            fileUrl: og.file_url || null,
-            containerId: og.container_id ?? null,
-            sadNo: og.sad_no ?? null,
-            exitedBy: og.edited_by ?? og.editedBy ?? null,
-            rawRow: og,
-          };
-        });
-
-        if (!mounted) return;
-        setReports(mapped);
-
-        // Confirmed Exits = total rows in outgate
-        setExitedCount(Array.isArray(outData) ? outData.length : mapped.length);
-
-        // --- fetch ticket statuses for summary & compute totalTransactions via map
-        const { data: ticketsData, error: ticketsErr } = await supabase
-          .from('tickets')
-          .select('ticket_no,status');
-
-        if (ticketsErr) {
-          console.warn('Failed to load tickets for status summary', ticketsErr);
-          setTicketStatusMap({});
-          setTotalTransactions(0);
-        } else {
-          const map = {};
-          (ticketsData || []).forEach((t) => {
-            const tn = (t.ticket_no ?? '').toString().trim();
-            if (!tn) return;
-            map[tn] = t.status ?? map[tn] ?? 'Pending';
-          });
-
-          // ensure outgate rows are reflected too
-          for (const r of mapped) {
-            if (r.ticketNo && !map[r.ticketNo]) map[r.ticketNo] = r.rawRow?.status ?? 'Exited';
-          }
-
-          if (!mounted) return;
-          setTicketStatusMap(map);
-          setTotalTransactions(Object.keys(map).length);
+        let currentUser = null;
+        if (supabase.auth?.getUser) {
+          const { data, error } = await supabase.auth.getUser();
+          if (!error) currentUser = data?.user ?? null;
+        } else if (supabase.auth?.user) {
+          currentUser = supabase.auth.user();
         }
+        if (!currentUser) return;
+        if (mounted) setCurrentUserId(currentUser.id);
 
-        // --- fetch total tickets count (exact)
-        try {
-          const { count: ticketsCount, error: countErr } = await supabase
-            .from('tickets')
-            .select('id', { count: 'exact', head: true });
-          if (countErr) {
-            console.warn('total tickets count failed', countErr);
-            setTotalTickets(null);
-          } else {
-            setTotalTickets(typeof ticketsCount === 'number' ? ticketsCount : null);
-          }
-        } catch (e) {
-          console.debug('tickets count fetch failed', e);
-          setTotalTickets(null);
+        const { data: userRow } = await supabase.from('users').select('username, role').eq('id', currentUser.id).maybeSingle();
+        const uname = userRow?.username || currentUser.email || (currentUser.user_metadata && currentUser.user_metadata.full_name) || '';
+        const role = (userRow && userRow.role) || '';
+        if (mounted) {
+          setLoggedInUsername(uname);
+          setIsAdmin(String(role).toLowerCase() === 'admin');
         }
-
-        // --- fetch all sad_declarations and compute total count + total declared weight + total recorded (discharged) weight
-        try {
-          const { data: sadRows, error: sadErr } = await supabase
-            .from('sad_declarations')
-            .select('sad_no,declared_weight,total_recorded_weight');
-
-          if (sadErr) {
-            console.warn('failed to fetch sad declarations', sadErr);
-            setTotalSADs(null);
-            setTotalDeclaredWeight(null);
-            setTotalDischargedWeight(null);
-          } else if (Array.isArray(sadRows)) {
-            // total number of declaration rows
-            setTotalSADs(sadRows.length);
-
-            // sum declared weights (coerce to Number; ignore null/non-numeric)
-            const sumDeclared = sadRows.reduce((acc, r) => {
-              const n = r && (r.declared_weight !== null && r.declared_weight !== undefined) ? Number(r.declared_weight) : 0;
-              return acc + (Number.isFinite(n) ? n : 0);
-            }, 0);
-            setTotalDeclaredWeight(sumDeclared);
-
-            // sum total_recorded_weight (discharged)
-            const sumDischarged = sadRows.reduce((acc, r) => {
-              const n = r && (r.total_recorded_weight !== null && r.total_recorded_weight !== undefined) ? Number(r.total_recorded_weight) : 0;
-              return acc + (Number.isFinite(n) ? n : 0);
-            }, 0);
-            setTotalDischargedWeight(sumDischarged);
-          } else {
-            setTotalSADs(null);
-            setTotalDeclaredWeight(null);
-            setTotalDischargedWeight(null);
-          }
-        } catch (e) {
-          console.debug('sad declarations fetch failed', e);
-          setTotalSADs(null);
-          setTotalDeclaredWeight(null);
-          setTotalDischargedWeight(null);
-        }
-
       } catch (err) {
-        toast({
-          title: 'Error loading reports',
-          description: err?.message || 'Failed to fetch reports',
-          status: 'error',
-          duration: 4000,
-        });
-        setReports([]);
-        setTicketStatusMap({});
-        setTotalTransactions(0);
-      } finally {
-        if (mounted) setLoading(false);
+        console.warn('Failed to load user', err);
       }
-    };
+    }
+    loadUser();
+    fetchAuditLogs();
+    return () => { mounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    fetchReportsAndTickets();
-    return () => {
-      mounted = false;
-    };
-  }, [toast]);
+  const fetchAuditLogs = async () => {
+    setLoadingAudit(true);
+    try {
+      const { data, error } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(20);
+      if (error) {
+        console.debug('audit fetch error', error);
+        setAuditLogs([]);
+      } else {
+        setAuditLogs(data || []);
+      }
+    } catch (err) {
+      console.debug('audit fetch error', err);
+      setAuditLogs([]);
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
 
-  // Debounced SAD search - auto search after user stops typing (600ms)
-  useEffect(() => {
-    if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
-    const q = (searchTerm || '').trim();
-    if (!q) {
-      setSadResults([]);
-      setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+  // -----------------------------
+  // computeFilteredTickets — updated/fixed
+  // -----------------------------
+  const computeFilteredTickets = (baseArr = null) => {
+    if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
+      setFilteredTickets([]);
       return;
     }
+    let arr = (baseArr || originalTickets).slice();
 
-    sadDebounceRef.current = setTimeout(async () => {
-      setSadLoading(true);
-      try {
-        const { data: ticketsData, error } = await supabase
-          .from('tickets')
-          .select('*')
-          .ilike('sad_no', `%${q}%`)
-          .order('date', { ascending: false });
-
-        if (error) {
-          console.warn('SAD lookup error', error);
-          setSadResults([]);
-          setSadLoading(false);
-          // still try to fetch declaration
-          try {
-            const { data: sadRow, error: sadErr } = await supabase
-              .from('sad_declarations')
-              .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
-              .ilike('sad_no', `${q}`)
-              .maybeSingle();
-            if (!sadErr && sadRow) {
-              setSadDeclaration({
-                declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
-                status: sadRow.status ?? 'Unknown',
-                exists: true,
-                total_recorded_weight: sadRow.total_recorded_weight ?? null,
-                created_at: sadRow.created_at ?? null,
-              });
-            } else {
-              setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-            }
-          } catch (e) {
-            setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-          }
-          return;
-        }
-
-        // Deduplicate tickets by ticket_no keeping latest by date/submitted_at/created_at
-        const dedupeMap = new Map();
-        (ticketsData || []).forEach((t) => {
-          const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
-          if (!ticketNo) return;
-          const thisDate = parseTicketDate(t.date ?? t.submitted_at ?? t.created_at ?? 0);
-          const thisTime = thisDate ? thisDate.getTime() : 0;
-          const existing = dedupeMap.get(ticketNo);
-          if (!existing) dedupeMap.set(ticketNo, t);
-          else {
-            const existingDate = parseTicketDate(existing.date ?? existing.submitted_at ?? existing.created_at ?? 0);
-            const existingTime = existingDate ? existingDate.getTime() : 0;
-            if (thisTime >= existingTime) dedupeMap.set(ticketNo, t);
-          }
-        });
-
-        const deduped = Array.from(dedupeMap.values());
-
-        // Map each ticket to structure and prefer outgate timestamp if exists (matching reports array)
-        const mapped = deduped.map((t) => {
-          const ticketNo = t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null);
-          // find outgate row for this ticketNo
-          const matchingOutgates = reports.filter((r) => r.ticketNo && String(r.ticketNo) === String(ticketNo));
-          let chosenOutgate = null;
-          if (matchingOutgates.length > 0) {
-            chosenOutgate = matchingOutgates.reduce((best, cur) => {
-              const bestT = parseTicketDate(best?.outgateDateTime)?.getTime() ?? 0;
-              const curT = parseTicketDate(cur?.outgateDateTime)?.getTime() ?? 0;
-              return curT >= bestT ? cur : best;
-            }, matchingOutgates[0]);
-          }
-
-          const computed = computeWeights({
-            gross: t.gross,
-            tare: t.tare,
-            net: t.net,
-          });
-
-          // choose display date preference: chosenOutgate.outgateDateTime else t.date/submitted_at/created_at
-          let displayDate = null;
-          if (chosenOutgate && chosenOutgate.outgateDateTime) displayDate = chosenOutgate.outgateDateTime;
-          else displayDate = t.date ?? t.submitted_at ?? t.created_at ?? null;
-
-          return {
-            ticketId: t.ticket_id ?? t.id ?? ticketNo ?? `${Math.random()}`,
-            ticketNo,
-            sadNo: t.sad_no ?? t.sadNo ?? null,
-            date: displayDate,
-            outgateRef: chosenOutgate ?? null,
-            truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
-            gross: computed.gross,
-            tare: computed.tare,
-            net: computed.net,
-            driver: t.driver ?? null,
-            raw: t,
-          };
-        });
-
-        // Sort newest first using parsed date heuristics
-        mapped.sort((a, b) => {
-          const aT = parseTicketDate(a.date)?.getTime() ?? 0;
-          const bT = parseTicketDate(b.date)?.getTime() ?? 0;
-          return bT - aT;
-        });
-
-        setSadResults(mapped);
-
-        // Fetch SAD declaration metadata (if any)
-        try {
-          const { data: sadRow, error: sadErr } = await supabase
-            .from('sad_declarations')
-            .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
-            .ilike('sad_no', `${q}`)
-            .maybeSingle();
-          if (!sadErr && sadRow) {
-            setSadDeclaration({
-              declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
-              status: sadRow.status ?? 'Unknown',
-              exists: true,
-              total_recorded_weight: sadRow.total_recorded_weight ?? null,
-              created_at: sadRow.created_at ?? null,
-            });
-          } else {
-            setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-          }
-        } catch (e) {
-          setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-        }
-      } catch (err) {
-        console.error('SAD search failed', err);
-        setSadResults([]);
-        setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-      } finally {
-        setSadLoading(false);
-      }
-    }, 600);
-
-    return () => {
-      if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
-    };
-  }, [searchTerm, reports]);
-
-  const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
-
-  // Build start/end Date objects (Time From -> Date From; Time To -> Date To)
-  const { startDateTime, endDateTime } = useMemo(() => {
-    let start = null;
-    let end = null;
-
-    if (dateFrom) {
-      start = makeDateTime(dateFrom, timeFrom ? `${timeFrom}` : '00:00:00', true);
+    // text filters (driver/truck)
+    if (searchDriver && searchDriver.trim()) {
+      const q = searchDriver.trim().toLowerCase();
+      arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
-
-    if (dateTo) {
-      end = makeDateTime(dateTo, timeTo ? `${timeTo}` : '23:59:59.999', false);
-    }
-
-    return { startDateTime: start, endDateTime: end };
-  }, [dateFrom, dateTo, timeFrom, timeTo]);
-
-  // Helper: check any candidate date fields for a row/ticket and return first that parses
-  function getFirstCandidateDate(obj, keys = []) {
-    for (const k of keys) {
-      const v = obj?.[k];
-      const p = parseTicketDate(v);
-      if (p) return p;
-    }
-    return null;
-  }
-
-  // Filtered reports: when date range is provided, check multiple candidate fields (outgateDateTime, rawRow.date, rawRow.submitted_at, rawRow.created_at)
-  const filteredReports = useMemo(() => {
-    const term = (searchTerm || '').trim().toLowerCase();
-    const s = startDateTime;
-    const e = endDateTime;
-
-    let results = dedupedReports.filter((r) => {
-      if (term) {
-        const hay = [
-          r.vehicleNumber,
-          r.ticketNo,
-          r.driverName,
-          r.sadNo,
-          r.containerId,
-          r.destination,
-        ].filter(Boolean).join(' ').toLowerCase();
-        if (!hay.includes(term)) return false;
-      }
-
-      if (s || e) {
-        // try candidate timestamps (priority: outgateDateTime, rawRow.date, rawRow.submitted_at, rawRow.created_at)
-        const candidates = [
-          r.outgateDateTime,
-          r.rawRow?.date,
-          r.rawRow?.submitted_at,
-          r.rawRow?.created_at,
-          r.rawRow?.outgate_at,
-        ];
-        let matched = false;
-        for (const c of candidates) {
-          const parsed = parseTicketDate(c);
-          if (!parsed) continue;
-          if (s && parsed < s) continue;
-          if (e && parsed > e) continue;
-          matched = true;
-          break;
-        }
-        return matched;
-      }
-
-      return true;
-    });
-
-    // If the caller searched (term present) and results are empty, try looser fallback: ignore outgateDateTime preference and check other timestamps more permissively
-    if ((startDateTime || endDateTime) && results.length === 0) {
-      // fallback: include rows where submitted_at or created_at falls in range
-      results = dedupedReports.filter((r) => {
-        if (term) {
-          const hay = [
-            r.vehicleNumber,
-            r.ticketNo,
-            r.driverName,
-            r.sadNo,
-            r.containerId,
-            r.destination,
-          ].filter(Boolean).join(' ').toLowerCase();
-          if (!hay.includes(term)) return false;
-        }
-        const fallbackCandidates = [r.rawRow?.submitted_at, r.rawRow?.created_at, r.rawRow?.date];
-        for (const c of fallbackCandidates) {
-          const parsed = parseTicketDate(c);
-          if (!parsed) continue;
-          if (startDateTime && parsed < startDateTime) continue;
-          if (endDateTime && parsed > endDateTime) continue;
-          return true;
-        }
-        return false;
+    if (searchTruck && searchTruck.trim()) {
+      const q = searchTruck.trim().toLowerCase();
+      arr = arr.filter((t) => {
+        const trucks = [
+          (t.data.gnswTruckNo || ''),
+          (t.data.truckOnWb || ''),
+          (t.data.anpr || ''),
+          (t.data.truckNo || ''),
+        ].map((s) => s.toString().toLowerCase());
+        return trucks.some((s) => s.includes(q));
       });
     }
 
-    return results;
-  }, [dedupedReports, searchTerm, startDateTime, endDateTime]);
+    // Build start/end using helper (Time From applies to Date From; Time To to Date To)
+    const start = makeDateTime(dateFrom, timeFrom, true);
+    const end = makeDateTime(dateTo, timeTo, false);
 
-  const sortedReports = useMemo(() => {
-    const arr = filteredReports.slice();
-    arr.sort((a, b) => {
-      const aT = parseTicketDate(a.outgateDateTime)?.getTime() ?? 0;
-      const bT = parseTicketDate(b.outgateDateTime)?.getTime() ?? 0;
-      return bT - aT;
-    });
-    return arr;
-  }, [filteredReports]);
+    const hasDateRange = !!(dateFrom || dateTo);
+    const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
-  const uniqueFilteredReports = useMemo(() => {
-    const map = new Map();
-    const manual = [];
-    for (const r of filteredReports) {
-      const tn = r.ticketNo ? String(r.ticketNo).trim() : '';
-      if (tn) {
-        if (!map.has(tn)) map.set(tn, r);
-        else {
-          const existing = map.get(tn);
-          const a = parseTicketDate(existing.outgateDateTime)?.getTime() ?? 0;
-          const b = parseTicketDate(r.outgateDateTime)?.getTime() ?? 0;
-          if (b > a) map.set(tn, r);
-        }
-      } else {
-        manual.push(r);
+    // helper to get a parsed date from ticket using candidate keys order
+    function getParsedDateFromCandidates(ticket, candidates = ['date', 'submitted_at', 'created_at', 'submittedAt', 'createdAt']) {
+      const d = ticket?.data || {};
+      for (const k of candidates) {
+        const val = d[k];
+        const parsed = parseTicketDate(val);
+        if (parsed) return parsed;
       }
-    }
-    return [...map.values(), ...manual];
-  }, [filteredReports]);
-
-  // SAD filtered results similarly check multiple candidate fields and fallback
-  const sadFilteredResults = useMemo(() => {
-    if (!sadResults || sadResults.length === 0) return [];
-    const s = startDateTime;
-    const e = endDateTime;
-
-    let filtered = sadResults.filter((t) => {
-      // for each ticket's date, consider several candidates
-      const candidates = [
-        t.date,
-        t.raw?.date,
-        t.raw?.submitted_at,
-        t.raw?.created_at,
-        t.outgateRef?.outgateDateTime,
-        t.outgateRef?.rawRow?.created_at,
-      ];
-      for (const c of candidates) {
-        const parsed = parseTicketDate(c);
-        if (!parsed) continue;
-        if (s && parsed < s) continue;
-        if (e && parsed > e) continue;
-        return true;
+      // final attempt on common raw fields
+      const fallbackStrings = [d.submitted_at, d.date, d.created_at, d.submittedAt, d.createdAt];
+      for (const s of fallbackStrings) {
+        const parsed = parseTicketDate(s);
+        if (parsed) return parsed;
       }
-      return false;
-    });
-
-    // fallback: if date filtering returned zero, be tolerant and try other fields
-    if ((s || e) && filtered.length === 0) {
-      filtered = sadResults.filter((t) => {
-        const fallbackCandidates = [
-          t.raw?.submitted_at,
-          t.raw?.created_at,
-          t.raw?.date,
-        ];
-        for (const c of fallbackCandidates) {
-          const parsed = parseTicketDate(c);
-          if (!parsed) continue;
-          if (s && parsed < s) continue;
-          if (e && parsed > e) continue;
-          return true;
-        }
-        return false;
-      });
-    }
-
-    // Normalize date field for display (choose first candidate that fits or any parsed date)
-    const normalized = filtered.map((t) => {
-      const candidates = [
-        t.date,
-        t.raw?.date,
-        t.raw?.submitted_at,
-        t.raw?.created_at,
-        t.outgateRef?.outgateDateTime,
-        t.outgateRef?.rawRow?.created_at,
-      ];
-      let chosen = null;
-      for (const c of candidates) {
-        const parsed = parseTicketDate(c);
-        if (parsed) {
-          chosen = c;
-          break;
-        }
-      }
-      return { ...t, date: chosen ?? t.date };
-    });
-
-    return normalized;
-  }, [sadResults, startDateTime, endDateTime]);
-
-  const sadTotalsMemo = useMemo(() => {
-    if (!sadFilteredResults || sadFilteredResults.length === 0) return { transactions: 0, cumulativeNet: 0 };
-    let cumulativeNet = 0;
-    for (const t of sadFilteredResults) {
-      const { net } = computeWeights({ gross: t.gross, tare: t.tare, net: t.net });
-      cumulativeNet += (net || 0);
-    }
-    return { transactions: sadFilteredResults.length, cumulativeNet };
-  }, [sadFilteredResults]);
-
-  const statsSource = useMemo(() => {
-    return searchTerm ? sadFilteredResults : uniqueFilteredReports;
-  }, [searchTerm, sadFilteredResults, uniqueFilteredReports]);
-
-  const statsTotals = useMemo(() => {
-    let cumulativeNet = 0;
-    for (const r of statsSource) {
-      const w = computeWeights(r);
-      cumulativeNet += (w.net || 0);
-    }
-    return {
-      rowsCount: statsSource.length,
-      cumulativeNet,
-    };
-  }, [statsSource]);
-
-  const statsUniqueTickets = useMemo(() => {
-    const s = new Set();
-    for (const r of statsSource) {
-      if (r.ticketNo) s.add(String(r.ticketNo));
-    }
-    return s.size;
-  }, [statsSource]);
-
-  // --- NEW: Log report generation to reports_generated table (robust) ---
-  const logReportGeneration = async (reportType, fileUrl = null, sadNo = null) => {
-    try {
-      const mapping = {
-        'Outgate CSV': 'outgate_csv',
-        'Outgate PDF': 'outgate_pdf',
-        'SAD CSV': 'sad_csv',
-        'SAD PDF': 'sad_pdf',
-      };
-      const safeReportType = mapping[reportType] ?? 'other';
-
-      const generatedBy = user?.id ?? user?.email ?? null;
-      const payload = {
-        report_type: safeReportType,
-        generated_by: generatedBy,
-        generated_at: new Date().toISOString(),
-        file_url: fileUrl,
-        sad_no: sadNo ?? null,
-        report_name: `Outgate ${reportType} ${new Date().toISOString()}`,
-      };
-
-      const { data, error } = await supabase.from('reports_generated').insert([payload]).select().single();
-      if (error) {
-        try {
-          const fallback = {
-            report_type: 'other',
-            generated_by: generatedBy,
-            generated_at: new Date().toISOString(),
-            file_url: fileUrl,
-          };
-          await supabase.from('reports_generated').insert([fallback]);
-        } catch (fallbackErr) {
-          // ignore
-        }
-        toast({ title: 'Report log failed', description: error.message || String(error), status: 'warning', duration: 4000 });
-        return null;
-      }
-      toast({ title: 'Report logged', status: 'success', duration: 1800 });
-      return data;
-    } catch (err) {
-      console.error('logReportGeneration', err);
-      toast({ title: 'Failed to log report', description: String(err), status: 'error', duration: 4000 });
       return null;
     }
-  };
 
-  // Export current unique/filtered view as CSV and log the generation
-  const handleExportCsv = async () => {
-    const rows = sortedReports.map(r => {
-      return {
-        'Ticket No': r.ticketNo ?? '',
-        'Truck No': r.vehicleNumber ?? '',
-        'SAD No': r.sadNo ?? '',
-        'Container': r.containerId ?? '',
-        'Exit Date': r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '',
-        'Gross (kg)': r.gross ?? '',
-        'Tare (kg)': r.tare ?? '',
-        'Net (kg)': r.net ?? '',
-        'Driver': r.driverName ?? '',
-        'Exited By': r.exitedBy ?? r.rawRow?.edited_by ?? (r.outgateRef?.rawRow?.edited_by ?? '') ?? '',
-        'Status': (r.ticketNo && ticketStatusMap[r.ticketNo]) ? ticketStatusMap[r.ticketNo] : (r.rawRow?.status ?? ''),
-      };
-    });
-    if (!rows.length) {
-      toast({ title: 'No rows to export', status: 'info', duration: 2000 });
-      return;
+    // primary attempt: prefer DB 'date' field first when user supplied a date range
+    if (hasDateRange) {
+      // first attempt: prefer date -> submitted_at
+      const primaryCandidates = ['date', 'submitted_at', 'created_at', 'submittedAt', 'createdAt'];
+      const filteredPrimary = arr.filter((ticket) => {
+        const ticketDate = getParsedDateFromCandidates(ticket, primaryCandidates);
+        if (!ticketDate) return false;
+        if (start && ticketDate < start) return false;
+        if (end && ticketDate > end) return false;
+        return true;
+      });
+
+      // If no rows found with preferred 'date' candidate ordering, fallback to submitted_at-first ordering
+      if (filteredPrimary.length === 0) {
+        const fallbackCandidates = ['submitted_at', 'created_at', 'date', 'submittedAt', 'createdAt'];
+        const filteredFallback = arr.filter((ticket) => {
+          const ticketDate = getParsedDateFromCandidates(ticket, fallbackCandidates);
+          if (!ticketDate) return false;
+          if (start && ticketDate < start) return false;
+          if (end && ticketDate > end) return false;
+          return true;
+        });
+
+        // Use fallback if it yields rows, else keep primary (even if empty)
+        arr = filteredFallback.length > 0 ? filteredFallback : filteredPrimary;
+      } else {
+        arr = filteredPrimary;
+      }
+    } else if (hasTimeRangeOnly) {
+      // Only time range (apply to ticket's time-of-day)
+      const fromM = parseTimeToMinutes(timeFrom) ?? 0;
+      const toM = parseTimeToMinutes(timeTo) ?? (24 * 60 - 1);
+
+      arr = arr.filter((ticket) => {
+        // prefer submitted_at then date for time-only comparisons
+        const ticketDate = getParsedDateFromCandidates(ticket, ['submitted_at', 'date', 'created_at']);
+        if (!ticketDate) return false;
+        const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+        if (fromM <= toM) return mins >= fromM && mins <= toM;
+        // wrap-around case (e.g., from 22:00 to 04:00)
+        return mins >= fromM || mins <= toM;
+      });
     }
-    exportToCSV(rows, 'outgate-reports.csv');
-    toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
 
-    // Log generation
-    await logReportGeneration('Outgate CSV', null);
-  };
+    // Sorting comparator
+    const comparator = (a, b) => {
+      const dir = sortDir === 'asc' ? 1 : -1;
+      if (sortBy === 'date') {
+        const da = getParsedDateFromCandidates(a, ['submitted_at', 'date', 'created_at']);
+        const db = getParsedDateFromCandidates(b, ['submitted_at', 'date', 'created_at']);
+        if (!da && !db) return 0;
+        if (!da) return 1;
+        if (!db) return -1;
+        return (da.getTime() - db.getTime()) * dir;
+      }
+      if (sortBy === 'gross' || sortBy === 'tare' || sortBy === 'net') {
+        const ka = numericValue(a.data[sortBy]) ?? 0;
+        const kb = numericValue(b.data[sortBy]) ?? 0;
+        return (ka - kb) * dir;
+      }
+      if (sortBy === 'ticketNo' || sortBy === 'ticketno') {
+        return String(a.data.ticketNo || '').localeCompare(String(b.data.ticketNo || '')) * dir;
+      }
+      if (sortBy === 'truck') {
+        const ta = (a.data.gnswTruckNo || a.data.truckOnWb || a.data.anpr || a.data.truckNo || '').toString().toLowerCase();
+        const tb = (b.data.gnswTruckNo || b.data.truckOnWb || b.data.anpr || b.data.truckNo || '').toString().toLowerCase();
+        return ta.localeCompare(tb) * dir;
+      }
+      return 0;
+    };
 
-  const handlePrintSad = async () => {
-    if (!sadFilteredResults || sadFilteredResults.length === 0) {
-      toast({ title: 'No SAD results', status: 'info', duration: 2000 });
-      return;
-    }
+    arr.sort(comparator);
 
-    const rowsHtml = sadFilteredResults.map((t) => {
-      const exitedBy = t.outgateRef?.rawRow?.edited_by ?? t.outgateRef?.exitedBy ?? '';
-      return `<tr>
-        <td>${t.sadNo ?? ''}</td>
-        <td>${t.ticketNo ?? ''}</td>
-        <td>${t.date ? new Date(t.date).toLocaleString() : ''}</td>
-        <td>${t.truck ?? ''}</td>
-        <td style="text-align:right">${t.gross != null ? formatWeight(t.gross) : ''}</td>
-        <td style="text-align:right">${t.tare != null ? formatWeight(t.tare) : ''}</td>
-        <td style="text-align:right">${t.net != null ? formatWeight(t.net) : ''}</td>
-        <td>${t.driver ?? ''}</td>
-        <td>${exitedBy ?? ''}</td>
-      </tr>`;
-    }).join('');
+    setFilteredTickets(arr);
 
-    const html = `
-      <div class="header">
-        <img src="${logoUrl}" class="logo" alt="Company logo" />
-        <div>
-          <div class="company">NICK TC-SCAN (GAMBIA) LTD.</div>
-          <div style="font-size:13px;color:#666;margin-top:4px">Weighbridge SAD Report</div>
-          <div style="font-size:12px;color:#666;margin-top:2px">SAD: ${searchTerm}</div>
-        </div>
-      </div>
+    const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
+    const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
+    let dateRangeText = '';
+    if (dateFrom && dateTo) dateRangeText = `${dateFrom} → ${dateTo}`;
+    else if (dateFrom) dateRangeText = dateFrom;
+    else if (dateTo) dateRangeText = dateTo;
 
-      <p style="margin-top:6px;margin-bottom:6px">
-        <strong>Total transactions:</strong> ${sadTotalsMemo.transactions} &nbsp; • &nbsp;
-        <strong>Cumulative net:</strong> ${formatWeight(sadTotalsMemo.cumulativeNet)} kg
-      </p>
-
-      <table>
-        <thead>
-          <tr>
-            <th>SAD</th><th>Ticket</th><th>Date & Time</th><th>Truck</th><th>Gross</th><th>Tare</th><th>Net</th><th>Driver</th><th>Exited By</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rowsHtml}
-        </tbody>
-      </table>
-    `;
-
-    openPrintableWindow(html, `SAD-${searchTerm}`);
-
-    await logReportGeneration('SAD PDF', null, searchTerm);
-  };
-
-  const handleExportSadCsv = async () => {
-    if (!sadFilteredResults || sadFilteredResults.length === 0) {
-      toast({ title: 'No rows to export', status: 'info', duration: 2000 });
-      return;
-    }
-    const rows = sadFilteredResults.map(t => ({
-      'SAD No': t.sadNo ?? '',
-      'Ticket No': t.ticketNo ?? '',
-      'Date': t.date ? new Date(t.date).toLocaleString() : '',
-      'Truck': t.truck ?? '',
-      'Gross (kg)': t.gross ?? '',
-      'Tare (kg)': t.tare ?? '',
-      'Net (kg)': t.net ?? '',
-      'Driver': t.driver ?? '',
-      'Exited By': t.outgateRef?.rawRow?.edited_by ?? '',
+    setReportMeta((prev) => ({
+      ...prev,
+      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.submitted_at ? new Date(originalTickets[0].data.submitted_at).toLocaleDateString() : ''),
+      startTimeLabel: startLabel || prev.startTimeLabel || '',
+      endTimeLabel: endLabel || prev.endTimeLabel || '',
     }));
-    exportToCSV(rows, `SAD-${searchTerm || 'report'}.csv`);
-    toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
-
-    await logReportGeneration('SAD CSV', null, searchTerm);
   };
 
-  const handleResetAll = () => {
-    setSearchTerm('');
+  // -------------------------------------------
+  // handleGenerateReport - fetch tickets, dedupe, attach createdBy
+  // -------------------------------------------
+  const handleGenerateReport = async () => {
+    if (!searchSAD.trim()) {
+      toast({ title: 'SAD Required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
+      return;
+    }
+    setLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('*')
+        .ilike('sad_no', `%${searchSAD.trim()}%`);
+
+      if (error) {
+        toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
+        setLoading(false);
+        return;
+      }
+
+      const mappedTickets = (data || []).map((ticket) => ({
+        ticketId: ticket.ticket_id || ticket.id?.toString() || `${Math.random()}`,
+        data: {
+          sadNo: ticket.sad_no,
+          ticketNo: ticket.ticket_no,
+          submitted_at: ticket.submitted_at ?? ticket.submittedAt ?? ticket.created_at ?? null,
+          gnswTruckNo: ticket.gnsw_truck_no,
+          truckOnWb: ticket.truck_on_wb,
+          net: ticket.net ?? ticket.net_weight ?? null,
+          tare: ticket.tare ?? ticket.tare_pt ?? null,
+          gross: ticket.gross ?? null,
+          driver: ticket.driver || 'N/A',
+          consignee: ticket.consignee,
+          operator: ticket.operator || '',
+          createdBy: ticket.created_by || null,
+          user_id: ticket.user_id || null,
+          status: ticket.status,
+          consolidated: ticket.consolidated,
+          containerNo: ticket.container_no,
+          passNumber: ticket.pass_number,
+          scaleName: ticket.scale_name,
+          anpr: ticket.truck_on_wb,
+          truckNo: ticket.truck_no,
+          fileUrl: ticket.file_url || null,
+          date: ticket.date ?? null,
+        },
+      }));
+
+      const deduped = removeDuplicatesByTicketNo(mappedTickets);
+
+      // Resolve createdBy user mapping
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const userIdsSet = new Set();
+      const emailsSet = new Set();
+      deduped.forEach((t) => {
+        const d = t.data || {};
+        if (d.user_id && typeof d.user_id === 'string' && uuidRegex.test(d.user_id)) userIdsSet.add(d.user_id);
+        const cb = d.createdBy;
+        if (cb && typeof cb === 'string') {
+          const v = cb.trim();
+          if (uuidRegex.test(v)) userIdsSet.add(v);
+          else if (v.includes('@')) emailsSet.add(v.toLowerCase());
+        }
+      });
+      const userIds = Array.from(userIdsSet);
+      const emails = Array.from(emailsSet);
+      let userMap = {};
+      let emailMap = {};
+      try {
+        if (userIds.length > 0) {
+          const { data: usersById, error: usersByIdErr } = await supabase.from('users').select('id, username, email, full_name').in('id', userIds);
+          if (!usersByIdErr && Array.isArray(usersById)) {
+            usersById.forEach((u) => {
+              const display = u.username || u.full_name || u.email || u.id;
+              if (u.id) userMap[u.id] = display;
+              if (u.email) emailMap[u.email.toLowerCase()] = display;
+            });
+          }
+        }
+        if (emails.length > 0) {
+          const { data: usersByEmail, error: usersByEmailErr } = await supabase.from('users').select('id, username, email, full_name').in('email', emails);
+          if (!usersByEmailErr && Array.isArray(usersByEmail)) {
+            usersByEmail.forEach((u) => {
+              const display = u.username || u.full_name || u.email || u.id;
+              if (u.id) userMap[u.id] = display;
+              if (u.email) emailMap[u.email.toLowerCase()] = display;
+            });
+          }
+        }
+      } catch (e) {
+        console.debug('user map fetch failed', e);
+      }
+
+      const enriched = deduped.map((t) => {
+        const d = t.data || {};
+        const rawCreatedByText = d.createdBy ? String(d.createdBy).trim() : null;
+        let createdByFromText = null;
+        if (rawCreatedByText) {
+          if (uuidRegex.test(rawCreatedByText) && userMap[rawCreatedByText]) createdByFromText = userMap[rawCreatedByText];
+          else if (rawCreatedByText.includes('@') && emailMap[rawCreatedByText.toLowerCase()]) createdByFromText = emailMap[rawCreatedByText.toLowerCase()];
+          else if (uuidRegex.test(rawCreatedByText)) createdByFromText = `${rawCreatedByText.slice(0, 8)}...`;
+          else createdByFromText = rawCreatedByText;
+        }
+        const createdByFromUser = d.user_id && userMap[d.user_id] ? userMap[d.user_id] : null;
+        const finalCreatedBy = createdByFromText || createdByFromUser || (d.operator ? String(d.operator).trim() : '') || (d.user_id ? String(d.user_id) : '');
+        return {
+          ...t,
+          data: {
+            ...d,
+            createdBy: finalCreatedBy,
+          },
+        };
+      });
+
+      const sortedOriginal = sortTicketsByDateDesc(enriched);
+      setOriginalTickets(sortedOriginal);
+
+      const totalNet = (sortedOriginal || []).reduce((sum, t) => {
+        const val = Number(t.data.net ?? t.data.net_weight ?? 0);
+        return sum + (Number.isFinite(val) ? val : 0);
+      }, 0);
+
+      // optional SAD declaration fetch
+      let sadRow = null;
+      try {
+        const { data: sadData, error: sadError } = await supabase
+          .from('sad_declarations')
+          .select('sad_no, declared_weight, total_recorded_weight, status')
+          .ilike('sad_no', `${searchSAD.trim()}`)
+          .maybeSingle();
+        if (!sadError) sadRow = sadData || null;
+      } catch (e) {
+        console.debug('sad fetch failed', e);
+      }
+
+      setReportMeta({
+        dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.submitted_at ? new Date(sortedOriginal[0].data.submitted_at).toLocaleDateString() : '') : '',
+        startTimeLabel: '',
+        endTimeLabel: '',
+        sad: `${searchSAD.trim()}`,
+        declaredWeight: sadRow ? Number(sadRow.declared_weight ?? 0) : null,
+        dischargedWeight: Number(totalNet || 0),
+        sadStatus: sadRow ? (sadRow.status ?? 'In Progress') : 'Unknown',
+        sadExists: !!sadRow,
+      });
+
+      computeFilteredTickets(sortedOriginal);
+      toast({ title: `Found ${sortedOriginal.length} ticket(s)`, status: 'success', duration: 2200 });
+    } catch (err) {
+      console.error('fetch error', err);
+      toast({ title: 'Error', description: err?.message || 'Unexpected error', status: 'error', duration: 4000 });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Debounce SAD input (auto-search when user stops typing AND length >= 3)
+  useEffect(() => {
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    const q = searchSAD?.trim() || '';
+    if (!q || q.length < 3) {
+      // do not auto-search for tiny inputs; keep current state (user can press Generate)
+      return;
+    }
+    searchDebounceRef.current = setTimeout(() => {
+      void handleGenerateReport();
+    }, 600); // slight longer debounce to ensure "stopped typing"
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchSAD]);
+
+  // Recompute live when inputs change
+  useEffect(() => {
+    computeFilteredTickets(originalTickets);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [originalTickets, searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir]);
+
+  // Controls
+  const toggleSort = (key) => {
+    if (sortBy === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortBy(key); setSortDir('desc'); }
+  };
+
+  const applyRange = () => computeFilteredTickets();
+  const resetRange = () => {
+    setDateFrom(''); setDateTo(''); setTimeFrom(''); setTimeTo('');
+    computeFilteredTickets();
+    setReportMeta((p) => ({ ...p, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
+  };
+
+  const applyDriverTruckFilter = () => {
+    computeFilteredTickets();
+    const driverSummary = searchDriver ? `, Driver: ${searchDriver}` : '';
+    const truckSummary = searchTruck ? `, Truck: ${searchTruck}` : '';
+    setReportMeta((prev) => ({ ...prev, sad: `${searchSAD}${driverSummary}${truckSummary}` }));
+  };
+  const clearDriverTruckFilters = () => { setSearchDriver(''); setSearchTruck(''); computeFilteredTickets(); setReportMeta((prev) => ({ ...prev, sad: `${searchSAD}` })); };
+
+  const clearAll = () => {
+    setSearchSAD('');
+    setSearchDriver('');
+    setSearchTruck('');
+    setOriginalTickets([]);
+    setFilteredTickets([]);
+    setReportMeta({});
     setDateFrom('');
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
-    setCurrentPage(1);
-    toast({ title: 'Filters reset', status: 'info', duration: 1500 });
   };
 
-  // ------------------------
-  // Confetti helper (loads CDN script if needed)
-  // ------------------------
-  const runConfetti = async () => {
+  // recordReportGenerated (keeps existing behavior)
+  const recordReportGenerated = async ({ blob = null, reportType = 'PDF', fileNameHint = null, reportName = null, status = 'Success', remarks = null } = {}) => {
+    const ALLOWED_TYPES = ['CSV', 'PDF', 'Excel', 'Dashboard', 'Other'];
+    const chosenType = ALLOWED_TYPES.includes(String(reportType)) ? reportType : 'Other';
+    const safeHint = (fileNameHint || reportMeta?.sad || searchSAD || 'report').toString().slice(0, 120);
+    const generatedName = reportName || `${chosenType} ${safeHint} ${new Date().toISOString()}`;
+
+    let file_url = null;
+    let file_size = blob && blob.size ? Number(blob.size) : null;
+
+    if (blob && supabase?.storage && typeof supabase.storage.from === 'function') {
+      try {
+        const safePart = safeHint.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'report';
+        const ext = chosenType === 'PDF' ? '.pdf' : chosenType === 'CSV' ? '.csv' : '.bin';
+        const path = `${chosenType}/${Date.now()}-${safePart}${ext}`;
+
+        const { data: uploadData, error: uploadErr } = await supabase.storage.from('reports').upload(path, blob, {
+          cacheControl: '3600',
+          contentType: chosenType === 'PDF' ? 'application/pdf' : chosenType === 'CSV' ? 'text/csv' : 'application/octet-stream',
+          upsert: true,
+        });
+
+        if (!uploadErr && uploadData) {
+          try {
+            const publicRes = supabase.storage.from('reports').getPublicUrl(uploadData.path || path);
+            file_url = publicRes?.publicURL || publicRes?.data?.publicUrl || publicRes?.data?.publicURL || null;
+          } catch (uerr) {
+            console.debug('getPublicUrl error', uerr);
+          }
+        } else {
+          console.debug('reports storage upload failed', uploadErr);
+        }
+      } catch (e) {
+        console.debug('reports storage attempt failed', e);
+      }
+    }
+
+    const parameters = {
+      sad_no: reportMeta?.sad || searchSAD || null,
+      selectedCount: filteredTickets?.length ?? 0,
+      dateRangeText: reportMeta?.dateRangeText ?? null,
+      startTimeLabel: reportMeta?.startTimeLabel ?? null,
+      endTimeLabel: reportMeta?.endTimeLabel ?? null,
+    };
+
+    const payload = {
+      report_name: generatedName,
+      report_type: chosenType,
+      generated_by: currentUserId || null,
+      sad_no: parameters.sad_no || null,
+      parameters,
+      file_url: file_url || null,
+      file_size: file_size !== null ? Number(file_size) : null,
+      generated_at: new Date().toISOString(),
+      status: status || 'Success',
+      remarks: remarks || null,
+    };
+
     try {
-      if (typeof window.confetti === 'function') {
-        window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
-        return;
+      const { data: inserted, error: insertErr } = await supabase.from('reports_generated').insert([payload]).select().maybeSingle();
+      if (insertErr) {
+        console.debug('reports_generated insert error', insertErr);
+        return { success: false, error: insertErr };
       }
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
-        s.onload = resolve;
-        s.onerror = reject;
-        document.head.appendChild(s);
-      });
-      if (typeof window.confetti === 'function') {
-        window.confetti({ particleCount: 140, spread: 70, origin: { y: 0.6 } });
-      }
-    } catch (e) {
-      console.warn('Confetti load failed', e);
+      return { success: true, row: inserted || null };
+    } catch (err) {
+      console.debug('recordReportGenerated unexpected error', err);
+      return { success: false, error: err };
     }
   };
 
-  // ------------------------
-  // Voice commands (unchanged)
-  // ------------------------
-  const startVoice = () => {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      toast({ title: 'Voice not supported', description: 'This browser does not support SpeechRecognition', status: 'warning' });
+  // PDF generation helpers
+  const generatePdfBlob = async (ticketsToRender = [], meta = {}, generatedBy = '') => {
+    const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} generatedBy={generatedBy} />;
+    const asPdf = pdfRender(doc);
+    const blob = await asPdf.toBlob();
+    return blob;
+  };
+
+  const handleDownloadPdf = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'No tickets to export', status: 'info', duration: 3000 });
       return;
     }
-    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const recog = new Speech();
-    recog.lang = 'en-US';
-    recog.interimResults = false;
-    recog.maxAlternatives = 1;
-
-    recog.onresult = (ev) => {
-      const text = (ev.results[0][0].transcript || '').toLowerCase();
-      toast({ title: 'Heard', description: text, status: 'info', duration: 2500 });
-      if (text.includes('export csv')) {
-        handleExportCsv();
-      } else if (text.includes('reset filters') || text.includes('reset')) {
-        handleResetAll();
-      } else if (text.includes('print sad') || text.includes('print report')) {
-        handlePrintSad();
-      } else if (text.includes('export sad csv')) {
-        handleExportSadCsv();
-      } else {
-        toast({ title: 'Command not recognized', description: text, status: 'warning' });
-      }
-    };
-
-    recog.onend = () => {
-      setListening(false);
-    };
-
-    recog.onerror = (e) => {
-      console.warn('speech error', e);
-      setListening(false);
-      toast({ title: 'Voice error', description: e?.error || 'Speech recognition error', status: 'error' });
-    };
-
-    recognitionRef.current = recog;
-    recog.start();
-    setListening(true);
-    toast({ title: 'Listening', description: 'Say a command: "Export CSV", "Reset filters", "Print SAD"', status: 'info' });
-  };
-
-  const stopVoice = () => {
     try {
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
-        recognitionRef.current = null;
-      }
-    } catch (e) {
-      // ignore
-    }
-    setListening(false);
-  };
+      setPdfGenerating(true);
+      const blob = await generatePdfBlob(filteredTickets, reportMeta, loggedInUsername);
 
-  // ------------------------
-  // Orb & generate-report flow
-  // ------------------------
-  const handleGenerateFromOrb = async ({ type = 'Outgate CSV', includeSad = false } = {}) => {
-    try {
-      setOrbGenerating(true);
-      await new Promise((r) => setTimeout(r, 800));
-      await runConfetti();
-      toast({ title: `Generated ${type}`, status: 'success' });
-      await logReportGeneration(type, null, includeSad ? searchTerm : null);
-    } catch (e) {
-      toast({ title: 'Failed to generate', description: e?.message || String(e), status: 'error' });
+      try {
+        await recordReportGenerated({
+          blob,
+          reportType: 'PDF',
+          fileNameHint: searchSAD || reportMeta?.sad || 'weighbridge',
+          reportName: `SAD-${searchSAD || reportMeta?.sad || 'report'}`,
+        });
+      } catch (e) {
+        console.debug('recording report failed', e);
+      }
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `SAD-${searchSAD || 'report'}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: 'Download started', status: 'success', duration: 3000 });
+
+      triggerConfetti();
+    } catch (err) {
+      console.error('PDF generation failed', err);
+      toast({ title: 'PDF generation failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
     } finally {
-      setOrbGenerating(false);
-      onOrbClose();
+      setPdfGenerating(false);
     }
   };
 
-  // View details + docs actions
-  const openDetailsFor = (r) => {
-    setSelectedReport(r);
-    onDetailsOpen();
+  const handleNativeShare = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'No tickets to share', status: 'info', duration: 3000 });
+      return;
+    }
+    if (!navigator || !navigator.canShare) {
+      toast({ title: 'Not supported', description: 'Native file sharing is not supported on this device/browser', status: 'warning', duration: 4000 });
+      return;
+    }
+    try {
+      setPdfGenerating(true);
+      const blob = await generatePdfBlob(filteredTickets, reportMeta, loggedInUsername);
+
+      try {
+        await recordReportGenerated({
+          blob,
+          reportType: 'PDF',
+          fileNameHint: searchSAD || reportMeta?.sad || 'weighbridge',
+          reportName: `SAD-${searchSAD || reportMeta?.sad || 'report'}`,
+        });
+      } catch (e) {
+        console.debug('recording report failed', e);
+      }
+
+      const file = new File([blob], `SAD-${searchSAD || 'report'}.pdf`, { type: 'application/pdf' });
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `SAD ${searchSAD} Report`,
+          text: `Weighbridge report for SAD ${searchSAD} — ${filteredTickets.length} transactions.`,
+        });
+        toast({ title: 'Shared', status: 'success', duration: 3000 });
+      } else {
+        toast({ title: 'Share failed', description: 'Device does not support sharing files', status: 'warning', duration: 4000 });
+      }
+    } catch (err) {
+      console.error('Share error', err);
+      toast({ title: 'Share failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setPdfGenerating(false);
+    }
   };
-  const openDocsFor = (r) => {
-    const files = [];
-    if (r.fileUrl) files.push({ name: 'attachment', url: r.fileUrl });
-    if (r.rawRow && Array.isArray(r.rawRow.docs)) {
-      for (const d of r.rawRow.docs) {
-        if (d && (d.url || d.path)) files.push({ name: d.name || d.path || 'doc', url: d.url || d.path });
+
+  const handleEmailComposer = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No tickets', description: 'No tickets to email', status: 'info', duration: 3000 });
+      return;
+    }
+    try {
+      setPdfGenerating(true);
+      const blob = await generatePdfBlob(filteredTickets, reportMeta, loggedInUsername);
+
+      try {
+        await recordReportGenerated({
+          blob,
+          reportType: 'PDF',
+          fileNameHint: searchSAD || reportMeta?.sad || 'weighbridge',
+          reportName: `SAD-${searchSAD || reportMeta?.sad || 'report'}`,
+        });
+      } catch (e) {
+        console.debug('recording report failed', e);
+      }
+
+      const url = URL.createObjectURL(blob);
+      const filename = `SAD-${searchSAD || 'report'}.pdf`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      const subject = encodeURIComponent(`Weighbridge Report for SAD ${searchSAD}`);
+      const body = encodeURIComponent(`Please find (or attach) the Weighbridge report for SAD ${searchSAD}.\n\nNumber of transactions: ${filteredTickets.length}\nTotal Discharged (KG): ${formatNumber(String(reportMeta?.dischargedWeight || 0))}\n\n(If your mail client does not auto-attach the PDF, please attach the downloaded file: ${filename})`);
+      window.location.href = `mailto:?subject=${subject}&body=${body}`;
+
+      toast({ title: 'Composer opened', description: 'PDF downloaded — attach to your email if not auto-attached', status: 'info', duration: 5000 });
+    } catch (err) {
+      console.error('Email/Download error', err);
+      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
+
+  // ---------- CSV export ---------------
+  const exportCsv = async () => {
+    if (!filteredTickets || filteredTickets.length === 0) {
+      toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
+      return;
+    }
+    const header = ['sadNo', 'ticketNo', 'submitted_at', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'createdBy', 'containerNo', 'passNumber', 'scaleName'];
+    const rows = filteredTickets.map((t) => {
+      const d = t.data || {};
+      const truck = d.gnswTruckNo || d.truckOnWb || d.anpr || d.truckNo || '';
+      return [
+        d.sadNo ?? '',
+        d.ticketNo ?? t.ticketId ?? '',
+        d.submitted_at ? new Date(d.submitted_at).toISOString() : '',
+        truck,
+        d.driver ?? '',
+        d.gross ?? '',
+        d.tare ?? '',
+        d.net ?? '',
+        d.consignee ?? '',
+        d.operator ?? '',
+        d.createdBy ?? '',
+        d.containerNo ?? '',
+        d.passNumber ?? '',
+        d.scaleName ?? '',
+      ];
+    });
+
+    const csv = [header, ...rows].map((r) => r.map((cell) => {
+      if (cell === null || cell === undefined) return '';
+      const s = String(cell).replace(/"/g, '""');
+      return `"${s}"`;
+    }).join(',')).join('\n');
+
+    try {
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      try {
+        await recordReportGenerated({
+          blob,
+          reportType: 'CSV',
+          fileNameHint: searchSAD || reportMeta?.sad || 'weighbridge',
+          reportName: `SAD-${searchSAD || reportMeta?.sad || 'report'}`,
+        });
+      } catch (e) {
+        console.debug('recording CSV failed', e);
+      }
+
+      exportToCSV(rows, `SAD-${searchSAD || 'report'}.csv`);
+      toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
+      triggerConfetti();
+    } catch (err) {
+      console.error('CSV export error', err);
+      toast({ title: 'Export failed', description: err?.message || 'Unexpected', status: 'error', duration: 4000 });
+    }
+  };
+
+  // re-used exportToCSV
+  function exportToCSV(rows = [], filename = 'export.csv') {
+    if (!rows || rows.length === 0) return;
+    const headers = Object.keys(rows[0]);
+    const csv = [
+      headers.join(','),
+      ...rows.map((r) =>
+        headers
+          .map((h) => {
+            const v = r[h] ?? '';
+            const s = typeof v === 'string' ? v : String(v);
+            return `"${s.replace(/"/g, '""')}"`;
+          })
+          .join(',')
+      ),
+    ].join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ---------- Edit / Delete logic ----------
+  const isTicketEditable = (ticket) => {
+    const status = String(ticket?.data?.status || '').toLowerCase();
+    return status !== 'exited';
+  };
+
+  const startEditing = (ticketParam = null) => {
+    const ticket = ticketParam || selectedTicket;
+    if (!ticket) return;
+
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can edit tickets', status: 'warning', duration: 3000 });
+      return;
+    }
+
+    const d = ticket.data || {};
+    const operator = d.operator ? d.operator.replace(/^-+/, '').trim() : '';
+    const driverName = d.driver ? d.driver.replace(/^-+/, '').trim() : '';
+
+    const initialEditData = {
+      consignee: d.consignee ?? '',
+      containerNo: d.containerNo ?? '',
+      operator: operator || '',
+      driver: driverName || '',
+      gross: d.gross ?? '',
+      tare: d.tare ?? '',
+      net: d.net ?? '',
+    };
+
+    setSelectedTicket(ticket);
+    setEditData(initialEditData);
+    setEditErrors({});
+    setIsEditing(true);
+
+    onOpen();
+  };
+
+  const cancelEditing = () => { setIsEditing(false); setEditErrors({}); setEditData({}); };
+
+  const handleEditChange = (field, val) => {
+    setEditData((p) => ({ ...p, [field]: val }));
+    setEditErrors((p) => { const cp = { ...p }; delete cp[field]; return cp; });
+  };
+
+  const validateEdit = () => {
+    const errs = {};
+    const g = numericValue(editData.gross);
+    const t = numericValue(editData.tare);
+    let n = numericValue(editData.net);
+
+    if (g === null) errs.gross = 'Invalid gross';
+    if (t === null) errs.tare = 'Invalid tare';
+    if (n === null) {
+      if (g !== null && t !== null) {
+        const computedNet = g - t;
+        if (!Number.isFinite(computedNet)) errs.net = 'Invalid net';
+        else n = computedNet;
+      } else {
+        errs.net = 'Invalid net';
       }
     }
-    setDocsForView(files);
-    onDocsOpen();
+
+    if (g !== null && t !== null && !(g > t)) {
+      errs.gross = 'Gross must be greater than Tare';
+      errs.tare = 'Tare must be less than Gross';
+    }
+
+    setEditErrors(errs);
+    return Object.keys(errs).length === 0;
   };
 
-  // small responsive helper: show "card" UI for each report on small screens
-  const ReportCard = ({ r }) => {
-    const { net } = computeWeights(r);
-    return (
-      <MotionBox
-        whileHover={{ y: -6 }}
-        p={3}
-        borderRadius="12px"
-        border="1px solid"
-        borderColor="rgba(255,255,255,0.06)"
-        bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96))"
-        boxShadow="0 10px 30px rgba(124,58,237,0.06), inset 0 -8px 18px rgba(255,255,255,0.6)"
-      >
-        <Flex justify="space-between" align="center">
-          <Box>
-            <Text fontWeight="bold">{r.ticketNo ?? r.ticketId ?? '—'}</Text>
-            <Text fontSize="sm" color="gray.500">{r.vehicleNumber || 'No vehicle'}</Text>
-            <Text fontSize="xs" color="gray.500">{r.sadNo ? `SAD ${r.sadNo}` : 'No SAD'}</Text>
-          </Box>
-          <VStack align="end">
-            <Text fontSize="sm">{r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '—'}</Text>
+  const saveEdits = async () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can save edits', status: 'warning', duration: 3000 });
+      return;
+    }
+    if (!validateEdit()) {
+      toast({ title: 'Validation error', description: 'Please correct fields before saving', status: 'error', duration: 3500 });
+      return;
+    }
+
+    setSavingEdit(true);
+    const before = selectedTicket;
+    const payload = {
+      consignee: editData.consignee || null,
+      container_no: editData.containerNo || null,
+      operator: editData.operator || null,
+      driver: editData.driver || null,
+    };
+
+    const g = numericValue(editData.gross);
+    const t = numericValue(editData.tare);
+    let n = numericValue(editData.net);
+    if ((n === null || n === undefined) && g !== null && t !== null) n = g - t;
+
+    payload.gross = g !== null ? g : null;
+    payload.tare = t !== null ? t : null;
+    payload.net = n !== null ? n : null;
+
+    try {
+      const ticketIdValue = selectedTicket.ticketId ?? selectedTicket.data.ticketNo ?? null;
+      if (!ticketIdValue) throw new Error('Missing ticket identifier');
+
+      let usedRpc = false;
+      try {
+        const { error: rpcErr } = await supabase.rpc('admin_update_ticket', {
+          p_ticket_id: ticketIdValue,
+          p_gross: payload.gross,
+          p_tare: payload.tare,
+          p_net: payload.net,
+          p_consignee: payload.consignee,
+          p_container_no: payload.container_no,
+          p_operator: payload.operator,
+          p_driver: payload.driver,
+        });
+        if (!rpcErr) usedRpc = true;
+      } catch (rpcErr) {
+        console.debug('RPC update failed', rpcErr);
+      }
+
+      if (!usedRpc) {
+        const { data: roleRow, error: roleErr } = await supabase.from('users').select('role').eq('id', currentUserId).maybeSingle();
+        if (roleErr) throw roleErr;
+        const role = (roleRow && roleRow.role) || '';
+        if (String(role).toLowerCase() !== 'admin') throw new Error('Server role check failed — only admins may edit tickets');
+
+        let { error } = await supabase.from('tickets').update({
+          gross: payload.gross,
+          tare: payload.tare,
+          net: payload.net,
+          consignee: payload.consignee,
+          container_no: payload.container_no,
+          driver: payload.driver,
+          operator: payload.operator,
+        }).eq('ticket_id', ticketIdValue);
+
+        if (error) {
+          const fallback = await supabase.from('tickets').update({
+            gross: payload.gross,
+            tare: payload.tare,
+            net: payload.net,
+            consignee: payload.consignee,
+            container_no: payload.container_no,
+            driver: payload.driver,
+            operator: payload.operator,
+          }).eq('ticket_no', ticketIdValue);
+          if (fallback.error) throw fallback.error;
+        }
+      }
+
+      const updatedTicket = {
+        ...selectedTicket,
+        data: {
+          ...selectedTicket.data,
+          consignee: payload.consignee,
+          containerNo: payload.container_no,
+          operator: payload.operator,
+          driver: payload.driver,
+          gross: payload.gross,
+          tare: payload.tare,
+          net: payload.net,
+        },
+      };
+
+      setOriginalTickets((prev) => prev.map((t) => (String(t.ticketId) === String(selectedTicket.ticketId) ? updatedTicket : t)));
+      setTimeout(() => computeFilteredTickets(), 0);
+
+      setSelectedTicket(updatedTicket);
+      setIsEditing(false);
+
+      try {
+        const auditEntry = {
+          action: 'update',
+          ticket_id: ticketIdValue,
+          ticket_no: selectedTicket.data?.ticketNo ?? null,
+          user_id: currentUserId || null,
+          username: loggedInUsername || null,
+          details: JSON.stringify({ before: before.data || null, after: updatedTicket.data || null }),
+          created_at: new Date().toISOString(),
+        };
+        await supabase.from('audit_logs').insert([auditEntry]);
+        fetchAuditLogs();
+      } catch (auditErr) {
+        console.debug('Audit log insertion failed', auditErr);
+      }
+
+      toast({ title: 'Saved', description: 'Ticket updated', status: 'success', duration: 2500 });
+    } catch (err) {
+      console.error('Update failed', err);
+      toast({ title: 'Update failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const confirmDelete = () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 3000 });
+      return;
+    }
+    onDeleteOpen();
+  };
+
+  const performDelete = async () => {
+    if (!selectedTicket) return;
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 3000 });
+      onDeleteClose();
+      return;
+    }
+    onDeleteClose();
+
+    const ticketToDelete = selectedTicket;
+    setOriginalTickets((prev) => prev.filter((t) => String(t.ticketId) !== String(ticketToDelete.ticketId)));
+    setFilteredTickets((prev) => prev.filter((t) => String(t.ticketId) !== String(ticketToDelete.ticketId)));
+    setSelectedTicket(null);
+
+    const DELAY = 8000;
+    const timeoutId = setTimeout(async () => {
+      try {
+        const ticketIdValue = ticketToDelete.ticketId ?? ticketToDelete.data.ticketNo ?? null;
+        if (!ticketIdValue) throw new Error('Missing ticket identifier');
+
+        let usedRpc = false;
+        try {
+          const { error: rpcErr } = await supabase.rpc('admin_delete_ticket', { p_ticket_id: ticketIdValue });
+          if (!rpcErr) usedRpc = true;
+        } catch (rpcErr) {
+          console.debug('RPC delete failed', rpcErr);
+        }
+
+        if (!usedRpc) {
+          const { data: roleRow, error: roleErr } = await supabase.from('users').select('role').eq('id', currentUserId).maybeSingle();
+          if (roleErr) throw roleErr;
+          const role = (roleRow && roleRow.role) || '';
+          if (String(role).toLowerCase() !== 'admin') throw new Error('Server role check failed — only admins may delete tickets');
+
+          let { error } = await supabase.from('tickets').delete().eq('ticket_id', ticketIdValue);
+          if (error) {
+            const fallback = await supabase.from('tickets').delete().eq('ticket_no', ticketIdValue);
+            if (fallback.error) throw fallback.error;
+          }
+        }
+
+        try {
+          const auditEntry = {
+            action: 'delete',
+            ticket_id: ticketIdValue,
+            ticket_no: ticketToDelete.data?.ticketNo ?? null,
+            user_id: currentUserId || null,
+            username: loggedInUsername || null,
+            details: JSON.stringify({ before: ticketToDelete.data || null }),
+            created_at: new Date().toISOString(),
+          };
+          await supabase.from('audit_logs').insert([auditEntry]);
+        } catch (auditErr) {
+          console.debug('Audit log insertion failed (delete)', auditErr);
+        }
+
+        setPendingDelete((pd) => (pd && pd.ticket && String(pd.ticket.ticketId) === String(ticketToDelete.ticketId) ? null : pd));
+        fetchAuditLogs();
+        toast({ title: 'Deleted', description: `Ticket ${ticketToDelete.ticketId} deleted`, status: 'success', duration: 3000 });
+      } catch (err) {
+        console.error('Final delete failed', err);
+        setOriginalTickets((prev) => [ticketToDelete, ...prev]);
+        setFilteredTickets((prev) => [ticketToDelete, ...prev]);
+        setPendingDelete(null);
+        toast({ title: 'Delete failed', description: err?.message || 'Could not delete ticket from server', status: 'error', duration: 6000 });
+      }
+    }, DELAY);
+
+    setPendingDelete({ ticket: ticketToDelete, timeoutId });
+
+    toast({
+      duration: DELAY,
+      isClosable: true,
+      position: 'top-right',
+      render: ({ onClose }) => (
+        <Box color="white" bg="red.500" p={3} borderRadius="md" boxShadow="md">
+          <HStack justify="space-between" align="center">
+            <Box>
+              <Text fontWeight="bold">Ticket deleted</Text>
+              <Text fontSize="sm">Ticket {ticketToDelete.ticketId} scheduled for deletion — <Text as="span" fontWeight="bold">Undo</Text> to restore.</Text>
+            </Box>
             <HStack>
-              <Button size="sm" onClick={() => openDetailsFor(r)}>View</Button>
-              <Menu>
-                <MenuButton as={IconButton} icon={<FaEllipsisV />} size="sm" />
-                <MenuList>
-                  <MenuItem icon={<FaEye />} onClick={() => openDetailsFor(r)}>View Details</MenuItem>
-                  <MenuItem icon={<FaFileAlt />} onClick={() => openDocsFor(r)}>View Docs</MenuItem>
-                </MenuList>
-              </Menu>
+              <Button size="sm" colorScheme="whiteAlpha" onClick={() => {
+                clearTimeout(timeoutId);
+                setOriginalTickets((prev) => [ticketToDelete, ...prev]);
+                setFilteredTickets((prev) => [ticketToDelete, ...prev]);
+                setPendingDelete(null);
+                onClose();
+                toast({ title: 'Restored', description: `Ticket ${ticketToDelete.ticketId} restored`, status: 'info', duration: 3000 });
+              }}>
+                Undo
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => { clearTimeout(timeoutId); setPendingDelete(null); onClose(); }}>
+                Close
+              </Button>
             </HStack>
-          </VStack>
-        </Flex>
-
-        <Divider my={2} />
-
-        <Flex justify="space-between" fontSize="sm">
-          <Box>
-            <Text fontSize="xs" color="gray.500">Truck</Text>
-            <Text>{r.vehicleNumber || r.truck || '—'}</Text>
-          </Box>
-          <Box textAlign="right">
-            <Text fontSize="xs" color="gray.500">Net</Text>
-            <Text fontWeight="bold">{net != null ? formatWeight(net) : '—'}</Text>
-          </Box>
-        </Flex>
-      </MotionBox>
-    );
+          </HStack>
+        </Box>
+      ),
+    });
   };
 
-  // Pagination display helpers
-  const totalPages = Math.max(1, Math.ceil(uniqueFilteredReports.length / itemsPerPage));
+  // Confetti
+  const triggerConfetti = async (count = 120) => {
+    try {
+      if (typeof window !== 'undefined' && !window.confetti) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+          s.onload = () => resolve();
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+      }
+      if (window.confetti) {
+        window.confetti({
+          particleCount: Math.min(count, 300),
+          spread: 160,
+          origin: { y: 0.6 },
+        });
+      }
+    } catch (e) {
+      console.debug('confetti load failed', e);
+    }
+  };
+
+  // Voice recognition
   useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(1);
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      recognitionRef.current = null;
+      return;
+    }
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+
+    recognition.onresult = (ev) => {
+      const text = ev.results?.[0]?.[0]?.transcript ?? '';
+      handleVoiceCommand(text);
+    };
+    recognition.onend = () => {
+      setVoiceActive(false);
+    };
+    recognition.onerror = (err) => {
+      console.debug('Speech error', err);
+      setVoiceActive(false);
+    };
+
+    recognitionRef.current = recognition;
+    return () => {
+      recognition.stop && recognition.stop();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [totalPages]);
+  }, []);
 
-  const pageStart = (currentPage - 1) * itemsPerPage;
-  const pageEnd = pageStart + itemsPerPage;
-  const pagedUniqueReports = uniqueFilteredReports.slice(pageStart, pageEnd);
-
-  // --- vivid stat card styles (reusable)
-  const statCardStyle = {
-    borderRadius: 12,
-    p: 4,
-    boxShadow: '0 8px 30px rgba(99,102,241,0.12), inset 0 -6px 18px rgba(255,255,255,0.18)',
-    color: '#041124',
+  const startVoice = () => {
+    const r = recognitionRef.current;
+    if (!r) {
+      toast({ title: 'Voice not supported', description: 'Your browser does not support the Web Speech API', status: 'warning' });
+      return;
+    }
+    setVoiceActive(true);
+    try {
+      r.start();
+    } catch (e) {
+      console.debug('recognition start failed', e);
+    }
+  };
+  const stopVoice = () => {
+    const r = recognitionRef.current;
+    if (!r) return;
+    try {
+      r.stop();
+    } catch (e) { /* ignore */ }
+    setVoiceActive(false);
   };
 
-  const vividCards = {
-    a: { bg: 'linear-gradient(135deg,#fff7ed 0%, #ffe0b2 100%)', border: '1px solid rgba(255,165,64,0.12)' },
-    b: { bg: 'linear-gradient(135deg,#ecfeff 0%, #c7fff6 100%)', border: '1px solid rgba(16,185,129,0.08)' },
-    c: { bg: 'linear-gradient(135deg,#f0fdf4 0%, #b9f6d0 100%)', border: '1px solid rgba(34,197,94,0.06)' },
-    d: { bg: 'linear-gradient(135deg,#f5f3ff 0%, #dbeafe 100%)', border: '1px solid rgba(124,58,237,0.08)' },
+  const handleVoiceCommand = (text = '') => {
+    const t = String(text || '').toLowerCase().trim();
+    toast({ title: 'Voice command', description: `"${t}"`, status: 'info', duration: 2200 });
+    if (t.includes('promote all')) {
+      highlightAllRows();
+      return;
+    }
+    if (t.includes('demote row')) {
+      const m = t.match(/demote row (\d+)/);
+      const digits = m ? Number(m[1]) : null;
+      if (digits) {
+        pulseRow(digits - 1);
+        return;
+      }
+    }
+    if (t.includes('generate report')) {
+      handleGenerateReport();
+      return;
+    }
+    toast({ title: 'Voice', description: 'Command not recognized', status: 'warning', duration: 2200 });
   };
 
-  // Render UI (kept similar to your sample, minimal changes)
+  const highlightAllRows = () => {
+    const el = document.querySelectorAll('.glass-card');
+    el.forEach((e) => e.classList.add('highlight-flash'));
+    setTimeout(() => {
+      el.forEach((e) => e.classList.remove('highlight-flash'));
+    }, 2200);
+  };
+
+  const pulseRow = (index) => {
+    const rows = document.querySelectorAll('tbody tr');
+    if (!rows || rows.length === 0) {
+      toast({ title: 'No rows', description: 'No table rows to pulse', status: 'info' });
+      return;
+    }
+    const idx = Math.max(0, Math.min(index, rows.length - 1));
+    const row = rows[idx];
+    if (!row) {
+      toast({ title: 'No row', description: `Row ${index + 1} not found`, status: 'warning' });
+      return;
+    }
+    row.classList.add('highlight-flash');
+    setTimeout(() => row.classList.remove('highlight-flash'), 2200);
+  };
+
+  // Magic orb
+  const handleMagicGenerate = async () => {
+    await triggerConfetti(160);
+    setTimeout(async () => {
+      await handleGenerateReport();
+      if (filteredTickets && filteredTickets.length > 0) {
+        await handleDownloadPdf();
+      }
+    }, 300);
+  };
+
+  // UI helpers
+  const cumulativeNetWeight = useMemo(() => {
+    return filteredTickets.reduce((total, ticket) => {
+      const computed = computeWeightsFromObj({
+        gross: ticket.data.gross,
+        tare: ticket.data.tare,
+        net: ticket.data.net,
+      });
+      const net = computed.netValue || 0;
+      return total + net;
+    }, 0);
+  }, [filteredTickets]);
+
+  const openModalWithTicket = (ticket) => {
+    setSelectedTicket(ticket);
+    setIsEditing(false);
+    setEditData({});
+    setEditErrors({});
+    onOpen();
+  };
+
+  // Render (UI kept essentially identical to your previous file)
   return (
-    <Box p={4}>
-      <Box mb={4}>
-        <Text fontSize="xl" fontWeight="bold">Weight Reports</Text>
-        <Text color="gray.600">Unique-ticket view — polished UI.</Text>
+    <Container maxW="8xl" py={{ base: 4, md: 8 }} className="wr-container">
+      <Box mb={6} className="panel-3d">
+        <Flex direction={{ base: 'column', md: 'row' }} align={{ base: 'stretch', md: 'center' }} gap={4}>
+          <Box flex="1">
+            <Heading size={headingSize} mb={1}>SAD Report Generator</Heading>
+            <Text mt={2} color="gray.500">Search SAD → then filter by driver or truck. Generated by uses your logged-in username.</Text>
+          </Box>
+          <Flex ml="auto" gap={4} align="center" wrap="wrap">
+            <StatGroup display="flex" alignItems="center" gap={4}>
+              <Stat className="glass-card">
+                <StatLabel>Total Transactions</StatLabel>
+                <StatNumber fontSize="lg">{filteredTickets.length}</StatNumber>
+                <StatHelpText>{originalTickets.length > 0 ? `of ${originalTickets.length} returned` : ''}</StatHelpText>
+              </Stat>
+
+              <Stat className="glass-card">
+                <StatLabel>Total Discharged (KG)</StatLabel>
+                <StatNumber fontSize="lg">{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
+              </Stat>
+            </StatGroup>
+          </Flex>
+        </Flex>
       </Box>
 
-      <Box mb={4}>
-        <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
-          <Input placeholder="SAD Search" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
-          <Box>
-            <FormLabel>Date From</FormLabel>
-            <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-          </Box>
-          <Box>
-            <FormLabel>Date To</FormLabel>
-            <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
-          </Box>
-          <Box>
-            <FormLabel>Time From</FormLabel>
-            <Input type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
-          </Box>
-          <Box>
-            <FormLabel>Time To</FormLabel>
-            <Input type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
-          </Box>
+      <Box className="glass-card" mb={6}>
+        <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={3} alignItems="end">
+          <ChakraInput
+            placeholder="Type SAD No (required)"
+            value={searchSAD}
+            onChange={(e) => setSearchSAD(e.target.value)}
+            isDisabled={loading || pdfGenerating}
+            borderRadius="md"
+            size="md"
+            aria-label="Search SAD"
+          />
+
+          {originalTickets.length > 0 ? (
+            <>
+              <ChakraInput
+                placeholder="Driver Name (filter)"
+                value={searchDriver}
+                onChange={(e) => setSearchDriver(e.target.value)}
+                isDisabled={loading || pdfGenerating}
+                borderRadius="md"
+                size="md"
+                aria-label="Filter by driver"
+              />
+              <ChakraInput
+                placeholder="Truck No (filter)"
+                value={searchTruck}
+                onChange={(e) => setSearchTruck(e.target.value)}
+                isDisabled={loading || pdfGenerating}
+                borderRadius="md"
+                size="md"
+                aria-label="Filter by truck"
+              />
+            </>
+          ) : (
+            <>
+              <Box />
+              <Box />
+            </>
+          )}
         </SimpleGrid>
 
-        <Flex mt={3} gap={2}>
-          <Button colorScheme="teal" onClick={() => { /* manual generate can just set searchTerm to trigger effect above */ }}>Search</Button>
-          <Button onClick={handleResetAll}>Reset</Button>
-          <Text ml="auto" color="gray.500">Tip: Narrow by date/time, then export.</Text>
+        <Flex gap={3} wrap="wrap" align="center" mb={4}>
+          <Button
+            colorScheme="teal"
+            size="md"
+            leftIcon={<FaSearch />}
+            onClick={handleGenerateReport}
+            isLoading={loading}
+            loadingText="Searching..."
+            minW="160px"
+            aria-label="Generate report"
+            className="neon-btn"
+          >
+            Generate Report
+          </Button>
+
+          {originalTickets.length > 0 && (
+            <>
+              <Button size="md" leftIcon={<FaFilter />} onClick={applyDriverTruckFilter} isDisabled={loading || pdfGenerating}>Apply Filters</Button>
+              <Button size="md" variant="ghost" leftIcon={<FaTimes />} onClick={clearDriverTruckFilters} isDisabled={loading || pdfGenerating}>Clear Filters</Button>
+            </>
+          )}
+
+          <Button size="md" variant="ghost" leftIcon={<FaRedo />} onClick={clearAll} minW="120px">Clear All</Button>
+
+          <HStack spacing={2} ml="auto" wrap="wrap">
+            <Button leftIcon={<FaFilePdf />} onClick={handleDownloadPdf} isLoading={pdfGenerating} size="sm" colorScheme="gray">
+              Download PDF
+            </Button>
+            <Button leftIcon={<FaShareAlt />} onClick={handleNativeShare} isLoading={pdfGenerating} size="sm" colorScheme="blue">
+              Share
+            </Button>
+            <Button leftIcon={<FaEnvelope />} onClick={handleEmailComposer} isLoading={pdfGenerating} size="sm" colorScheme="green">
+              Email
+            </Button>
+
+            <Menu>
+              <MenuButton as={IconButton} aria-label="more" icon={<FaEllipsisV />} variant="ghost" />
+              <MenuList>
+                <MenuItem icon={<FaFilePdf />} onClick={handleDownloadPdf}>Export PDF</MenuItem>
+                <MenuItem icon={<FaFileCsv />} onClick={() => exportCsv()}>Export CSV</MenuItem>
+                <MenuItem icon={<FaShareAlt />} onClick={handleNativeShare}>Share</MenuItem>
+                <MenuItem icon={<FaEnvelope />} onClick={handleEmailComposer}>Email</MenuItem>
+                <MenuItem onClick={fetchAuditLogs}>Refresh Audit Logs</MenuItem>
+              </MenuList>
+            </Menu>
+          </HStack>
+        </Flex>
+
+        <Box border="1px solid" borderColor="rgba(2,6,23,0.04)" p={3} borderRadius="md" mb={4}>
+          <Text fontWeight="semibold" mb={2}>Filter by Date & Time Range</Text>
+          <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} alignItems="end">
+            <Box>
+              <Text fontSize="sm" mb={1}>Date From</Text>
+              <ChakraInput type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            </Box>
+            <Box>
+              <Text fontSize="sm" mb={1}>Date To</Text>
+              <ChakraInput type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            </Box>
+            <Box>
+              <Text fontSize="sm" mb={1}>Time From</Text>
+              <ChakraInput type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
+            </Box>
+            <Box>
+              <Text fontSize="sm" mb={1}>Time To</Text>
+              <ChakraInput type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
+            </Box>
+          </SimpleGrid>
+
+          <Flex mt={3} gap={2} align="center">
+            <Button size="sm" colorScheme="blue" onClick={applyRange}>Apply Range</Button>
+            <Button size="sm" variant="ghost" onClick={resetRange}>Reset Range</Button>
+
+            <Text ml="auto" fontSize="sm" color="gray.600">Tip: Narrow by date/time, then export.</Text>
+          </Flex>
+        </Box>
+
+        {(reportMeta?.sad || originalTickets.length > 0) && (
+          <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={4}>
+            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>Declared Weight</StatLabel>
+              <StatNumber>{reportMeta.declaredWeight != null ? formatNumber(String(reportMeta.declaredWeight)) : 'N/A'}</StatNumber>
+              <StatHelpText>From SAD Declaration</StatHelpText>
+            </Stat>
+
+            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>Discharged Weight</StatLabel>
+              <StatNumber>{reportMeta.dischargedWeight != null ? formatNumber(String(reportMeta.dischargedWeight)) : (formatNumber(String(cumulativeNetWeight)) || '0')}</StatNumber>
+              <StatHelpText>Sum of ticket nets (fetched)</StatHelpText>
+            </Stat>
+
+            <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>SAD Status</StatLabel>
+              <StatNumber>{reportMeta.sadStatus || (reportMeta.sadExists ? 'In Progress' : 'Unknown')}</StatNumber>
+              <StatHelpText>{reportMeta.sadExists ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
+            </Stat>
+          </SimpleGrid>
+        )}
+
+        <Flex align="center" gap={3} mb={2}>
+          <Box fontSize="sm" color="gray.600">Voice commands:</Box>
+          <Button size="sm" leftIcon={voiceActive ? <FaMicrophoneSlash /> : <FaMicrophone />} onClick={() => (voiceActive ? stopVoice() : startVoice())} colorScheme={voiceActive ? 'red' : 'teal'}>
+            {voiceActive ? 'Listening...' : 'Start Voice'}
+          </Button>
         </Flex>
       </Box>
 
-      <Box className="glass-card" p={3}>
-        {loading ? (
-          <Flex align="center" justify="center"><Spinner /></Flex>
-        ) : (
+      <Box className="panel-3d">
+        {filteredTickets.length > 0 ? (
           <>
-            <Flex justify="space-between" align="center" mb={3}>
-              <Text fontWeight="bold">Results</Text>
-              <HStack>
-                <Button onClick={handleExportCsv} leftIcon={<DownloadIcon />}>Export CSV</Button>
-                <Button onClick={handlePrintSad} leftIcon={<FaFilePdf />}>Print SAD</Button>
+            <Flex align="center" justify="space-between" mb={3} gap={4} wrap="wrap">
+              <Text fontSize={{ base: 'md', md: 'lg' }} fontWeight="bold">{reportMeta?.sad ? `SAD: ${reportMeta.sad}` : `SAD: ${searchSAD}`}</Text>
+
+              <HStack spacing={3}>
+                <Box textAlign="right">
+                  <Text fontSize="sm" color="gray.500">Showing</Text>
+                  <Text fontWeight="bold">{filteredTickets.length} / {originalTickets.length}</Text>
+                </Box>
+                <Box textAlign="right" minW="140px">
+                  <Text fontSize="sm" color="gray.500">Total Discharged (KG)</Text>
+                  <Text fontWeight="bold">{formatNumber(String(cumulativeNetWeight)) || '0'} kg</Text>
+                </Box>
               </HStack>
             </Flex>
 
-            {statsSource.length === 0 ? (
-              <Text>No records found for: {searchTerm}</Text>
-            ) : (
-              <>
-                <Text mb={2}>No. of Transacts: {statsSource.length}</Text>
-                <Text mb={2}>Total Discharged: {formatWeight(statsTotals.cumulativeNet)} kg</Text>
+            {isMobile ? (
+              <VStack spacing={3} align="stretch">
+                {filteredTickets.map((t, idx) => {
+                  const computed = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
+                  const displayTruck = t.data.gnswTruckNo || t.data.truckOnWb || t.data.anpr || t.data.truckNo || 'N/A';
+                  const displayDriver = t.data.driver || 'N/A';
+                  const displayCreated = t.data.createdBy || t.data.operator || 'N/A';
+                  return (
+                    <Box key={t.ticketId} className="glass-card" p={3}>
+                      <Flex justify="space-between" align="start" gap={3} wrap="wrap">
+                        <Box>
+                          <Text fontSize="sm" color="gray.500">Ticket</Text>
+                          <HStack>
+                            <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
+                          </HStack>
+                          <Text fontSize="sm" color="gray.500">{t.data.submitted_at ? new Date(t.data.submitted_at).toLocaleString() : 'N/A'}</Text>
+                        </Box>
 
-                <Table size="sm">
+                        <Box textAlign="right">
+                          <Text fontSize="sm" color="gray.500">Truck</Text>
+                          <HStack justify="flex-end">
+                            <Text fontWeight="semibold">{displayTruck}</Text>
+                          </HStack>
+                          <Text fontSize="sm" color="gray.500">Driver</Text>
+                          <HStack justify="flex-end">
+                            <Text>{displayDriver}</Text>
+                          </HStack>
+                          <Text fontSize="sm" color="gray.500">Operator</Text>
+                          <HStack justify="flex-end">
+                            <Text>{displayCreated}</Text>
+                          </HStack>
+                        </Box>
+                      </Flex>
+
+                      <Flex mt={3} gap={3} justify="space-between" align="center" wrap="wrap">
+                        <HStack spacing={3}>
+                          <Box>
+                            <Text fontSize="xs" color="gray.500">Gross</Text>
+                            <Text fontWeight="bold">{computed.grossDisplay || '0'}</Text>
+                          </Box>
+                          <Box>
+                            <Text fontSize="xs" color="gray.500">Tare</Text>
+                            <Text fontWeight="bold">{computed.tareDisplay || '0'}</Text>
+                          </Box>
+                          <Box>
+                            <Text fontSize="xs" color="gray.500">Net</Text>
+                            <Text fontWeight="bold">{computed.netDisplay || '0'}</Text>
+                          </Box>
+                        </HStack>
+
+                        <HStack spacing={2} ml="auto">
+                          <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
+                          <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(t)} isDisabled={!isAdmin || !isTicketEditable(t)}>Edit</Button>
+                          {t.data.fileUrl && (
+                            <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>
+                              Open PDF
+                            </Button>
+                          )}
+                        </HStack>
+                      </Flex>
+                    </Box>
+                  );
+                })}
+              </VStack>
+            ) : (
+              <Box overflowX="auto" borderRadius="md" className="glass-card">
+                <Table variant="simple" size="sm" sx={{
+                  'th': { position: 'sticky', top: 0, background: 'linear-gradient(90deg,#b02a37,#8a1f27)', color: '#fff', zIndex: 2 },
+                  'td, th': { border: '1px solid rgba(2,6,23,0.06)', verticalAlign: 'middle' }
+                }}>
                   <Thead>
                     <Tr>
-                      <Th>Ticket No</Th>
-                      <Th>Truck</Th>
-                      <Th>Date & Time</Th>
-                      <Th isNumeric>Net (kg)</Th>
+                      <Th onClick={() => toggleSort('ticketNo')} cursor="pointer">
+                        <HStack spacing={2}><Text>Ticket No</Text> {sortBy === 'ticketNo' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th onClick={() => toggleSort('date')} cursor="pointer">
+                        <HStack spacing={2}><Text>Date & Time</Text> {sortBy === 'date' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th onClick={() => toggleSort('truck')} cursor="pointer">
+                        <HStack spacing={2}><Text>Truck No</Text> {sortBy === 'truck' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th isNumeric onClick={() => toggleSort('gross')} cursor="pointer">
+                        <HStack spacing={2} justify="flex-end"><Text>Gross (kg)</Text> {sortBy === 'gross' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th isNumeric onClick={() => toggleSort('tare')} cursor="pointer">
+                        <HStack spacing={2} justify="flex-end"><Text>Tare (kg)</Text> {sortBy === 'tare' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th isNumeric onClick={() => toggleSort('net')} cursor="pointer">
+                        <HStack spacing={2} justify="flex-end"><Text>Net (kg)</Text> {sortBy === 'net' ? (sortDir === 'asc' ? <FaSortUp /> : <FaSortDown />) : <FaSort />}</HStack>
+                      </Th>
+                      <Th>Driver</Th>
+                      <Th>Operator</Th>
                       <Th>Actions</Th>
                     </Tr>
                   </Thead>
+
                   <Tbody>
-                    {statsSource.slice(pageStart, pageEnd).map((r) => {
-                      const w = computeWeights(r);
-                      const d = r.outgateDateTime || r.rawRow?.submitted_at || r.rawRow?.date || r.rawRow?.created_at || null;
-                      const parsed = parseTicketDate(d);
+                    {filteredTickets.map((ticket, idx) => {
+                      const computed = computeWeightsFromObj({
+                        gross: ticket.data.gross,
+                        tare: ticket.data.tare,
+                        net: ticket.data.net,
+                      });
+                      const displayDriver = ticket.data.driver || 'N/A';
+                      const displayTruck = ticket.data.gnswTruckNo || ticket.data.truckOnWb || ticket.data.anpr || ticket.data.truckNo || 'N/A';
+                      const displayCreated = ticket.data.createdBy || ticket.data.operator || 'N/A';
+
                       return (
-                        <Tr key={r.ticketId || r.ticketNo}>
-                          <Td>{r.ticketNo}</Td>
-                          <Td>{r.vehicleNumber}</Td>
-                          <Td>{parsed ? parsed.toLocaleString() : '—'}</Td>
-                          <Td isNumeric>{formatWeight(w.net)}</Td>
+                        <Tr key={ticket.ticketId}>
+                          <Td>{ticket.data.ticketNo}</Td>
+                          <Td>{ticket.data.submitted_at ? new Date(ticket.data.submitted_at).toLocaleString() : 'N/A'}</Td>
+                          <Td>{displayTruck}</Td>
+                          <Td isNumeric>{computed.grossDisplay || '0'}</Td>
+                          <Td isNumeric>{computed.tareDisplay || '0'}</Td>
+                          <Td isNumeric>{computed.netDisplay || '0'}</Td>
+                          <Td>{displayDriver}</Td>
+                          <Td>{displayCreated}</Td>
                           <Td>
-                            <Button size="sm" onClick={() => openDetailsFor(r)}>View</Button>
+                            <HStack spacing={2} flexWrap="wrap">
+                              <Button size="sm" colorScheme="teal" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(ticket)}>View</Button>
+                              <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(ticket)} isDisabled={!isAdmin || !isTicketEditable(ticket)}>
+                                Edit
+                              </Button>
+                              {ticket.data.fileUrl && (
+                                <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(ticket.data.fileUrl, '_blank', 'noopener')}>
+                                  Open
+                                </Button>
+                              )}
+                            </HStack>
                           </Td>
                         </Tr>
                       );
                     })}
+
+                    <Tr fontWeight="bold" bg="teal.50">
+                      <Td colSpan={4}>Total Discharged (KG)</Td>
+                      <Td isNumeric>{formatNumber(cumulativeNetWeight) || '0'} kg</Td>
+                      <Td colSpan={3} />
+                    </Tr>
                   </Tbody>
                 </Table>
-
-                <Flex justify="space-between" align="center" mt={3}>
-                  <Text>Page {currentPage} / {totalPages}</Text>
-                  <HStack>
-                    <Button size="sm" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                    <Button size="sm" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
-                  </HStack>
-                </Flex>
-              </>
+              </Box>
             )}
           </>
+        ) : (
+          !loading && (searchSAD || searchDriver || searchTruck) && (
+            <Text mt={6} fontStyle="italic">
+              No records found for: <Text as="span" fontWeight="bold"> {reportMeta?.sad || [searchSAD, searchDriver, searchTruck].filter(Boolean).join(', ')}</Text>
+            </Text>
+          )
         )}
       </Box>
-    </Box>
+
+      <Box mt={6} p={4} borderRadius="md" className="glass-card">
+        <Flex align="center" mb={3}>
+          <Heading size="sm">Recent Audit Logs</Heading>
+          <Button size="sm" ml="auto" onClick={fetchAuditLogs} leftIcon={<FaRedo />}>Refresh</Button>
+        </Flex>
+
+        {loadingAudit ? (
+          <Flex align="center" justify="center" p={4}><Spinner /></Flex>
+        ) : auditLogs.length === 0 ? (
+          <Text fontSize="sm" color="gray.500">No audit logs yet.</Text>
+        ) : (
+          <Box overflowX="auto">
+            <Table size="sm" variant="simple">
+              <Thead>
+                <Tr>
+                  <Th>When</Th>
+                  <Th>User</Th>
+                  <Th>Action</Th>
+                  <Th>Ticket</Th>
+                  <Th>Details</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {auditLogs.map((a) => (
+                  <Tr key={a.id || `${a.ticket_id}-${a.created_at}`}>
+                    <Td>{a.created_at ? new Date(a.created_at).toLocaleString() : '—'}</Td>
+                    <Td>{a.username ?? a.user_id ?? '—'}</Td>
+                    <Td>{a.action}</Td>
+                    <Td>{a.ticket_no ?? a.ticket_id ?? '—'}</Td>
+                    <Td style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {a.details ? a.details : '—'}
+                    </Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          </Box>
+        )}
+      </Box>
+
+      {/* Ticket modal */}
+      <Modal isOpen={isOpen} onClose={() => { onClose(); setIsEditing(false); setEditData({}); setEditErrors({}); }} size={modalSize} isCentered scrollBehavior="inside">
+        <ModalOverlay />
+        <AnimatePresence>
+          {isOpen && (
+            <MotionModalContent
+              ref={modalRef}
+              borderRadius="lg"
+              p={4}
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 30 }}
+              transition={{ duration: 0.25 }}
+            >
+              <ModalHeader>
+                <Flex align="center" gap={3}>
+                  <Icon as={FaFileInvoice} color="teal.500" boxSize={5} />
+                  <Box>
+                    <Text fontWeight="bold">Ticket Details</Text>
+                    <Text fontSize="sm" color="gray.500">
+                      {selectedTicket?.ticketId} • {selectedTicket?.data?.submitted_at ? new Date(selectedTicket.data.submitted_at).toLocaleDateString() : ''}
+                    </Text>
+                  </Box>
+                </Flex>
+              </ModalHeader>
+              <ModalCloseButton />
+              <ModalBody>
+                {selectedTicket ? (
+                  <Stack spacing={3} fontSize="sm">
+                    <HStack>
+                      <Icon as={FaTruck} />
+                      <Text><b>Truck No:</b> {selectedTicket.data.gnswTruckNo || selectedTicket.data.truckOnWb || selectedTicket.data.anpr || selectedTicket.data.truckNo || 'N/A'}</Text>
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                    </HStack>
+
+                    {isEditing ? (
+                      <>
+                        <FormControl isInvalid={!!editErrors.operator}>
+                          <FormLabel><Icon as={FaUserTie} mr={2} /> Operator</FormLabel>
+                          <ChakraInput value={editData.operator ?? ''} onChange={(e) => handleEditChange('operator', e.target.value)} />
+                          <FormErrorMessage>{editErrors.operator}</FormErrorMessage>
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel><Icon as={FaBox} mr={2} /> Consignee</FormLabel>
+                          <ChakraInput value={editData.consignee ?? ''} onChange={(e) => handleEditChange('consignee', e.target.value)} />
+                        </FormControl>
+
+                        <FormControl>
+                          <FormLabel><Icon as={FaBox} mr={2} /> Container No</FormLabel>
+                          <ChakraInput value={editData.containerNo ?? ''} onChange={(e) => handleEditChange('containerNo', e.target.value)} />
+                        </FormControl>
+
+                        <SimpleGrid columns={[1, 3]} spacing={3}>
+                          <FormControl isInvalid={!!editErrors.gross}>
+                            <FormLabel><Icon as={FaBalanceScale} mr={2} /> Gross (kg)</FormLabel>
+                            <ChakraInput value={editData.gross ?? ''} onChange={(e) => handleEditChange('gross', e.target.value)} />
+                            <FormErrorMessage>{editErrors.gross}</FormErrorMessage>
+                          </FormControl>
+                          <FormControl isInvalid={!!editErrors.tare}>
+                            <FormLabel><Icon as={FaBalanceScale} mr={2} /> Tare (kg)</FormLabel>
+                            <ChakraInput value={editData.tare ?? ''} onChange={(e) => handleEditChange('tare', e.target.value)} />
+                            <FormErrorMessage>{editErrors.tare}</FormErrorMessage>
+                          </FormControl>
+                          <FormControl isInvalid={!!editErrors.net}>
+                            <FormLabel><Icon as={FaBalanceScale} mr={2} /> Net (kg)</FormLabel>
+                            <ChakraInput value={editData.net ?? (numericValue(editData.gross) !== null && numericValue(editData.tare) !== null ? String(numericValue(editData.gross) - numericValue(editData.tare)) : '')} onChange={(e) => handleEditChange('net', e.target.value)} />
+                            <FormErrorMessage>{editErrors.net}</FormErrorMessage>
+                          </FormControl>
+                        </SimpleGrid>
+                      </>
+                    ) : (
+                      <>
+                        <HStack>
+                          <Icon as={FaUserTie} />
+                          <Text><b>Operator:</b> {selectedTicket.data.operator || loggedInUsername || 'N/A'}</Text>
+                          {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit operator" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                        </HStack>
+
+                        <HStack>
+                          <Icon as={FaUserTie} />
+                          <Text><b>Operator:</b> {selectedTicket.data.createdBy || selectedTicket.data.operator || 'N/A'}</Text>
+                        </HStack>
+
+                        <HStack>
+                          <Icon as={FaBox} />
+                          <Text><b>Consignee:</b> {selectedTicket.data.consignee || 'N/A'}</Text>
+                          {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit consignee" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                        </HStack>
+
+                        {(() => {
+                          const computed = computeWeightsFromObj({
+                            gross: selectedTicket.data.gross,
+                            tare: selectedTicket.data.tare,
+                            net: selectedTicket.data.net,
+                          });
+                          return (
+                            <>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text><b>Gross Weight:</b> {computed.grossDisplay || '0'} kg</Text>
+                                {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit gross" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                              </HStack>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text><b>Tare Weight:</b> {computed.tareDisplay || '0'} kg</Text>
+                                {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit tare" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                              </HStack>
+                              <HStack>
+                                <Icon as={FaBalanceScale} />
+                                <Text><b>Net Weight:</b> {computed.netDisplay || '0'} kg</Text>
+                                {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit net" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                              </HStack>
+                            </>
+                          );
+                        })()}
+                      </>
+                    )}
+
+                    <HStack>
+                      <Icon as={FaBox} />
+                      <Text><b>Container No:</b> {selectedTicket.data.containerNo || 'N/A'}</Text>
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit container" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                    </HStack>
+                    <HStack>
+                      <Text><b>Pass Number:</b> {selectedTicket.data.passNumber || 'N/A'}</Text>
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit pass number" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                    </HStack>
+                    <HStack>
+                      <Text><b>Scale Name:</b> {selectedTicket.data.scaleName || 'N/A'}</Text>
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit scale" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                    </HStack>
+                    <HStack>
+                      <Text><b>ANPR:</b> {selectedTicket.data.anpr || 'N/A'}</Text>
+                      {isAdmin && isTicketEditable(selectedTicket) && <IconButton size="xs" aria-label="Edit anpr" icon={<FaEdit />} onClick={() => startEditing(selectedTicket)} variant="ghost" />}
+                    </HStack>
+                    <HStack>
+                      <Text><b>Consolidated:</b> {selectedTicket.data.consolidated ? 'Yes' : 'No'}</Text>
+                    </HStack>
+
+                    {selectedTicket.data.fileUrl && (
+                      <Box pt={2}>
+                        <Button size="sm" colorScheme="red" leftIcon={<FaExternalLinkAlt />} onClick={() => window.open(selectedTicket.data.fileUrl, '_blank', 'noopener')}>
+                          Open Stored Ticket PDF
+                        </Button>
+                      </Box>
+                    )}
+                  </Stack>
+                ) : (
+                  <Text>No data</Text>
+                )}
+              </ModalBody>
+
+              <ModalFooter>
+                {selectedTicket && !isEditing && (
+                  <>
+                    {isAdmin ? (
+                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} onClick={() => startEditing(selectedTicket)} isDisabled={!isTicketEditable(selectedTicket)}>
+                        Edit
+                      </Button>
+                    ) : (
+                      <Button leftIcon={<FaEdit />} colorScheme="yellow" mr={2} isDisabled>Edit</Button>
+                    )}
+
+                    {isAdmin ? (
+                      <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} onClick={confirmDelete}>Delete</Button>
+                    ) : (
+                      <Button leftIcon={<FaTrashAlt />} colorScheme="red" mr={2} isDisabled>Delete</Button>
+                    )}
+                  </>
+                )}
+
+                {isEditing && (
+                  <>
+                    <Button leftIcon={<FaCheck />} colorScheme="green" mr={2} onClick={saveEdits} isLoading={savingEdit}>Save</Button>
+                    <Button variant="ghost" mr={2} onClick={cancelEditing}>Cancel</Button>
+                  </>
+                )}
+
+                <Button onClick={() => { onClose(); setIsEditing(false); setEditData({}); setEditErrors({}); }}>Close</Button>
+              </ModalFooter>
+            </MotionModalContent>
+          )}
+        </AnimatePresence>
+      </Modal>
+
+      {/* Delete confirmation */}
+      <AlertDialog isOpen={isDeleteOpen} leastDestructiveRef={cancelRef} onClose={onDeleteClose} isCentered>
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Delete Ticket</AlertDialogHeader>
+            <AlertDialogBody>
+              Are you sure you want to delete ticket <b>{selectedTicket?.ticketId}</b>? It will be removed from the list and scheduled for deletion. You can undo for a few seconds.
+            </AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={cancelRef} onClick={onDeleteClose} isDisabled={deleting}>Cancel</Button>
+              <Button colorScheme="red" onClick={performDelete} ml={3} isLoading={deleting}>Delete</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
+
+      {/* Crystal Orb (floating) */}
+      <Box className="floating-orb" onClick={handleMagicGenerate} role="button" aria-label="Magic Generate">
+        <Box className="orb" title="Magic Generate">
+          <Box className="spark" />
+        </Box>
+      </Box>
+    </Container>
   );
+}
+
+// --------------- Utility functions moved to bottom for readability ---------------
+function sortTicketsByDateDesc(arr) {
+  return (arr || []).slice().sort((a, b) => {
+    const da = parseTicketDate(a?.data?.submitted_at) || parseTicketDate(a?.data?.date);
+    const db = parseTicketDate(b?.data?.submitted_at) || parseTicketDate(b?.data?.date);
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return db.getTime() - da.getTime();
+  });
+}
+
+function removeDuplicatesByTicketNo(tickets = []) {
+  const map = new Map();
+  for (const t of tickets) {
+    const rawKey =
+      (t.data && (t.data.ticketNo ?? t.data.ticketId)) ||
+      t.ticketId ||
+      (t.data && t.data.ticket_no) ||
+      '';
+    const key = String(rawKey || '').trim().toUpperCase();
+    if (!key) {
+      const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
+      map.set(fallbackKey, t);
+      continue;
+    }
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, t);
+      continue;
+    }
+    const da = parseTicketDate(existing.data?.submitted_at) || parseTicketDate(existing.data?.date);
+    const db = parseTicketDate(t.data?.submitted_at) || parseTicketDate(t.data?.date);
+    if (db && (!da || db.getTime() > da.getTime())) {
+      map.set(key, t);
+      continue;
+    }
+    if (!da && !db) {
+      if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
+        map.set(key, t);
+      }
+    }
+  }
+  return Array.from(map.values());
 }
