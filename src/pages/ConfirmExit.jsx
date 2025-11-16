@@ -667,9 +667,26 @@ export default function ConfirmExit() {
         await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
       }
 
+      // SUCCESS: Immediately update local UI so the row disappears (fixes "still in table" issue)
       toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no}`, status: 'success', duration: 3000, isClosable: true });
 
+      const removedTicketId = selectedTicket.ticket_id;
+
+      if (removedTicketId) {
+        // remove from filteredResults and allTickets instantly
+        setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== removedTicketId));
+        setAllTickets((prev) => prev.filter((t) => t.ticket_id !== removedTicketId));
+        // remove selection if present
+        setSelectedPending((prev) => {
+          const next = new Set(prev);
+          next.delete(removedTicketId);
+          return next;
+        });
+      }
+
+      // refresh counters/lists in background (still awaited so UI is consistent)
       await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+
       onClose();
     } catch (err) {
       console.error('Confirm exit error:', err);
