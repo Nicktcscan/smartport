@@ -1,5 +1,5 @@
-// src/pages/WeightReports.jsx
 /* eslint-disable no-unused-vars */
+// src/pages/OutgateReports.jsx
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Box,
@@ -170,116 +170,9 @@ function dedupeReportsByTicketNo(rows = []) {
 }
 
 /* -----------------------
-   Robust date parsing helpers
------------------------ */
-
-/**
- * parseTicketDate accepts:
- * - Date objects
- * - epoch numbers
- * - "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS(.mmm)"
- * - "DD/MM/YYYY" and "DD/MM/YYYY HH:MM[:SS]"
- * - ISO strings
- */
-function parseTicketDate(raw) {
-  if (!raw && raw !== 0) return null;
-  if (raw instanceof Date) {
-    return isNaN(raw.getTime()) ? null : raw;
-  }
-  // numbers / epoch
-  if (typeof raw === 'number') {
-    const d = new Date(raw);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  let s = String(raw).trim();
-  if (!s) return null;
-
-  // normalize common separators
-  // handle "YYYY-MM-DD HH:MM:SS(.mmm)" -> safe ISO
-  const ymdHms = /^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
-  if (ymdHms.test(s)) {
-    const iso = s.replace(' ', 'T');
-    const d = new Date(iso);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  // handle "YYYY-MM-DD" (date only)
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-    const d = new Date(`${s}T00:00:00`);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  // handle "DD/MM/YYYY" or "D/M/YY" with optional time
-  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?$/;
-  const m = s.match(dmRegex);
-  if (m) {
-    let day = parseInt(m[1], 10);
-    let month = parseInt(m[2], 10);
-    let year = parseInt(m[3], 10);
-    let hh = m[4] ? parseInt(m[4], 10) : 0;
-    let mm = m[5] ? parseInt(m[5], 10) : 0;
-    let ss = m[6] ? parseInt(m[6], 10) : 0;
-    let ms = m[7] ? Number((m[7] + '000').slice(0, 3)) : 0;
-    if (year < 100) year += 2000;
-    const d = new Date(year, month - 1, day, hh, mm, ss, ms);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  // last resort: Date constructor (ISO or other)
-  let d0 = new Date(s);
-  if (!isNaN(d0.getTime())) return d0;
-
-  // numeric string epoch?
-  const maybeNum = Number(s);
-  if (!Number.isNaN(maybeNum)) {
-    const d1 = new Date(maybeNum);
-    if (!isNaN(d1.getTime())) return d1;
-  }
-
-  return null;
-}
-
-/**
- * makeDateTime(dateStr, timeStr, defaultTimeIsStart)
- * dateStr can be "DD/MM/YYYY" or "YYYY-MM-DD" (or Date-like string)
- * timeStr: "HH:MM" or "HH:MM:SS"
- *
- * Returns a local Date object.
- */
-function makeDateTime(dateStr, timeStr, defaultTimeIsStart = true) {
-  if (!dateStr) return null;
-
-  // If dateStr is already an ISO or parseable date, parse it first
-  const parsedDate = parseTicketDate(dateStr);
-  if (!parsedDate) return null;
-
-  const Y = parsedDate.getFullYear();
-  const M = parsedDate.getMonth();
-  const D = parsedDate.getDate();
-
-  let hh = defaultTimeIsStart ? 0 : 23;
-  let mm = defaultTimeIsStart ? 0 : 59;
-  let ss = defaultTimeIsStart ? 0 : 59;
-  let ms = defaultTimeIsStart ? 0 : 999;
-
-  if (timeStr && String(timeStr).trim()) {
-    const parts = String(timeStr).split(':');
-    hh = Number(parts[0] || 0);
-    mm = Number(parts[1] || 0);
-    ss = Number(parts[2] || 0);
-    if (!Number.isFinite(hh)) hh = defaultTimeIsStart ? 0 : 23;
-    if (!Number.isFinite(mm)) mm = defaultTimeIsStart ? 0 : 59;
-    if (!Number.isFinite(ss)) ss = defaultTimeIsStart ? 0 : 59;
-    ms = defaultTimeIsStart ? 0 : 999;
-  }
-
-  return new Date(Y, M, D, hh, mm, ss, ms);
-}
-
-/* -----------------------
    Main component
 ----------------------- */
-export default function WeightReports() {
+export default function OutgateReports() {
   const { user } = useAuth();
   const [reports, setReports] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -323,11 +216,13 @@ export default function WeightReports() {
   const [totalDeclaredWeight, setTotalDeclaredWeight] = useState(null);
   const [totalDischargedWeight, setTotalDischargedWeight] = useState(null); // sum of total_recorded_weight
 
-  // helper: convert date + time to Date - kept as wrapper but uses robust makeDateTime above
-  // (Time From -> Date From; Time To -> Date To)
-  useEffect(() => {
-    // nothing here — leave compute in memo below
-  }, []);
+  // helper: convert date + time to Date
+  const makeDateTime = (dateStr, timeStr, defaultTimeIsStart = true) => {
+    if (!dateStr) return null;
+    const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
+    const fullTime = time.length <= 5 ? `${time}:00` : time;
+    return new Date(`${dateStr}T${fullTime}`);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -477,9 +372,12 @@ export default function WeightReports() {
     };
   }, [toast]);
 
-  // Debounced SAD search - auto search after user stops typing (600ms)
   useEffect(() => {
-    if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
+    if (sadDebounceRef.current) {
+      clearTimeout(sadDebounceRef.current);
+      sadDebounceRef.current = null;
+    }
+
     const q = (searchTerm || '').trim();
     if (!q) {
       setSadResults([]);
@@ -487,8 +385,33 @@ export default function WeightReports() {
       return;
     }
 
+    const fetchSadDeclaration = async () => {
+      try {
+        const { data: sadRow, error } = await supabase
+          .from('sad_declarations')
+          .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
+          .ilike('sad_no', `${q}`)
+          .maybeSingle();
+        if (!error && sadRow) {
+          setSadDeclaration({
+            declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
+            status: sadRow.status ?? 'Unknown',
+            exists: true,
+            total_recorded_weight: sadRow.total_recorded_weight ?? null,
+            created_at: sadRow.created_at ?? null,
+          });
+        } else {
+          setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+        }
+      } catch (err) {
+        console.debug('Failed to fetch SAD declaration', err);
+        setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+      }
+    };
+
     sadDebounceRef.current = setTimeout(async () => {
       setSadLoading(true);
+
       try {
         const { data: ticketsData, error } = await supabase
           .from('tickets')
@@ -500,122 +423,72 @@ export default function WeightReports() {
           console.warn('SAD lookup error', error);
           setSadResults([]);
           setSadLoading(false);
-          // still try to fetch declaration
-          try {
-            const { data: sadRow, error: sadErr } = await supabase
-              .from('sad_declarations')
-              .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
-              .ilike('sad_no', `${q}`)
-              .maybeSingle();
-            if (!sadErr && sadRow) {
-              setSadDeclaration({
-                declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
-                status: sadRow.status ?? 'Unknown',
-                exists: true,
-                total_recorded_weight: sadRow.total_recorded_weight ?? null,
-                created_at: sadRow.created_at ?? null,
-              });
-            } else {
-              setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-            }
-          } catch (e) {
-            setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-          }
+          await fetchSadDeclaration();
           return;
         }
 
-        // Deduplicate tickets by ticket_no keeping latest by date/submitted_at/created_at
         const dedupeMap = new Map();
         (ticketsData || []).forEach((t) => {
           const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
           if (!ticketNo) return;
-          const thisDate = parseTicketDate(t.date ?? t.submitted_at ?? t.created_at ?? 0);
-          const thisTime = thisDate ? thisDate.getTime() : 0;
+          const thisDate = new Date(t.date ?? t.submitted_at ?? t.created_at ?? 0).getTime();
           const existing = dedupeMap.get(ticketNo);
           if (!existing) dedupeMap.set(ticketNo, t);
           else {
-            const existingDate = parseTicketDate(existing.date ?? existing.submitted_at ?? existing.created_at ?? 0);
-            const existingTime = existingDate ? existingDate.getTime() : 0;
-            if (thisTime >= existingTime) dedupeMap.set(ticketNo, t);
+            const existingDate = new Date(existing.date ?? existing.submitted_at ?? existing.created_at ?? 0).getTime();
+            if (thisDate >= existingDate) dedupeMap.set(ticketNo, t);
           }
         });
 
         const deduped = Array.from(dedupeMap.values());
 
-        // Map each ticket to structure and prefer outgate timestamp if exists (matching reports array)
-        const mapped = deduped.map((t) => {
-          const ticketNo = t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null);
-          // find outgate row for this ticketNo
-          const matchingOutgates = reports.filter((r) => r.ticketNo && String(r.ticketNo) === String(ticketNo));
-          let chosenOutgate = null;
-          if (matchingOutgates.length > 0) {
-            chosenOutgate = matchingOutgates.reduce((best, cur) => {
-              const bestT = parseTicketDate(best?.outgateDateTime)?.getTime() ?? 0;
-              const curT = parseTicketDate(cur?.outgateDateTime)?.getTime() ?? 0;
-              return curT >= bestT ? cur : best;
-            }, matchingOutgates[0]);
-          }
+        const mapped = deduped
+          .map((t) => {
+            const ticketNo = t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null);
+            const matchingOutgates = reports.filter((r) => r.ticketNo && String(r.ticketNo) === String(ticketNo));
+            let chosenOutgate = null;
+            if (matchingOutgates.length > 0) {
+              chosenOutgate = matchingOutgates.reduce((best, cur) => {
+                const bestT = best?.outgateDateTime ? new Date(best.outgateDateTime).getTime() : 0;
+                const curT = cur?.outgateDateTime ? new Date(cur.outgateDateTime).getTime() : 0;
+                return curT >= bestT ? cur : best;
+              }, matchingOutgates[0]);
+            }
 
-          const computed = computeWeights({
-            gross: t.gross,
-            tare: t.tare,
-            net: t.net,
+            const computed = computeWeights({
+              gross: t.gross,
+              tare: t.tare,
+              net: t.net,
+            });
+
+            return {
+              ticketId: t.ticket_id ?? t.id ?? ticketNo ?? `${Math.random()}`,
+              ticketNo,
+              sadNo: t.sad_no ?? t.sadNo ?? null,
+              date: chosenOutgate ? chosenOutgate.outgateDateTime : (t.date ?? t.submitted_at ?? t.created_at ?? null),
+              outgateRef: chosenOutgate ?? null,
+              truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
+              gross: computed.gross,
+              tare: computed.tare,
+              net: computed.net,
+              driver: t.driver ?? null,
+              raw: t,
+            };
           });
 
-          // choose display date preference: chosenOutgate.outgateDateTime else t.date/submitted_at/created_at
-          let displayDate = null;
-          if (chosenOutgate && chosenOutgate.outgateDateTime) displayDate = chosenOutgate.outgateDateTime;
-          else displayDate = t.date ?? t.submitted_at ?? t.created_at ?? null;
-
-          return {
-            ticketId: t.ticket_id ?? t.id ?? ticketNo ?? `${Math.random()}`,
-            ticketNo,
-            sadNo: t.sad_no ?? t.sadNo ?? null,
-            date: displayDate,
-            outgateRef: chosenOutgate ?? null,
-            truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
-            gross: computed.gross,
-            tare: computed.tare,
-            net: computed.net,
-            driver: t.driver ?? null,
-            raw: t,
-          };
-        });
-
-        // Sort newest first using parsed date heuristics
         mapped.sort((a, b) => {
-          const aT = parseTicketDate(a.date)?.getTime() ?? 0;
-          const bT = parseTicketDate(b.date)?.getTime() ?? 0;
+          const aT = a.date ? new Date(a.date).getTime() : 0;
+          const bT = b.date ? new Date(b.date).getTime() : 0;
           return bT - aT;
         });
 
         setSadResults(mapped);
 
-        // Fetch SAD declaration metadata (if any)
-        try {
-          const { data: sadRow, error: sadErr } = await supabase
-            .from('sad_declarations')
-            .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
-            .ilike('sad_no', `${q}`)
-            .maybeSingle();
-          if (!sadErr && sadRow) {
-            setSadDeclaration({
-              declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
-              status: sadRow.status ?? 'Unknown',
-              exists: true,
-              total_recorded_weight: sadRow.total_recorded_weight ?? null,
-              created_at: sadRow.created_at ?? null,
-            });
-          } else {
-            setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-          }
-        } catch (e) {
-          setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
-        }
+        await fetchSadDeclaration();
       } catch (err) {
         console.error('SAD search failed', err);
         setSadResults([]);
-        setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+        await fetchSadDeclaration();
       } finally {
         setSadLoading(false);
       }
@@ -628,39 +501,25 @@ export default function WeightReports() {
 
   const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
 
-  // Build start/end Date objects (Time From -> Date From; Time To -> Date To)
   const { startDateTime, endDateTime } = useMemo(() => {
     let start = null;
     let end = null;
 
     if (dateFrom) {
-      start = makeDateTime(dateFrom, timeFrom ? `${timeFrom}` : '00:00:00', true);
+      start = makeDateTime(dateFrom, timeFrom ? `${timeFrom}:00` : '00:00:00', true);
     }
 
     if (dateTo) {
-      end = makeDateTime(dateTo, timeTo ? `${timeTo}` : '23:59:59.999', false);
+      end = makeDateTime(dateTo, timeTo ? `${timeTo}:00` : '23:59:59.999', false);
     }
 
     return { startDateTime: start, endDateTime: end };
   }, [dateFrom, dateTo, timeFrom, timeTo]);
 
-  // Helper: check any candidate date fields for a row/ticket and return first that parses
-  function getFirstCandidateDate(obj, keys = []) {
-    for (const k of keys) {
-      const v = obj?.[k];
-      const p = parseTicketDate(v);
-      if (p) return p;
-    }
-    return null;
-  }
-
-  // Filtered reports: when date range is provided, check multiple candidate fields (outgateDateTime, rawRow.date, rawRow.submitted_at, rawRow.created_at)
   const filteredReports = useMemo(() => {
     const term = (searchTerm || '').trim().toLowerCase();
-    const s = startDateTime;
-    const e = endDateTime;
 
-    let results = dedupedReports.filter((r) => {
+    return dedupedReports.filter((r) => {
       if (term) {
         const hay = [
           r.vehicleNumber,
@@ -673,65 +532,23 @@ export default function WeightReports() {
         if (!hay.includes(term)) return false;
       }
 
-      if (s || e) {
-        // try candidate timestamps (priority: outgateDateTime, rawRow.date, rawRow.submitted_at, rawRow.created_at)
-        const candidates = [
-          r.outgateDateTime,
-          r.rawRow?.date,
-          r.rawRow?.submitted_at,
-          r.rawRow?.created_at,
-          r.rawRow?.outgate_at,
-        ];
-        let matched = false;
-        for (const c of candidates) {
-          const parsed = parseTicketDate(c);
-          if (!parsed) continue;
-          if (s && parsed < s) continue;
-          if (e && parsed > e) continue;
-          matched = true;
-          break;
-        }
-        return matched;
+      if (startDateTime || endDateTime) {
+        if (!r.outgateDateTime) return false;
+        const d = new Date(r.outgateDateTime);
+        if (Number.isNaN(d.getTime())) return false;
+        if (startDateTime && d < startDateTime) return false;
+        if (endDateTime && d > endDateTime) return false;
       }
 
       return true;
     });
-
-    // If the caller searched (term present) and results are empty, try looser fallback: ignore outgateDateTime preference and check other timestamps more permissively
-    if ((startDateTime || endDateTime) && results.length === 0) {
-      // fallback: include rows where submitted_at or created_at falls in range
-      results = dedupedReports.filter((r) => {
-        if (term) {
-          const hay = [
-            r.vehicleNumber,
-            r.ticketNo,
-            r.driverName,
-            r.sadNo,
-            r.containerId,
-            r.destination,
-          ].filter(Boolean).join(' ').toLowerCase();
-          if (!hay.includes(term)) return false;
-        }
-        const fallbackCandidates = [r.rawRow?.submitted_at, r.rawRow?.created_at, r.rawRow?.date];
-        for (const c of fallbackCandidates) {
-          const parsed = parseTicketDate(c);
-          if (!parsed) continue;
-          if (startDateTime && parsed < startDateTime) continue;
-          if (endDateTime && parsed > endDateTime) continue;
-          return true;
-        }
-        return false;
-      });
-    }
-
-    return results;
   }, [dedupedReports, searchTerm, startDateTime, endDateTime]);
 
   const sortedReports = useMemo(() => {
     const arr = filteredReports.slice();
     arr.sort((a, b) => {
-      const aT = parseTicketDate(a.outgateDateTime)?.getTime() ?? 0;
-      const bT = parseTicketDate(b.outgateDateTime)?.getTime() ?? 0;
+      const aT = a.outgateDateTime ? new Date(a.outgateDateTime).getTime() : 0;
+      const bT = b.outgateDateTime ? new Date(b.outgateDateTime).getTime() : 0;
       return bT - aT;
     });
     return arr;
@@ -746,8 +563,8 @@ export default function WeightReports() {
         if (!map.has(tn)) map.set(tn, r);
         else {
           const existing = map.get(tn);
-          const a = parseTicketDate(existing.outgateDateTime)?.getTime() ?? 0;
-          const b = parseTicketDate(r.outgateDateTime)?.getTime() ?? 0;
+          const a = existing.outgateDateTime ? new Date(existing.outgateDateTime).getTime() : 0;
+          const b = r.outgateDateTime ? new Date(r.outgateDateTime).getTime() : 0;
           if (b > a) map.set(tn, r);
         }
       } else {
@@ -757,73 +574,19 @@ export default function WeightReports() {
     return [...map.values(), ...manual];
   }, [filteredReports]);
 
-  // SAD filtered results similarly check multiple candidate fields and fallback
   const sadFilteredResults = useMemo(() => {
     if (!sadResults || sadResults.length === 0) return [];
     const s = startDateTime;
     const e = endDateTime;
 
-    let filtered = sadResults.filter((t) => {
-      // for each ticket's date, consider several candidates
-      const candidates = [
-        t.date,
-        t.raw?.date,
-        t.raw?.submitted_at,
-        t.raw?.created_at,
-        t.outgateRef?.outgateDateTime,
-        t.outgateRef?.rawRow?.created_at,
-      ];
-      for (const c of candidates) {
-        const parsed = parseTicketDate(c);
-        if (!parsed) continue;
-        if (s && parsed < s) continue;
-        if (e && parsed > e) continue;
-        return true;
-      }
-      return false;
+    return sadResults.filter((t) => {
+      if (!t.date) return false;
+      const d = new Date(t.date);
+      if (Number.isNaN(d.getTime())) return false;
+      if (s && d < s) return false;
+      if (e && d > e) return false;
+      return true;
     });
-
-    // fallback: if date filtering returned zero, be tolerant and try other fields
-    if ((s || e) && filtered.length === 0) {
-      filtered = sadResults.filter((t) => {
-        const fallbackCandidates = [
-          t.raw?.submitted_at,
-          t.raw?.created_at,
-          t.raw?.date,
-        ];
-        for (const c of fallbackCandidates) {
-          const parsed = parseTicketDate(c);
-          if (!parsed) continue;
-          if (s && parsed < s) continue;
-          if (e && parsed > e) continue;
-          return true;
-        }
-        return false;
-      });
-    }
-
-    // Normalize date field for display (choose first candidate that fits or any parsed date)
-    const normalized = filtered.map((t) => {
-      const candidates = [
-        t.date,
-        t.raw?.date,
-        t.raw?.submitted_at,
-        t.raw?.created_at,
-        t.outgateRef?.outgateDateTime,
-        t.outgateRef?.rawRow?.created_at,
-      ];
-      let chosen = null;
-      for (const c of candidates) {
-        const parsed = parseTicketDate(c);
-        if (parsed) {
-          chosen = c;
-          break;
-        }
-      }
-      return { ...t, date: chosen ?? t.date };
-    });
-
-    return normalized;
   }, [sadResults, startDateTime, endDateTime]);
 
   const sadTotalsMemo = useMemo(() => {
@@ -1044,7 +807,7 @@ export default function WeightReports() {
   };
 
   // ------------------------
-  // Voice commands (unchanged)
+  // Voice commands
   // ------------------------
   const startVoice = () => {
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
@@ -1212,104 +975,497 @@ export default function WeightReports() {
     d: { bg: 'linear-gradient(135deg,#f5f3ff 0%, #dbeafe 100%)', border: '1px solid rgba(124,58,237,0.08)' },
   };
 
-  // Render UI (kept similar to your sample, minimal changes)
+  // -------------------------
+  // Render
+  // -------------------------
   return (
-    <Box p={4}>
-      <Box mb={4}>
-        <Text fontSize="xl" fontWeight="bold">Weight Reports</Text>
-        <Text color="gray.600">Unique-ticket view — polished UI.</Text>
-      </Box>
+    <Box p={{ base: 4, md: 8 }} style={{ fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial' }}>
+      {/* Header */}
+      <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
+        <Stack spacing={1}>
+          <Text fontSize="2xl" fontWeight="bold" color="#071126">Outgate Reports</Text>
+          <Text color="gray.500">Unique-ticket view — polished UI.</Text>
+        </Stack>
 
-      <Box mb={4}>
+        <HStack spacing={2}>
+          <Tooltip label="Toggle voice commands">
+            <Button size="sm" variant={listening ? 'solid' : 'outline'} colorScheme={listening ? 'purple' : 'gray'} onClick={() => (listening ? stopVoice() : startVoice())}>
+              {listening ? 'Listening...' : 'Voice'}
+            </Button>
+          </Tooltip>
+
+          <Tooltip label="Generate quick report">
+            <Button size="sm" leftIcon={<DownloadIcon />} colorScheme="teal" onClick={handleExportCsv}>Export CSV</Button>
+          </Tooltip>
+
+          <Button leftIcon={<RepeatIcon />} variant="outline" onClick={handleResetAll} aria-label="Reset filters">
+            Reset
+          </Button>
+        </HStack>
+      </Flex>
+
+      {/* Stats — match ConfirmExit layout but replaced/updated */}
+      <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.a.bg, color: '#041124', border: vividCards.a.border }}>
+          <StatLabel>Total SADs</StatLabel>
+          <StatNumber>{totalSADs != null ? totalSADs : '—'}</StatNumber>
+          <StatHelpText>Total registered SAD declarations</StatHelpText>
+        </Stat>
+
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.b.bg, color: '#041124', border: vividCards.b.border }}>
+          <StatLabel>Confirmed Exits</StatLabel>
+          <StatNumber>{exitedCount}</StatNumber>
+          <StatHelpText>Total Exited Trucks</StatHelpText>
+        </Stat>
+
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.c.bg, color: '#041124', border: vividCards.c.border }}>
+          <StatLabel>Total Declared Weight</StatLabel>
+          <StatNumber>{totalDeclaredWeight != null ? `${formatWeight(totalDeclaredWeight)} kg` : '—'}</StatNumber>
+          <StatHelpText>Sum of all declared weights</StatHelpText>
+        </Stat>
+
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.d.bg, color: '#041124', border: vividCards.d.border }}>
+          <StatLabel>Total Discharged Weight</StatLabel>
+          <StatNumber>{totalDischargedWeight != null ? `${formatWeight(totalDischargedWeight)} kg` : '—'}</StatNumber>
+          <StatHelpText>Sum of all discharged (Nets)</StatHelpText>
+        </Stat>
+      </SimpleGrid>
+
+      {/* SAD mini-stats when searching */}
+      { (searchTerm && (sadResults.length > 0 || sadDeclaration.exists)) && (
+        <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mb={6}>
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(79,70,229,0.06)', bg: 'linear-gradient(135deg,#fff 0%, #fff8ef 100%)' }}>
+            <StatLabel>Declared Weight</StatLabel>
+            <StatNumber>{formatWeight(sadDeclaration.declaredWeight)}</StatNumber>
+            <StatHelpText>{sadDeclaration.exists ? 'From SAD declaration' : 'No declaration found'}</StatHelpText>
+          </Stat>
+
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(6,182,212,0.06)', bg: 'linear-gradient(135deg,#f0f9ff 0%, #ecfeff 100%)' }}>
+            <StatLabel>Discharged Weight</StatLabel>
+            <StatNumber>{formatWeight(sadTotalsMemo.cumulativeNet)} kg</StatNumber>
+            <StatHelpText>Sum of Nets from all transactions</StatHelpText>
+          </Stat>
+
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(16,185,129,0.06)', bg: 'linear-gradient(135deg,#f0fff4 0%, #e6ffef 100%)' }}>
+            <StatLabel>SAD Status</StatLabel>
+            <StatNumber>{sadDeclaration.status || (sadResults.length ? 'In Progress' : 'Unknown')}</StatNumber>
+            <StatHelpText>{sadDeclaration.exists ? 'Declaration row found' : (sadResults.length ? 'No declaration - tickets found' : 'No data')}</StatHelpText>
+          </Stat>
+        </SimpleGrid>
+      )}
+
+      {/* Controls */}
+      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
-          <Input placeholder="SAD Search" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
           <Box>
-            <FormLabel>Date From</FormLabel>
-            <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            <FormLabel>Search</FormLabel>
+            <Flex>
+              <Input
+                placeholder="Search here (ticket, truck, sad...)"
+                value={searchTerm}
+                onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+              />
+              <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { setCurrentPage(1); }} />
+            </Flex>
+            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see totals below.</Text>
           </Box>
+
           <Box>
-            <FormLabel>Date To</FormLabel>
-            <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            <FormLabel>Date range</FormLabel>
+            <Flex gap={2}>
+              <Input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setCurrentPage(1); }} />
+              <Input type="date" value={dateTo} onChange={(e) => { setDateTo(e.target.value); setCurrentPage(1); }} />
+            </Flex>
           </Box>
+
           <Box>
-            <FormLabel>Time From</FormLabel>
-            <Input type="time" value={timeFrom} onChange={(e) => setTimeFrom(e.target.value)} />
+            <FormLabel>Time range</FormLabel>
+            <Flex gap={2}>
+              <Input type="time" value={timeFrom} onChange={(e) => { setTimeFrom(e.target.value); setCurrentPage(1); }} />
+              <Input type="time" value={timeTo} onChange={(e) => { setTimeTo(e.target.value); setCurrentPage(1); }} />
+            </Flex>
+          
           </Box>
+
           <Box>
-            <FormLabel>Time To</FormLabel>
-            <Input type="time" value={timeTo} onChange={(e) => setTimeTo(e.target.value)} />
+            <FormLabel>Page size</FormLabel>
+            <HStack>
+              <Select value={itemsPerPage} onChange={(e) => { setItemsPerPage(Number(e.target.value)); setCurrentPage(1); }}>
+                {[5, 10, 20, 50].map(n => <option key={n} value={n}>{n} / page</option>)}
+              </Select>
+            </HStack>
           </Box>
         </SimpleGrid>
-
-        <Flex mt={3} gap={2}>
-          <Button colorScheme="teal" onClick={() => { /* manual generate can just set searchTerm to trigger effect above */ }}>Search</Button>
-          <Button onClick={handleResetAll}>Reset</Button>
-          <Text ml="auto" color="gray.500">Tip: Narrow by date/time, then export.</Text>
-        </Flex>
       </Box>
 
-      <Box className="glass-card" p={3}>
+      {/* SAD results (if any) */}
+      {sadLoading ? (
+        <Flex justify="center" mb={4}><Spinner /></Flex>
+      ) : (sadFilteredResults && sadFilteredResults.length > 0) ? (
+        <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+          <Flex align="center" justify="space-between" mb={3} gap={3} wrap="wrap">
+            <Box>
+              <Text fontWeight="semibold">SAD Search: <Text as="span" fontWeight="bold">{searchTerm}</Text></Text>
+              <Text fontSize="sm" color="gray.600"></Text>
+            </Box>
+
+            <HStack spacing={4}>
+              <Box textAlign="right">
+                <Text fontSize="sm" color="gray.500">No. of Transacts</Text>
+                <Text fontWeight="bold">{sadTotalsMemo.transactions}</Text>
+              </Box>
+              <Box textAlign="right">
+                <Text fontSize="sm" color="gray.500">Total Discharged</Text>
+                <Text fontWeight="bold">{formatWeight(sadTotalsMemo.cumulativeNet)} kg</Text>
+              </Box>
+
+              <Button size="sm" leftIcon={<FaFilePdf />} onClick={handlePrintSad}>Print PDF</Button>
+              <Button size="sm" onClick={handleExportSadCsv}>Export CSV</Button>
+            </HStack>
+          </Flex>
+
+          <Box overflowX="auto">
+            <Table variant="striped" size="sm">
+              <Thead>
+                <Tr>
+                  <Th>Ticket</Th>
+                  <Th>Date & Time</Th>
+                  <Th>Truck</Th>
+                  <Th isNumeric>Gross</Th>
+                  <Th isNumeric>Tare</Th>
+                  <Th isNumeric>Net</Th>
+                  <Th>Driver</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                {sadFilteredResults.map((t) => (
+                  <Tr key={t.ticketId}>
+                    <Td>{t.ticketNo ?? '—'}</Td>
+                    <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
+                    <Td>{t.truck ?? '—'}</Td>
+                    <Td isNumeric>{t.gross != null ? formatWeight(t.gross) : '—'}</Td>
+                    <Td isNumeric>{t.tare != null ? formatWeight(t.tare) : '—'}</Td>
+                    <Td isNumeric>{t.net != null ? formatWeight(t.net) : '—'}</Td>
+                    <Td>{t.driver ?? '—'}</Td>
+                  </Tr>
+                ))}
+              </Tbody>
+            </Table>
+          </Box>
+        </Box>
+      ) : null}
+
+      {/* Unique-ticket view */}
+      <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
+        <Flex justify="space-between" align="center" mb={3} wrap="wrap">
+          <Text fontWeight="semibold">Unique-ticket view</Text>
+          <HStack>
+            <Text fontSize="sm" color="gray.500">Showing {uniqueFilteredReports.length} items</Text>
+            <Button size="sm" onClick={handleExportCsv}>Export CSV</Button>
+          </HStack>
+        </Flex>
+
         {loading ? (
-          <Flex align="center" justify="center"><Spinner /></Flex>
+          <Flex justify="center" p={8}><Spinner /></Flex>
         ) : (
           <>
-            <Flex justify="space-between" align="center" mb={3}>
-              <Text fontWeight="bold">Results</Text>
-              <HStack>
-                <Button onClick={handleExportCsv} leftIcon={<DownloadIcon />}>Export CSV</Button>
-                <Button onClick={handlePrintSad} leftIcon={<FaFilePdf />}>Print SAD</Button>
-              </HStack>
-            </Flex>
+            {/* responsive cards for small screens */}
+            <Box display={{ base: 'block', md: 'none' }}>
+              <Stack spacing={3}>
+                {uniqueFilteredReports.map((r) => (
+                  <ReportCard key={r.ticketNo ?? r.id ?? Math.random()} r={r} />
+                ))}
+              </Stack>
+            </Box>
 
-            {statsSource.length === 0 ? (
-              <Text>No records found for: {searchTerm}</Text>
-            ) : (
-              <>
-                <Text mb={2}>No. of Transacts: {statsSource.length}</Text>
-                <Text mb={2}>Total Discharged: {formatWeight(statsTotals.cumulativeNet)} kg</Text>
+            {/* table for md+ */}
+            <Box display={{ base: 'none', md: 'block' }} overflowX="auto">
+              <Table variant="striped" size="sm">
+                <Thead>
+                  <Tr>
+                    <Th>Ticket</Th>
+                    <Th>Date & Time</Th>
+                    <Th>Truck</Th>
+                    <Th isNumeric>Gross</Th>
+                    <Th isNumeric>Tare</Th>
+                    <Th isNumeric>Net</Th>
+                    <Th>Driver</Th>
+                    <Th>Actions</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {pagedUniqueReports.map((r) => {
+                    const { gross, tare, net } = computeWeights(r);
+                    return (
+                      <Tr key={r.ticketNo ?? r.id ?? Math.random()}>
+                        <Td>{r.ticketNo ?? '—'}</Td>
+                        <Td>{r.outgateDateTime ? new Date(r.outgateDateTime).toLocaleString() : '—'}</Td>
+                        <Td>{r.vehicleNumber ?? r.truck ?? '—'}</Td>
+                        <Td isNumeric>{gross != null ? formatWeight(gross) : '—'}</Td>
+                        <Td isNumeric>{tare != null ? formatWeight(tare) : '—'}</Td>
+                        <Td isNumeric>{net != null ? formatWeight(net) : '—'}</Td>
+                        <Td>{r.driverName ?? '—'}</Td>
+                        <Td>
+                          <HStack>
+                            <Button size="sm" onClick={() => openDetailsFor(r)}>View Details</Button>
+                            <Menu>
+                              <MenuButton as={IconButton} icon={<FaEllipsisV />} size="sm" />
+                              <MenuList>
+                                <MenuItem icon={<FaEye />} onClick={() => openDetailsFor(r)}>View Details</MenuItem>
+                                <MenuItem icon={<FaFileAlt />} onClick={() => openDocsFor(r)}>View Docs</MenuItem>
+                              </MenuList>
+                            </Menu>
+                          </HStack>
+                        </Td>
+                      </Tr>
+                    );
+                  })}
+                </Tbody>
+              </Table>
 
-                <Table size="sm">
-                  <Thead>
-                    <Tr>
-                      <Th>Ticket No</Th>
-                      <Th>Truck</Th>
-                      <Th>Date & Time</Th>
-                      <Th isNumeric>Net (kg)</Th>
-                      <Th>Actions</Th>
-                    </Tr>
-                  </Thead>
-                  <Tbody>
-                    {statsSource.slice(pageStart, pageEnd).map((r) => {
-                      const w = computeWeights(r);
-                      const d = r.outgateDateTime || r.rawRow?.submitted_at || r.rawRow?.date || r.rawRow?.created_at || null;
-                      const parsed = parseTicketDate(d);
-                      return (
-                        <Tr key={r.ticketId || r.ticketNo}>
-                          <Td>{r.ticketNo}</Td>
-                          <Td>{r.vehicleNumber}</Td>
-                          <Td>{parsed ? parsed.toLocaleString() : '—'}</Td>
-                          <Td isNumeric>{formatWeight(w.net)}</Td>
-                          <Td>
-                            <Button size="sm" onClick={() => openDetailsFor(r)}>View</Button>
-                          </Td>
-                        </Tr>
-                      );
-                    })}
-                  </Tbody>
-                </Table>
-
-                <Flex justify="space-between" align="center" mt={3}>
-                  <Text>Page {currentPage} / {totalPages}</Text>
-                  <HStack>
-                    <Button size="sm" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}>Prev</Button>
-                    <Button size="sm" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}>Next</Button>
-                  </HStack>
-                </Flex>
-              </>
-            )}
+              {/* pagination */}
+              <Flex justify="center" align="center" mt={4} gap={3}>
+                <Button size="sm" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} isDisabled={currentPage === 1}>Prev</Button>
+                <Text fontSize="sm">Page {currentPage} of {totalPages}</Text>
+                <Button size="sm" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} isDisabled={currentPage === totalPages}>Next</Button>
+              </Flex>
+            </Box>
           </>
         )}
       </Box>
+
+      {/* Details modal */}
+      <Modal isOpen={isDetailsOpen} onClose={() => { onDetailsClose(); setSelectedReport(null); }} size="4xl" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Report Details</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            {selectedReport ? (
+              <Stack spacing={3}>
+                <Flex justify="space-between" align="center" gap={4} flexWrap="wrap">
+                  <Stack>
+                    <Text fontSize="lg" fontWeight="bold">{selectedReport.vehicleNumber || '—'}</Text>
+                    <Text color="gray.600">{selectedReport.ticketNo ? `Ticket: ${selectedReport.ticketNo}` : 'No ticket'}</Text>
+                    <Text color="gray.600">{selectedReport.destination}</Text>
+                  </Stack>
+                  <Stack textAlign="right">
+                    <Text fontSize="sm" color="gray.500">Exit</Text>
+                    <Text fontWeight="semibold">{selectedReport.outgateDateTime ? new Date(selectedReport.outgateDateTime).toLocaleString() : '—'}</Text>
+                    <Badge colorScheme="teal">{selectedReport.sadNo ?? 'No SAD'}</Badge>
+                  </Stack>
+                </Flex>
+
+                <Divider />
+
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
+                  <Box>
+                    <Text fontWeight="semibold">Driver</Text>
+                    <Text>{selectedReport.driverName ?? selectedReport.driver ?? '—'}</Text>
+                    <Text mt={3} fontWeight="semibold">Consignee</Text>
+                    <Text>{selectedReport.destination ?? '—'}</Text>
+                  </Box>
+
+                  <Box>
+                    <Text fontWeight="semibold">Container</Text>
+                    <Text>{selectedReport.containerId ?? '—'}</Text>
+
+                    <Text mt={3} fontWeight="semibold">Remarks</Text>
+                    <Text>{selectedReport.remarks || '—'}</Text>
+                  </Box>
+                </SimpleGrid>
+
+                <Divider />
+
+                <Text fontWeight="semibold">Weight Details (kg)</Text>
+                <Box>
+                  {(() => {
+                    const { gross, tare, net } = computeWeights(selectedReport);
+                    return (
+                      <>
+                        <Text><b>Gross (KG):</b> {formatWeight(gross)}</Text>
+                        <Text><b>Tare (KG):</b> {formatWeight(tare)}</Text>
+                        <Text><b>Net (KG):</b> {formatWeight(net)}</Text>
+                      </>
+                    );
+                  })()}
+                </Box>
+
+                <Divider />
+
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3}>
+                  <Box>
+                    <Text fontWeight="semibold">Exited By</Text>
+                    <Text>
+                      {selectedReport.exitedBy
+                        ?? selectedReport.outgateRef?.rawRow?.edited_by
+                        ?? selectedReport.rawRow?.edited_by
+                        ?? '—'}
+                    </Text>
+                  </Box>
+
+                  <Box>
+                    <Text fontWeight="semibold">Exit Time</Text>
+                    <Text>{selectedReport.outgateDateTime ? new Date(selectedReport.outgateDateTime).toLocaleString() : '—'}</Text>
+                  </Box>
+                </SimpleGrid>
+
+                {selectedReport.fileUrl && (
+                  <>
+                    <Divider />
+                    <Text fontWeight="semibold">Attachment</Text>
+                    <Box border="1px solid" borderColor="gray.200" borderRadius="md" overflow="hidden" minH="300px">
+                      <iframe
+                        src={selectedReport.fileUrl}
+                        width="100%"
+                        height="100%"
+                        style={{ border: 'none', minHeight: 300 }}
+                        title="Outgate attachment"
+                      />
+                    </Box>
+                  </>
+                )}
+              </Stack>
+            ) : (
+              <Text>No report selected.</Text>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={() => { onDetailsClose(); setSelectedReport(null); }}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Docs modal */}
+      <Modal isOpen={isDocsOpen} onClose={() => { onDocsClose(); setDocsForView([]); }} size="lg" scrollBehavior="inside">
+        <ModalOverlay />
+        <ModalContent>
+          <ModalHeader>Documents</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            {(!docsForView || !docsForView.length) ? (
+              <Text color="gray.500">No documents attached</Text>
+            ) : (
+              <Stack spacing={3}>
+                {docsForView.map((d, i) => (
+                  <Box key={i} p={2} border="1px solid" borderColor="gray.100" borderRadius="md">
+                    <Flex justify="space-between" align="center">
+                      <Box>
+                        <Text fontWeight="semibold">{d.name || `Doc ${i+1}`}</Text>
+                        <Text fontSize="sm" color="gray.600">{d.url}</Text>
+                      </Box>
+                      <HStack>
+                        <Button size="sm" onClick={() => window.open(d.url, '_blank')}>Open</Button>
+                        <Button size="sm" variant="ghost" onClick={() => {
+                          const a = document.createElement('a');
+                          a.href = d.url;
+                          a.download = d.name || '';
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                        }}>Download</Button>
+                      </HStack>
+                    </Flex>
+                  </Box>
+                ))}
+              </Stack>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button onClick={() => { onDocsClose(); setDocsForView([]); }}>Close</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Floating crystal orb CTA */}
+      <Box position="fixed" bottom="28px" right="28px" zIndex={2200} display="flex" alignItems="center" gap={3}>
+        <MotionBox
+          onClick={onOrbOpen}
+          whileHover={{ scale: 1.07 }}
+          whileTap={{ scale: 0.95 }}
+          cursor="pointer"
+          width="64px"
+          height="64px"
+          borderRadius="999px"
+          display="flex"
+          alignItems="center"
+          justifyContent="center"
+          boxShadow="0 10px 30px rgba(59,130,246,0.18)"
+          style={{ background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', color: '#fff', transformOrigin: 'center' }}
+          title="Quick generate"
+          animate={{ y: [0, -6, 0] }}
+          transition={{ repeat: Infinity, duration: 3, ease: 'easeInOut' }}
+        >
+          <Box fontSize="24px" fontWeight="700">✺</Box>
+        </MotionBox>
+      </Box>
+
+      {/* Orb holographic modal */}
+      <Modal isOpen={isOrbOpen} onClose={onOrbClose} isCentered>
+        <ModalOverlay />
+        <ModalContent bg="transparent" boxShadow="none">
+          <AnimatePresence>
+            <MotionBox
+              initial={{ opacity: 0, y: 40 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 40 }}
+              borderRadius="xl"
+              overflow="hidden"
+              style={{
+                background: 'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02))',
+                border: '1px solid rgba(255,255,255,0.06)',
+                backdropFilter: 'blur(8px)',
+                padding: 18,
+                width: 640,
+                maxWidth: '94vw',
+              }}
+            >
+              <MotionBox mb={3} initial={{ rotateY: 0 }} animate={{ rotateY: 4 }} style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                <Box width="72px" height="72px" borderRadius="12px" bg="#0ea5a0" display="flex" alignItems="center" justifyContent="center" color="#fff">
+                  <img src={logoUrl} alt="logo" style={{ width: 48 }} />
+                </Box>
+                <Box>
+                  <Text fontSize="lg" fontWeight="bold">Generate Quick Outgate Report</Text>
+                  <Text fontSize="sm" color="gray.300">Create/export & log a quick summary — confetti included.</Text>
+                </Box>
+              </MotionBox>
+
+              <Divider />
+
+              <Box mt={3}>
+                <FormLabel>Report type</FormLabel>
+                <Select defaultValue="Outgate CSV" id="orb-report-type">
+                  <option>Outgate CSV</option>
+                  <option>Outgate PDF</option>
+                  <option>SAD CSV</option>
+                  <option>SAD PDF</option>
+                </Select>
+
+                <FormLabel mt={3}>Include current SAD search (if any)?</FormLabel>
+                <Select id="orb-include-sad" defaultValue="no">
+                  <option value="no">No</option>
+                  <option value="yes">Yes (use search term)</option>
+                </Select>
+              </Box>
+
+              <Flex mt={4} justify="flex-end" gap={2}>
+                <Button variant="ghost" onClick={onOrbClose}>Cancel</Button>
+                <Button
+                  colorScheme="purple"
+                  onClick={() => {
+                    const type = (document.getElementById('orb-report-type')?.value) || 'Outgate CSV';
+                    const includeSadVal = (document.getElementById('orb-include-sad')?.value) || 'no';
+                    handleGenerateFromOrb({ type, includeSad: includeSadVal === 'yes' });
+                  }}
+                  isLoading={orbGenerating}
+                >
+                  Generate
+                </Button>
+              </Flex>
+            </MotionBox>
+          </AnimatePresence>
+        </ModalContent>
+      </Modal>
     </Box>
   );
 }
