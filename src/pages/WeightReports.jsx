@@ -204,13 +204,6 @@ function computeWeightsFromObj({ gross, tare, net }) {
 
 /**
  * parseTicketDate (robust)
- *
- * Handles:
- * - Date object and numeric timestamps
- * - "YYYY-MM-DD HH:MM:SS(.sss)" (database format) — parsed numerically (cross-browser safe)
- * - ISO "YYYY-MM-DDTHH:MM:SS"
- * - "DD/MM/YY(YY) [HH:MM(:SS)]"
- * - fallback to Date constructor
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -222,29 +215,27 @@ function parseTicketDate(raw) {
   const s0 = String(raw).trim();
   if (s0 === '') return null;
 
-  // 1) Strict DB-like: YYYY-MM-DD HH:MM:SS(.sss) or YYYY-MM-DDTHH:MM:SS(.sss)
-  const ymdRegex = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|[+-]\d{2}:\d{2})?$/;
-  const ymdMatch = s0.match(ymdRegex);
-  if (ymdMatch) {
-    const year = Number(ymdMatch[1]);
-    const month = Number(ymdMatch[2]);
-    const day = Number(ymdMatch[3]);
-    const hour = Number(ymdMatch[4]);
-    const minute = Number(ymdMatch[5]);
-    const second = Number(ymdMatch[6]);
-    const ms = ymdMatch[7] ? Number((ymdMatch[7] + '000').slice(0, 3)) : 0; // normalize to ms
-    const d = new Date(year, month - 1, day, hour, minute, second, ms);
-    if (!isNaN(d.getTime())) return d;
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+    const d = new Date(`${s0}T00:00:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
 
-  // 2) ISO-like with space -> convert ' ' => 'T' and try Date
-  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?/.test(s0)) {
+  // ISO-like with time 'YYYY-MM-DD HH:MM:SS' or with milliseconds
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
+    // convert ' ' to 'T' for Date parsing
     const iso = s0.replace(' ', 'T');
     const d = new Date(iso);
     if (!isNaN(d.getTime())) return d;
+
+    // fallback: remove milliseconds and parse
+    const withoutMs = s0.replace(/\.\d+$/, '');
+    const iso2 = withoutMs.replace(' ', 'T');
+    const d2 = new Date(iso2);
+    if (!isNaN(d2.getTime())) return d2;
   }
 
-  // 3) DD/MM/YYYY or DD/MM/YY with optional time
+  // Detect DD/MM/YYYY or DD/MM/YY with optional time e.g. "15/11/25 20:00" or "15/11/2025 20:00:00"
   const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
   const m = s0.match(dmRegex);
   if (m) {
@@ -254,16 +245,19 @@ function parseTicketDate(raw) {
     let hh = m[4] ? parseInt(m[4], 10) : 0;
     let mm = m[5] ? parseInt(m[5], 10) : 0;
     let ss = m[6] ? parseInt(m[6], 10) : 0;
-    if (year < 100) year += 2000;
+    if (year < 100) {
+      // two-digit year -> map to 2000+
+      year += 2000;
+    }
     const dd = new Date(year, month - 1, day, hh, mm, ss);
     if (!isNaN(dd.getTime())) return dd;
   }
 
-  // 4) Generic Date parse fallback
+  // Generic JS date parse
   const d0 = new Date(s0);
   if (!isNaN(d0.getTime())) return d0;
 
-  // 5) numeric-like string timestamp
+  // If raw is numeric string representing timestamp
   const maybeNum = Number(s0);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
@@ -627,37 +621,15 @@ export default function WeightReports() {
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
-    // Build start and end using explicit pairing:
-    // start = dateFrom + timeFrom (or 00:00:00)
-    // end   = dateTo   + timeTo   (or 23:59:59.999)
     let start = null;
     let end = null;
     if (dateFrom) {
-      // prefer timeFrom for dateFrom
-      const tFrom = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
-      start = new Date(`${dateFrom}T${tFrom}`);
-      if (isNaN(start.getTime())) {
-        // fallback if browser can't parse, try manual construction
-        const parts = dateFrom.split('-');
-        if (parts.length === 3) {
-          const yr = Number(parts[0]), mo = Number(parts[1]), da = Number(parts[2]);
-          const tf = tFrom.split(':').map((x) => Number(x));
-          start = new Date(yr, mo - 1, da, tf[0] || 0, tf[1] || 0, tf[2] || 0);
-        }
-      }
+      const fullTime = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
+      start = new Date(`${dateFrom}T${fullTime}`);
     }
     if (dateTo) {
-      const tTo = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
-      end = new Date(`${dateTo}T${tTo}`);
-      if (isNaN(end.getTime())) {
-        const parts = dateTo.split('-');
-        if (parts.length === 3) {
-          const yr = Number(parts[0]), mo = Number(parts[1]), da = Number(parts[2]);
-          const tt = tTo.split(':').map((x) => Number(x));
-          // if milliseconds present in tTo splitting will not include ms — safe fallback
-          end = new Date(yr, mo - 1, da, tt[0] || 23, tt[1] || 59, tt[2] || 59);
-        }
-      }
+      const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
+      end = new Date(`${dateTo}T${fullTime}`);
     }
 
     // If both start and end exist but end is before or equal to start (wrap-around/time overlap),
@@ -677,24 +649,54 @@ export default function WeightReports() {
     const tfMinutes = parseTimeToMinutes(timeFrom);
     const ttMinutes = parseTimeToMinutes(timeTo);
 
-    arr = arr.filter((ticket) => {
-      // prefer submitted_at, fallback to created_at or date in row
-      const rawCandidates = [
-        ticket.data?.submitted_at,
-        ticket.data?.created_at,
-        ticket.data?.date,
-        ticket.data?.submittedAt,
+    // Helper: choose ticket date for filtering.
+    // If a date range is supplied, prefer ticket.data.date (DB field) first, then fallback to submitted_at, created_at, submittedAt.
+    // Otherwise keep the original preferred order starting with submitted_at.
+    function getTicketDateForFiltering(ticket) {
+      const d = ticket?.data || {};
+      const candidatesDateFirst = ['date', 'submitted_at', 'created_at', 'submittedAt', 'createdAt'];
+      const candidatesDefault = ['submitted_at', 'created_at', 'date', 'submittedAt', 'createdAt'];
+      const candidates = (dateFrom || dateTo) ? candidatesDateFirst : candidatesDefault;
+      for (const k of candidates) {
+        const val = d[k];
+        const parsed = parseTicketDate(val);
+        if (parsed) return parsed;
+      }
+      // final fallback: try parsing some common raw fields concatenated (rare)
+      const fallbackStrings = [
+        d.submitted_at,
+        d.date,
+        d.created_at,
+        d.submittedAt,
+        d.createdAt,
+        d.ticketNo,
+        d.ticket_no,
       ];
-      let ticketDate = null;
-      for (const c of rawCandidates) {
-        ticketDate = parseTicketDate(c);
-        if (ticketDate) break;
+      for (const s of fallbackStrings) {
+        const parsed = parseTicketDate(s);
+        if (parsed) return parsed;
       }
-      // defensive: if ticketDate still null, try to coerce if value is an object that has iso string
-      if (!ticketDate && ticket.data && typeof ticket.data === 'object' && ticket.data.submitted_at && typeof ticket.data.submitted_at === 'object' && ticket.data.submitted_at.toString) {
-        ticketDate = parseTicketDate(String(ticket.data.submitted_at));
+      return null;
+    }
+
+    arr = arr.filter((ticket) => {
+      const ticketDate = getTicketDateForFiltering(ticket);
+      if (!ticketDate) {
+        // If the ticket has no parseable date, do not exclude it if user didn't apply a strict date filter.
+        // But if the user DID specify a date range, fallback to trying submitted_at explicitly once more:
+        if (dateFrom || dateTo) {
+          const fallback = parseTicketDate(ticket.data?.submitted_at);
+          if (!fallback) return false;
+          // use fallback
+          if (dateFrom || dateTo) {
+            const s = start ? new Date(start) : new Date(-8640000000000000);
+            const e = end ? new Date(end) : new Date(8640000000000000);
+            return fallback >= s && fallback <= e;
+          }
+          return true;
+        }
+        return true;
       }
-      if (!ticketDate) return false;
 
       if (dateFrom || dateTo) {
         const s = start ? new Date(start) : new Date(-8640000000000000);
@@ -719,8 +721,8 @@ export default function WeightReports() {
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
-        const da = parseTicketDate(a?.data?.submitted_at);
-        const db = parseTicketDate(b?.data?.submitted_at);
+        const da = getPreferredDateForSort(a);
+        const db = getPreferredDateForSort(b);
         if (!da && !db) return 0;
         if (!da) return 1;
         if (!db) return -1;
@@ -741,6 +743,17 @@ export default function WeightReports() {
       }
       return 0;
     };
+
+    // helper for sorting: try to get the most reliable date for sorting (prefer date then submitted_at)
+    function getPreferredDateForSort(ticket) {
+      const d = ticket?.data || {};
+      const tryOrder = ['submitted_at', 'date', 'created_at', 'submittedAt'];
+      for (const k of tryOrder) {
+        const p = parseTicketDate(d[k]);
+        if (p) return p;
+      }
+      return null;
+    }
 
     arr.sort(comparator);
     setFilteredTickets(arr);
@@ -805,6 +818,8 @@ export default function WeightReports() {
           anpr: ticket.truck_on_wb,
           truckNo: ticket.truck_no,
           fileUrl: ticket.file_url || null,
+          // Also preserve raw DB date field if present:
+          date: ticket.date ?? null,
         },
       }));
 
@@ -1245,12 +1260,6 @@ export default function WeightReports() {
       setPdfGenerating(false);
     }
   };
-
-  // rest of file ... (unchanged from your Part 2) — CSV/export, edit/delete, UI rendering, modals, etc.
-  // (For brevity I kept the remainder identical to your previous version; nothing else was changed.)
-  // ... (you can drop the remainder of the file you already have here; the important changes are parseTicketDate & computeFilteredTickets)
-
-
 
   // ----------------- CSV export (unchanged columns; operator included if present) -----------------
   const exportCsv = async () => {
