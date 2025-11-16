@@ -650,8 +650,20 @@ export default function ConfirmExit() {
           });
           try {
             await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', payload.ticket_id);
+
+            // Immediately reflect change in UI so row disappears
+            setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== payload.ticket_id));
+            setAllTickets((prev) => prev.filter((t) => t.ticket_id !== payload.ticket_id));
+            setSelectedPending((prev) => {
+              const next = new Set(prev);
+              next.delete(payload.ticket_id);
+              return next;
+            });
+
             await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
-          } catch (e) {}
+          } catch (e) {
+            console.warn('mark exited after existing outgate failed', e);
+          }
           onClose();
           return;
         }
@@ -667,26 +679,25 @@ export default function ConfirmExit() {
         await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
       }
 
-      // SUCCESS: Immediately update local UI so the row disappears (fixes "still in table" issue)
       toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no}`, status: 'success', duration: 3000, isClosable: true });
 
-      const removedTicketId = selectedTicket.ticket_id;
-
-      if (removedTicketId) {
-        // remove from filteredResults and allTickets instantly
-        setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== removedTicketId));
-        setAllTickets((prev) => prev.filter((t) => t.ticket_id !== removedTicketId));
-        // remove selection if present
+      // Instantly remove from UI (fixes "not leaving table" issue)
+      if (selectedTicket.ticket_id) {
+        setFilteredResults((prev) =>
+          prev.filter((t) => t.ticket_id !== selectedTicket.ticket_id)
+        );
+        setAllTickets((prev) =>
+          prev.filter((t) => t.ticket_id !== selectedTicket.ticket_id)
+        );
         setSelectedPending((prev) => {
           const next = new Set(prev);
-          next.delete(removedTicketId);
+          next.delete(selectedTicket.ticket_id);
           return next;
         });
       }
 
-      // refresh counters/lists in background (still awaited so UI is consistent)
+      // Allow Supabase async refresh to kick in afterward
       await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
-
       onClose();
     } catch (err) {
       console.error('Confirm exit error:', err);
@@ -730,6 +741,10 @@ export default function ConfirmExit() {
             await supabase.from('outgate').insert([payload]);
           }
           await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', tId);
+
+          // Remove from UI immediately
+          setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== tId));
+          setAllTickets((prev) => prev.filter((t) => t.ticket_id !== tId));
         } catch (e) {
           console.warn('bulk confirm per-ticket failed', tId, e);
         }
@@ -927,6 +942,10 @@ export default function ConfirmExit() {
             await supabase.from('outgate').insert([payload]);
           }
           await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', id);
+
+          // remove from UI immediately
+          setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== id));
+          setAllTickets((prev) => prev.filter((t) => t.ticket_id !== id));
         } catch (e) {
           console.warn('orb confirm per-ticket failed', id, e);
         }
@@ -1441,7 +1460,7 @@ export default function ConfirmExit() {
       <Flex align="center" justify="space-between" mt={10} mb={4} gap={4} flexWrap="wrap">
         <Heading size="md">Confirmed Exits</Heading>
         <HStack spacing={2}>
-          <Input placeholder="Search confirmed by Truck, Driver, SAD, or Ticket No (live)" value={confirmedQuery} onChange={(e) => { setConfirmedQuery(e.target.value); setConfirmedPage(1); }} size="sm" maxW="380px" />
+          <Input placeholder="Search confirmed by Truck, Driver, SAD, or Ticket No (live)" value={confirmedQuery} onChange={(e) => { setConfirmedQuery(e.target.value); setConfirmedPage(1); }} size="sm" maxW="380px" /> 
           <Button size="sm" onClick={() => { setConfirmedQuery(''); setConfirmedPage(1); }}>Clear</Button>
           <Button size="sm" variant="ghost" onClick={() => {
             if (!selectedConfirmed.size) return toast({ title: 'No selection', status: 'info' });
