@@ -210,7 +210,7 @@ function parseTicketDate(raw) {
   }
 
   // handle "DD/MM/YYYY" or "D/M/YY" with optional time
-  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?$/;
+  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.(\d{1,3}))?)?$/;
   const m = s.match(dmRegex);
   if (m) {
     let day = parseInt(m[1], 10);
