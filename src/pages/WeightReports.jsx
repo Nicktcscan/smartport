@@ -215,20 +215,42 @@ function parseTicketDate(raw) {
   const s0 = String(raw).trim();
   if (s0 === '') return null;
 
+  // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
     const d = new Date(`${s0}T00:00:00`);
     return isNaN(d.getTime()) ? null : d;
   }
 
+  // ISO-like with time 'YYYY-MM-DD HH:MM:SS'
   if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
     const iso = s0.replace(' ', 'T');
     const d = new Date(iso);
     if (!isNaN(d.getTime())) return d;
   }
 
+  // Detect DD/MM/YYYY or DD/MM/YY with optional time e.g. "15/11/25 20:00" or "15/11/2025 20:00:00"
+  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+  const m = s0.match(dmRegex);
+  if (m) {
+    let day = parseInt(m[1], 10);
+    let month = parseInt(m[2], 10);
+    let year = parseInt(m[3], 10);
+    let hh = m[4] ? parseInt(m[4], 10) : 0;
+    let mm = m[5] ? parseInt(m[5], 10) : 0;
+    let ss = m[6] ? parseInt(m[6], 10) : 0;
+    if (year < 100) {
+      // two-digit year -> map to 2000+
+      year += 2000;
+    }
+    const dd = new Date(year, month - 1, day, hh, mm, ss);
+    if (!isNaN(dd.getTime())) return dd;
+  }
+
+  // Generic JS date parse
   const d0 = new Date(s0);
   if (!isNaN(d0.getTime())) return d0;
 
+  // If raw is numeric string representing timestamp
   const maybeNum = Number(s0);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
@@ -463,6 +485,8 @@ export default function WeightReports() {
   const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
   const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
 
+  const searchDebounceRef = useRef(null);
+
   // Style injection (glassmorphism + orb + 3D panels)
   useEffect(() => {
     const css = `
@@ -567,11 +591,13 @@ export default function WeightReports() {
     }
     let arr = (baseArr || originalTickets).slice();
 
+    // driver filter
     if (searchDriver && searchDriver.trim()) {
       const q = searchDriver.trim().toLowerCase();
       arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
 
+    // truck filter
     if (searchTruck && searchTruck.trim()) {
       const q = searchTruck.trim().toLowerCase();
       arr = arr.filter((t) => {
@@ -617,8 +643,22 @@ export default function WeightReports() {
     const ttMinutes = parseTimeToMinutes(timeTo);
 
     arr = arr.filter((ticket) => {
-      const raw = ticket.data.submitted_at;
-      const ticketDate = parseTicketDate(raw);
+      // prefer submitted_at, fallback to created_at or date in row
+      const rawCandidates = [
+        ticket.data?.submitted_at,
+        ticket.data?.created_at,
+        ticket.data?.date,
+        ticket.data?.submittedAt,
+      ];
+      let ticketDate = null;
+      for (const c of rawCandidates) {
+        ticketDate = parseTicketDate(c);
+        if (ticketDate) break;
+      }
+      if (!ticketDate) {
+        // as last resort, try parsing ticket-level fields as a concatenation (rare)
+        ticketDate = parseTicketDate(JSON.stringify(ticket.data));
+      }
       if (!ticketDate) return false;
 
       if (dateFrom || dateTo) {
@@ -888,6 +928,36 @@ export default function WeightReports() {
     }
   };
 
+  // ---------------------------------------
+  // Dynamic behavior: debounce SAD input to auto-search
+  useEffect(() => {
+    // Clear previous timer
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    // If empty, clear lists (user wants nothing)
+    if (!searchSAD || !searchSAD.trim()) {
+      setOriginalTickets([]);
+      setFilteredTickets([]);
+      setReportMeta({});
+      return;
+    }
+    // Debounce call to handleGenerateReport
+    searchDebounceRef.current = setTimeout(() => {
+      void handleGenerateReport();
+    }, 400);
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchSAD]);
+
+  // ---------------------------------------
+  // Whenever original tickets or filter inputs change, recompute filtered tickets live
+  useEffect(() => {
+    computeFilteredTickets(originalTickets);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [originalTickets, searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir]);
+
+  // ---------------------------------------
   const applyRange = () => computeFilteredTickets();
   const resetRange = () => {
     setDateFrom('');
