@@ -204,6 +204,13 @@ function computeWeightsFromObj({ gross, tare, net }) {
 
 /**
  * parseTicketDate (robust)
+ *
+ * Handles:
+ * - Date object and numeric timestamps
+ * - "YYYY-MM-DD HH:MM:SS(.sss)" (database format) — parsed numerically (cross-browser safe)
+ * - ISO "YYYY-MM-DDTHH:MM:SS"
+ * - "DD/MM/YY(YY) [HH:MM(:SS)]"
+ * - fallback to Date constructor
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -215,20 +222,29 @@ function parseTicketDate(raw) {
   const s0 = String(raw).trim();
   if (s0 === '') return null;
 
-  // YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
-    const d = new Date(`${s0}T00:00:00`);
-    return isNaN(d.getTime()) ? null : d;
+  // 1) Strict DB-like: YYYY-MM-DD HH:MM:SS(.sss) or YYYY-MM-DDTHH:MM:SS(.sss)
+  const ymdRegex = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?(?:Z|[+-]\d{2}:\d{2})?$/;
+  const ymdMatch = s0.match(ymdRegex);
+  if (ymdMatch) {
+    const year = Number(ymdMatch[1]);
+    const month = Number(ymdMatch[2]);
+    const day = Number(ymdMatch[3]);
+    const hour = Number(ymdMatch[4]);
+    const minute = Number(ymdMatch[5]);
+    const second = Number(ymdMatch[6]);
+    const ms = ymdMatch[7] ? Number((ymdMatch[7] + '000').slice(0, 3)) : 0; // normalize to ms
+    const d = new Date(year, month - 1, day, hour, minute, second, ms);
+    if (!isNaN(d.getTime())) return d;
   }
 
-  // ISO-like with time 'YYYY-MM-DD HH:MM:SS'
-  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
+  // 2) ISO-like with space -> convert ' ' => 'T' and try Date
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?/.test(s0)) {
     const iso = s0.replace(' ', 'T');
     const d = new Date(iso);
     if (!isNaN(d.getTime())) return d;
   }
 
-  // Detect DD/MM/YYYY or DD/MM/YY with optional time e.g. "15/11/25 20:00" or "15/11/2025 20:00:00"
+  // 3) DD/MM/YYYY or DD/MM/YY with optional time
   const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
   const m = s0.match(dmRegex);
   if (m) {
@@ -238,19 +254,16 @@ function parseTicketDate(raw) {
     let hh = m[4] ? parseInt(m[4], 10) : 0;
     let mm = m[5] ? parseInt(m[5], 10) : 0;
     let ss = m[6] ? parseInt(m[6], 10) : 0;
-    if (year < 100) {
-      // two-digit year -> map to 2000+
-      year += 2000;
-    }
+    if (year < 100) year += 2000;
     const dd = new Date(year, month - 1, day, hh, mm, ss);
     if (!isNaN(dd.getTime())) return dd;
   }
 
-  // Generic JS date parse
+  // 4) Generic Date parse fallback
   const d0 = new Date(s0);
   if (!isNaN(d0.getTime())) return d0;
 
-  // If raw is numeric string representing timestamp
+  // 5) numeric-like string timestamp
   const maybeNum = Number(s0);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
@@ -614,15 +627,37 @@ export default function WeightReports() {
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
+    // Build start and end using explicit pairing:
+    // start = dateFrom + timeFrom (or 00:00:00)
+    // end   = dateTo   + timeTo   (or 23:59:59.999)
     let start = null;
     let end = null;
     if (dateFrom) {
-      const fullTime = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
-      start = new Date(`${dateFrom}T${fullTime}`);
+      // prefer timeFrom for dateFrom
+      const tFrom = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
+      start = new Date(`${dateFrom}T${tFrom}`);
+      if (isNaN(start.getTime())) {
+        // fallback if browser can't parse, try manual construction
+        const parts = dateFrom.split('-');
+        if (parts.length === 3) {
+          const yr = Number(parts[0]), mo = Number(parts[1]), da = Number(parts[2]);
+          const tf = tFrom.split(':').map((x) => Number(x));
+          start = new Date(yr, mo - 1, da, tf[0] || 0, tf[1] || 0, tf[2] || 0);
+        }
+      }
     }
     if (dateTo) {
-      const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
-      end = new Date(`${dateTo}T${fullTime}`);
+      const tTo = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
+      end = new Date(`${dateTo}T${tTo}`);
+      if (isNaN(end.getTime())) {
+        const parts = dateTo.split('-');
+        if (parts.length === 3) {
+          const yr = Number(parts[0]), mo = Number(parts[1]), da = Number(parts[2]);
+          const tt = tTo.split(':').map((x) => Number(x));
+          // if milliseconds present in tTo splitting will not include ms — safe fallback
+          end = new Date(yr, mo - 1, da, tt[0] || 23, tt[1] || 59, tt[2] || 59);
+        }
+      }
     }
 
     // If both start and end exist but end is before or equal to start (wrap-around/time overlap),
@@ -655,9 +690,9 @@ export default function WeightReports() {
         ticketDate = parseTicketDate(c);
         if (ticketDate) break;
       }
-      if (!ticketDate) {
-        // as last resort, try parsing ticket-level fields as a concatenation (rare)
-        ticketDate = parseTicketDate(JSON.stringify(ticket.data));
+      // defensive: if ticketDate still null, try to coerce if value is an object that has iso string
+      if (!ticketDate && ticket.data && typeof ticket.data === 'object' && ticket.data.submitted_at && typeof ticket.data.submitted_at === 'object' && ticket.data.submitted_at.toString) {
+        ticketDate = parseTicketDate(String(ticket.data.submitted_at));
       }
       if (!ticketDate) return false;
 
@@ -1210,6 +1245,12 @@ export default function WeightReports() {
       setPdfGenerating(false);
     }
   };
+
+  // rest of file ... (unchanged from your Part 2) — CSV/export, edit/delete, UI rendering, modals, etc.
+  // (For brevity I kept the remainder identical to your previous version; nothing else was changed.)
+  // ... (you can drop the remainder of the file you already have here; the important changes are parseTicketDate & computeFilteredTickets)
+
+
 
   // ----------------- CSV export (unchanged columns; operator included if present) -----------------
   const exportCsv = async () => {
