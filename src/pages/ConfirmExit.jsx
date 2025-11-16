@@ -445,9 +445,19 @@ export default function ConfirmExit() {
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
   // Exclude confirmed tickets from pending list
+  // NOTE: tightened to also exclude any ticket with status === 'Exited'
   useEffect(() => {
-    const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
-    const unconfirmed = allTickets.filter((t) => !confirmedIds.has(t.ticket_id));
+    const confirmedIds = new Set(
+      confirmedTickets
+        .filter((t) => t.ticket_id)
+        .map((t) => t.ticket_id)
+    );
+
+    const unconfirmed = allTickets.filter((t) =>
+      // hide anything already marked Exited OR already present in confirmed outgate set
+      t.status !== 'Exited' && !confirmedIds.has(t.ticket_id)
+    );
+
     setFilteredResults(unconfirmed);
     setCurrentPage(1);
   }, [allTickets, confirmedTickets]);
@@ -480,6 +490,7 @@ export default function ConfirmExit() {
       const matchesSAD = (ticket.sad_no || '').toLowerCase().includes(searchParams.sadNumber.toLowerCase());
       if (!(matchesVehicle && matchesTicket && matchesSAD)) return false;
       if (confirmedIds.has(ticket.ticket_id)) return false;
+      if (ticket.status === 'Exited') return false;
 
       const dateStr = ticket.date || ticket.submitted_at;
       if (df || dt || tFrom !== null || tTo !== null) {
@@ -509,7 +520,7 @@ export default function ConfirmExit() {
     setTimeFrom('');
     setTimeTo('');
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
-    const unconfirmed = allTickets.filter((t) => !confirmedIds.has(t.ticket_id));
+    const unconfirmed = allTickets.filter((t) => t.status !== 'Exited' && !confirmedIds.has(t.ticket_id));
     setFilteredResults(unconfirmed);
     setCurrentPage(1);
     setSortKey('ticket_no');
