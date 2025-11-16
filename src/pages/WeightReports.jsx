@@ -92,68 +92,19 @@ import {
 
 const MotionModalContent = motion.create(ModalContent);
 
-// --- PDF styles (unchanged; kept from prior file) ---
+// (PDF styles + helpers unchanged — omitted comment for brevity in this header)
 const pdfStyles = StyleSheet.create({
-  page: {
-    paddingTop: 18,
-    paddingBottom: 36,
-    paddingHorizontal: 18,
-    fontSize: 9,
-    fontFamily: 'Helvetica',
-    display: 'flex',
-    flexDirection: 'column',
-    color: '#071126',
-    backgroundColor: '#ffffff',
-  },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
+  page: { paddingTop: 18, paddingBottom: 36, paddingHorizontal: 18, fontSize: 9, fontFamily: 'Helvetica', display: 'flex', flexDirection: 'column', color: '#071126', backgroundColor: '#ffffff' },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   companyBlock: { flexDirection: 'column', marginLeft: 8 },
   companyName: { fontSize: 13, fontWeight: 'bold', color: '#071126' },
-  reportTitle: {
-    fontSize: 12,
-    fontWeight: '800',
-    marginBottom: 8,
-    textAlign: 'center',
-    color: '#071126',
-  },
-  summaryBox: {
-    marginBottom: 10,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: '#e6eef8',
-    backgroundColor: '#fbfdff',
-    borderRadius: 6,
-  },
+  reportTitle: { fontSize: 12, fontWeight: '800', marginBottom: 8, textAlign: 'center', color: '#071126' },
+  summaryBox: { marginBottom: 10, padding: 10, borderWidth: 1, borderColor: '#e6eef8', backgroundColor: '#fbfdff', borderRadius: 6 },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-
   tableOuter: { borderWidth: 1, borderColor: '#dbeafe', borderRadius: 4, overflow: 'hidden', marginBottom: 6 },
-  tableHeader: {
-    flexDirection: 'row',
-    backgroundColor: '#eef2ff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#dbeafe',
-    alignItems: 'center',
-    paddingVertical: 6,
-  },
-  tableRow: {
-    flexDirection: 'row',
-    borderBottomWidth: 1,
-    borderBottomColor: '#f1f5f9',
-    alignItems: 'center',
-    paddingVertical: 6,
-  },
-
-  cellBase: {
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRightWidth: 1,
-    borderRightColor: '#e6eef8',
-  },
-
+  tableHeader: { flexDirection: 'row', backgroundColor: '#eef2ff', borderBottomWidth: 1, borderBottomColor: '#dbeafe', alignItems: 'center', paddingVertical: 6 },
+  tableRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#f1f5f9', alignItems: 'center', paddingVertical: 6 },
+  cellBase: { paddingHorizontal: 6, paddingVertical: 2, borderRightWidth: 1, borderRightColor: '#e6eef8' },
   colTicket: { width: '12%', fontSize: 8 },
   colTruck: { width: '14%', fontSize: 8 },
   colDate: { width: '16%', fontSize: 8 },
@@ -162,7 +113,6 @@ const pdfStyles = StyleSheet.create({
   colNet: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
   colDriver: { width: '14%', fontSize: 8, paddingLeft: 4 },
   colCreated: { width: '14%', fontSize: 8, paddingLeft: 4 },
-
   footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
   logo: { width: 64, height: 64, objectFit: 'contain' },
 });
@@ -236,7 +186,7 @@ function parseTicketDate(raw) {
   }
 
   // DD/MM/YYYY or DD-MM-YYYY with optional time
-  const dmRegex = /^(\d{1,2})[\\/\\-](\d{1,2})[\\/\\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
   const m = s0.match(dmRegex);
   if (m) {
     let day = parseInt(m[1], 10);
@@ -264,7 +214,7 @@ function parseTicketDate(raw) {
   return null;
 }
 
-// Build time helpers
+// parseTimeToMinutes used for time-only filtering
 function parseTimeToMinutes(timeStr) {
   if (!timeStr) return null;
   const parts = String(timeStr).split(':');
@@ -275,16 +225,58 @@ function parseTimeToMinutes(timeStr) {
   return hh * 60 + mm;
 }
 
-// makeDateTime same style as OutgateReports: timeFrom applies to dateFrom, timeTo to dateTo
+/**
+ * makeDateTime: robust — accepts dateStr in either DD/MM/YYYY or YYYY-MM-DD
+ * and timeStr 'HH:MM' or 'HH:MM:SS'. Builds a local Date object with
+ * time applied to the given date (so no timezone-shift surprises).
+ *
+ * defaultTimeIsStart determines default time: 00:00:00 (start) or 23:59:59.999 (end).
+ */
 function makeDateTime(dateStr, timeStr, defaultTimeIsStart = true) {
   if (!dateStr) return null;
-  const time = timeStr ? timeStr : (defaultTimeIsStart ? '00:00:00' : '23:59:59.999');
-  const fullTime = time.length <= 5 ? `${time}:00` : time;
-  return new Date(`${dateStr}T${fullTime}`);
+
+  // Try to parse date-only using parseTicketDate (which handles DD/MM/YYYY)
+  const parsedDateOnly = parseTicketDate(dateStr);
+  if (!parsedDateOnly) return null;
+
+  // Extract date components (local)
+  const Y = parsedDateOnly.getFullYear();
+  const M = parsedDateOnly.getMonth();
+  const D = parsedDateOnly.getDate();
+
+  // Determine time components
+  let hh = 0;
+  let mm = 0;
+  let ss = 0;
+  let ms = defaultTimeIsStart ? 0 : 999;
+
+  if (timeStr && String(timeStr).trim()) {
+    const parts = String(timeStr).split(':');
+    hh = Number(parts[0] || 0);
+    mm = Number(parts[1] || 0);
+    if (parts[2]) {
+      const secParts = parts[2].split('.');
+      ss = Number(secParts[0] || 0);
+      if (secParts[1]) {
+        const msStr = (secParts[1] + '000').slice(0, 3);
+        ms = Number(msStr);
+      }
+    } else {
+      // default subsecond behavior
+      ms = defaultTimeIsStart ? 0 : 999;
+    }
+    if (Number.isNaN(hh)) hh = 0;
+    if (Number.isNaN(mm)) mm = 0;
+    if (Number.isNaN(ss)) ss = 0;
+    if (Number.isNaN(ms)) ms = defaultTimeIsStart ? 0 : 999;
+  }
+
+  // Build local date/time without ambiguity
+  return new Date(Y, M, D, hh, mm, ss, ms);
 }
 
 // -------------------------------------------
-// PDF components (unchanged from earlier)
+// PDF components (unchanged from prior file)
 // -------------------------------------------
 function PdfTicketRow({ ticket }) {
   const d = ticket.data || {};
@@ -628,7 +620,7 @@ export default function WeightReports() {
       const toM = parseTimeToMinutes(timeTo) ?? (24 * 60 - 1);
 
       arr = arr.filter((ticket) => {
-        // prefer submitted_at then date for time-only comparisons (works with Outgate pattern)
+        // prefer submitted_at then date for time-only comparisons
         const ticketDate = getParsedDateFromCandidates(ticket, ['submitted_at', 'date', 'created_at']);
         if (!ticketDate) return false;
         const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
@@ -729,14 +721,13 @@ export default function WeightReports() {
           anpr: ticket.truck_on_wb,
           truckNo: ticket.truck_no,
           fileUrl: ticket.file_url || null,
-          date: ticket.date ?? null, // preserve raw DB date
+          date: ticket.date ?? null,
         },
       }));
 
-      // dedupe by ticketNo (preserve newest by submitted_at / date)
       const deduped = removeDuplicatesByTicketNo(mappedTickets);
 
-      // Resolve createdBy user mapping (optional)
+      // Resolve createdBy user mapping
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const userIdsSet = new Set();
       const emailsSet = new Set();
@@ -842,18 +833,17 @@ export default function WeightReports() {
     }
   };
 
-  // Debounce SAD input (auto-search)
+  // Debounce SAD input (auto-search when user stops typing AND length >= 3)
   useEffect(() => {
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    if (!searchSAD || !searchSAD.trim()) {
-      setOriginalTickets([]);
-      setFilteredTickets([]);
-      setReportMeta({});
+    const q = searchSAD?.trim() || '';
+    if (!q || q.length < 3) {
+      // do not auto-search for tiny inputs; keep current state (user can press Generate)
       return;
     }
     searchDebounceRef.current = setTimeout(() => {
       void handleGenerateReport();
-    }, 400);
+    }, 600); // slight longer debounce to ensure "stopped typing"
     return () => {
       if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     };
