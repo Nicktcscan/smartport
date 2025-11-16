@@ -1,5 +1,4 @@
 // src/pages/WeightReports.jsx
-/* eslint-disable no-unused-vars */
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
   Box,
@@ -77,34 +76,86 @@ import {
   FaSortDown,
   FaMicrophone,
   FaMicrophoneSlash,
-  FaFileAlt,
 } from 'react-icons/fa';
+
 import { supabase } from '../supabaseClient';
 import {
-  pdf as pdfRender,
   Document,
   Page,
   Text as PdfText,
   View as PdfView,
-  Image as PdfImage,
   StyleSheet,
+  pdf as pdfRender,
+  Image as PdfImage,
 } from '@react-pdf/renderer';
 
 const MotionModalContent = motion.create(ModalContent);
 
-// (PDF styles + helpers unchanged — omitted comment for brevity in this header)
+// =======================================
+// PDF styles (with borders for vertical + horizontal lines)
+// =======================================
 const pdfStyles = StyleSheet.create({
-  page: { paddingTop: 18, paddingBottom: 36, paddingHorizontal: 18, fontSize: 9, fontFamily: 'Helvetica', display: 'flex', flexDirection: 'column', color: '#071126', backgroundColor: '#ffffff' },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
+  page: {
+    paddingTop: 18,
+    paddingBottom: 36,
+    paddingHorizontal: 18,
+    fontSize: 9,
+    fontFamily: 'Helvetica',
+    display: 'flex',
+    flexDirection: 'column',
+    color: '#071126',
+    backgroundColor: '#ffffff',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
   companyBlock: { flexDirection: 'column', marginLeft: 8 },
   companyName: { fontSize: 13, fontWeight: 'bold', color: '#071126' },
-  reportTitle: { fontSize: 12, fontWeight: '800', marginBottom: 8, textAlign: 'center', color: '#071126' },
-  summaryBox: { marginBottom: 10, padding: 10, borderWidth: 1, borderColor: '#e6eef8', backgroundColor: '#fbfdff', borderRadius: 6 },
+  reportTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    marginBottom: 8,
+    textAlign: 'center',
+    color: '#071126',
+  },
+  summaryBox: {
+    marginBottom: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#e6eef8',
+    backgroundColor: '#fbfdff',
+    borderRadius: 6,
+  },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+
   tableOuter: { borderWidth: 1, borderColor: '#dbeafe', borderRadius: 4, overflow: 'hidden', marginBottom: 6 },
-  tableHeader: { flexDirection: 'row', backgroundColor: '#eef2ff', borderBottomWidth: 1, borderBottomColor: '#dbeafe', alignItems: 'center', paddingVertical: 6 },
-  tableRow: { flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: '#f1f5f9', alignItems: 'center', paddingVertical: 6 },
-  cellBase: { paddingHorizontal: 6, paddingVertical: 2, borderRightWidth: 1, borderRightColor: '#e6eef8' },
+  tableHeader: {
+    flexDirection: 'row',
+    backgroundColor: '#eef2ff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#dbeafe',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  tableRow: {
+    flexDirection: 'row',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+
+  cellBase: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRightWidth: 1,
+    borderRightColor: '#e6eef8',
+  },
+
+  // Adjusted columns to include Created By
   colTicket: { width: '12%', fontSize: 8 },
   colTruck: { width: '14%', fontSize: 8 },
   colDate: { width: '16%', fontSize: 8 },
@@ -113,12 +164,13 @@ const pdfStyles = StyleSheet.create({
   colNet: { width: '10%', textAlign: 'right', fontSize: 8, paddingRight: 4 },
   colDriver: { width: '14%', fontSize: 8, paddingLeft: 4 },
   colCreated: { width: '14%', fontSize: 8, paddingLeft: 4 },
+
   footer: { position: 'absolute', bottom: 12, left: 18, right: 18, textAlign: 'center', fontSize: 9, color: '#666' },
   logo: { width: 64, height: 64, objectFit: 'contain' },
 });
 
 // =======================================
-// Helpers (parsing / numeric / weights)
+// Helpers
 // =======================================
 function numericValue(v) {
   if (v === null || v === undefined || v === '') return null;
@@ -151,11 +203,13 @@ function computeWeightsFromObj({ gross, tare, net }) {
 }
 
 /**
- * Robust date parser — understands:
- * - ISO
- * - "YYYY-MM-DD HH:MM:SS(.mmm)"
- * - "DD/MM/YYYY", "DD/MM/YY", with optional time
- * - JS Date fallback
+ * parseTicketDate (robust)
+ *
+ * Improvements:
+ * - Treats timestamps WITHOUT timezone (e.g. "2025-11-15 20:07:35.753" or "2025-11-15T20:07:35.753")
+ *   as **local** datetime by parsing components and using new Date(year, month-1, ...).
+ * - If a timezone suffix is present (Z or +HH:MM / -HH:MM) we respect it and use JS Date parsing.
+ * - Supports YYYY-MM-DD, ISO, and DD/MM/YYYY formats with optional times.
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -167,26 +221,48 @@ function parseTicketDate(raw) {
   const s0 = String(raw).trim();
   if (s0 === '') return null;
 
-  // YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
-    const d = new Date(`${s0}T00:00:00`);
-    return isNaN(d.getTime()) ? null : d;
+  // YYYY-MM-DD (date-only)
+  const ymdOnly = /^\d{4}-\d{2}-\d{2}$/;
+  if (ymdOnly.test(s0)) {
+    const [y, m, d] = s0.split('-').map((x) => parseInt(x, 10));
+    const dt = new Date(y, m - 1, d, 0, 0, 0, 0); // local midnight
+    if (!isNaN(dt.getTime())) return dt;
   }
 
-  // ISO-like with space between date/time -> convert to T
-  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
-    const iso = s0.replace(' ', 'T');
-    const d = new Date(iso);
-    if (!isNaN(d.getTime())) return d;
-    // fallback: drop ms
-    const withoutMs = s0.replace(/\.\d+$/, '');
-    const iso2 = withoutMs.replace(' ', 'T');
-    const d2 = new Date(iso2);
-    if (!isNaN(d2.getTime())) return d2;
+  // YYYY-MM-DD[ T]HH:MM:SS(.ms)? optional timezone part
+  const isoLike = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?([zZ]|[+\\-]\d{2}:\d{2})?$/;
+  const isoMatch = s0.match(isoLike);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    const hh = Number(isoMatch[4]);
+    const mm = Number(isoMatch[5]);
+    const ss = Number(isoMatch[6]);
+    const ms = isoMatch[7] ? Math.round(Number(isoMatch[7]) * 1000) : 0;
+    const tz = isoMatch[8];
+
+    if (tz) {
+      // timezone provided -> let JS handle it
+      const d = new Date(s0);
+      if (!isNaN(d.getTime())) return d;
+    } else {
+      // no timezone -> treat as local: construct with local components
+      const d = new Date(year, month - 1, day, hh, mm, ss, ms);
+      if (!isNaN(d.getTime())) return d;
+    }
   }
 
-  // DD/MM/YYYY or DD-MM-YYYY with optional time
-  const dmRegex = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/;
+  // Handle ISO with milliseconds and optional Z (further fallback to Date)
+  try {
+    const dTry = new Date(s0);
+    if (!isNaN(dTry.getTime())) return dTry;
+  } catch (e) {
+    // continue
+  }
+
+  // Detect DD/MM/YYYY or DD/MM/YY with optional time e.g. "15/11/25 20:00" or "15/11/2025 20:00:00"
+  const dmRegex = /^(\d{1,2})[\\/\\-](\d{1,2})[\\/\\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/;
   const m = s0.match(dmRegex);
   if (m) {
     let day = parseInt(m[1], 10);
@@ -195,89 +271,76 @@ function parseTicketDate(raw) {
     let hh = m[4] ? parseInt(m[4], 10) : 0;
     let mm = m[5] ? parseInt(m[5], 10) : 0;
     let ss = m[6] ? parseInt(m[6], 10) : 0;
-    if (year < 100) year += 2000;
-    const dd = new Date(year, month - 1, day, hh, mm, ss);
+    const msStr = m[7] || '0';
+    const ms = Math.min(999, Number(msStr.padEnd(3, '0')));
+    if (year < 100) {
+      year += 2000;
+    }
+    const dd = new Date(year, month - 1, day, hh, mm, ss, ms);
     if (!isNaN(dd.getTime())) return dd;
   }
 
-  // Generic JS parse
-  const d0 = new Date(s0);
-  if (!isNaN(d0.getTime())) return d0;
-
-  // numeric epoch string?
+  // Generic fallback: try parsing numbers (timestamp) or JS date
   const maybeNum = Number(s0);
-  if (!Number.isNaN(maybeNum)) {
+  if (!Number.isNaN(maybeNum) && Number.isFinite(maybeNum)) {
     const d2 = new Date(maybeNum);
     if (!isNaN(d2.getTime())) return d2;
   }
 
+  // Last-ditch attempt
+  const d0 = new Date(s0);
+  if (!isNaN(d0.getTime())) return d0;
+
   return null;
 }
 
-// parseTimeToMinutes used for time-only filtering
-function parseTimeToMinutes(timeStr) {
-  if (!timeStr) return null;
-  const parts = String(timeStr).split(':');
-  if (parts.length < 2) return null;
-  const hh = parseInt(parts[0], 10);
-  const mm = parseInt(parts[1], 10);
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return hh * 60 + mm;
+function sortTicketsByDateDesc(arr) {
+  return (arr || []).slice().sort((a, b) => {
+    const da = parseTicketDate(a?.data?.submitted_at);
+    const db = parseTicketDate(b?.data?.submitted_at);
+    if (!da && !db) return 0;
+    if (!da) return 1;
+    if (!db) return -1;
+    return db.getTime() - da.getTime();
+  });
 }
 
-/**
- * makeDateTime: robust — accepts dateStr in either DD/MM/YYYY or YYYY-MM-DD
- * and timeStr 'HH:MM' or 'HH:MM:SS'. Builds a local Date object with
- * time applied to the given date (so no timezone-shift surprises).
- *
- * defaultTimeIsStart determines default time: 00:00:00 (start) or 23:59:59.999 (end).
- */
-function makeDateTime(dateStr, timeStr, defaultTimeIsStart = true) {
-  if (!dateStr) return null;
-
-  // Try to parse date-only using parseTicketDate (which handles DD/MM/YYYY)
-  const parsedDateOnly = parseTicketDate(dateStr);
-  if (!parsedDateOnly) return null;
-
-  // Extract date components (local)
-  const Y = parsedDateOnly.getFullYear();
-  const M = parsedDateOnly.getMonth();
-  const D = parsedDateOnly.getDate();
-
-  // Determine time components
-  let hh = 0;
-  let mm = 0;
-  let ss = 0;
-  let ms = defaultTimeIsStart ? 0 : 999;
-
-  if (timeStr && String(timeStr).trim()) {
-    const parts = String(timeStr).split(':');
-    hh = Number(parts[0] || 0);
-    mm = Number(parts[1] || 0);
-    if (parts[2]) {
-      const secParts = parts[2].split('.');
-      ss = Number(secParts[0] || 0);
-      if (secParts[1]) {
-        const msStr = (secParts[1] + '000').slice(0, 3);
-        ms = Number(msStr);
-      }
-    } else {
-      // default subsecond behavior
-      ms = defaultTimeIsStart ? 0 : 999;
+function removeDuplicatesByTicketNo(tickets = []) {
+  const map = new Map();
+  for (const t of tickets) {
+    const rawKey =
+      (t.data && (t.data.ticketNo ?? t.data.ticketId)) ||
+      t.ticketId ||
+      (t.data && t.data.ticket_no) ||
+      '';
+    const key = String(rawKey || '').trim().toUpperCase();
+    if (!key) {
+      const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
+      map.set(fallbackKey, t);
+      continue;
     }
-    if (Number.isNaN(hh)) hh = 0;
-    if (Number.isNaN(mm)) mm = 0;
-    if (Number.isNaN(ss)) ss = 0;
-    if (Number.isNaN(ms)) ms = defaultTimeIsStart ? 0 : 999;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, t);
+      continue;
+    }
+    const da = parseTicketDate(existing.data?.submitted_at);
+    const db = parseTicketDate(t.data?.submitted_at);
+    if (db && (!da || db.getTime() > da.getTime())) {
+      map.set(key, t);
+      continue;
+    }
+    if (!da && !db) {
+      if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
+        map.set(key, t);
+      }
+    }
   }
-
-  // Build local date/time without ambiguity
-  return new Date(Y, M, D, hh, mm, ss, ms);
+  return Array.from(map.values());
 }
 
-// -------------------------------------------
-// PDF components (unchanged from prior file)
-// -------------------------------------------
+// =======================================
+// PDF components (SAD column removed)
 function PdfTicketRow({ ticket }) {
   const d = ticket.data || {};
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
@@ -404,7 +467,7 @@ function CombinedDocument({ tickets = [], reportMeta = {}, generatedBy = 'N/A' }
 }
 
 // =======================================
-// Main component
+// Main React component
 // =======================================
 export default function WeightReports() {
   // Filters & state
@@ -425,6 +488,7 @@ export default function WeightReports() {
   const toast = useToast();
   const modalRef = useRef();
 
+  // loggedInUsername = the user who is signed in (used for "Generated by" in PDF)
   const [loggedInUsername, setLoggedInUsername] = useState('');
   const [currentUserId, setCurrentUserId] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -457,7 +521,7 @@ export default function WeightReports() {
 
   const searchDebounceRef = useRef(null);
 
-  // Style injection (kept)
+  // Style injection (glassmorphism + orb + 3D panels)
   useEffect(() => {
     const css = `
       .wr-container { --muted: rgba(7,17,25,0.55); --text-dark:#071126; background: radial-gradient(circle at 10% 10%, rgba(99,102,241,0.03), transparent 10%), linear-gradient(180deg,#eaf5ff 0%, #ffffff 60%); padding-bottom: 60px; }
@@ -484,7 +548,7 @@ export default function WeightReports() {
     };
   }, []);
 
-  // load current user
+  // load user & audit logs + set currentUserId & loggedInUsername
   useEffect(() => {
     let mounted = true;
     async function loadUser() {
@@ -534,9 +598,26 @@ export default function WeightReports() {
     }
   };
 
-  // -----------------------------
-  // computeFilteredTickets — updated/fixed
-  // -----------------------------
+  const parseTimeToMinutes = (timeStr) => {
+    if (!timeStr) return null;
+    const parts = String(timeStr).split(':');
+    if (parts.length < 2) return null;
+    const hh = parseInt(parts[0], 10);
+    const mm = parseInt(parts[1], 10);
+    if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+    return hh * 60 + mm;
+  };
+
+  const toggleSort = (key) => {
+    if (sortBy === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(key);
+      setSortDir('desc');
+    }
+  };
+
+  // computeFilteredTickets
   const computeFilteredTickets = (baseArr = null) => {
     if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
       setFilteredTickets([]);
@@ -544,11 +625,11 @@ export default function WeightReports() {
     }
     let arr = (baseArr || originalTickets).slice();
 
-    // text filters (driver/truck)
     if (searchDriver && searchDriver.trim()) {
       const q = searchDriver.trim().toLowerCase();
       arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
+
     if (searchTruck && searchTruck.trim()) {
       const q = searchTruck.trim().toLowerCase();
       arr = arr.filter((t) => {
@@ -562,23 +643,65 @@ export default function WeightReports() {
       });
     }
 
-    // Build start/end using helper (Time From applies to Date From; Time To to Date To)
-    const start = makeDateTime(dateFrom, timeFrom, true);
-    const end = makeDateTime(dateTo, timeTo, false);
-
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
-    // helper to get a parsed date from ticket using candidate keys order
-    function getParsedDateFromCandidates(ticket, candidates = ['date', 'submitted_at', 'created_at', 'submittedAt', 'createdAt']) {
+    let start = null;
+    let end = null;
+    if (dateFrom) {
+      const fullTime = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
+      start = new Date(`${dateFrom}T${fullTime}`);
+    }
+    if (dateTo) {
+      const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
+      end = new Date(`${dateTo}T${fullTime}`);
+    }
+
+    // If both start and end exist but end is before or equal to start (wrap-around/time overlap),
+    // advance end forward by whole days until it is after start.
+    if (start && end && end.getTime() <= start.getTime()) {
+      let e = new Date(end);
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      // Avoid infinite loops; limit to adding up to 7 days just in case user input was wildly off.
+      let attempts = 0;
+      while (e.getTime() <= start.getTime() && attempts < 7) {
+        e = new Date(e.getTime() + DAY_MS);
+        attempts += 1;
+      }
+      end = e;
+    }
+
+    const tfMinutes = parseTimeToMinutes(timeFrom);
+    const ttMinutes = parseTimeToMinutes(timeTo);
+
+    // Helper: choose ticket date for filtering.
+    // Prefer date/date_iso when a date range is supplied; otherwise prefer submitted_at.
+    function getTicketDateForFiltering(ticket) {
       const d = ticket?.data || {};
+      // prefer database native fields when date range is used
+      const dateRangePrefer = ['date', 'date_iso', 'submitted_at', 'created_at', 'submittedAt', 'createdAt'];
+      const defaultPrefer = ['submitted_at', 'date_iso', 'date', 'created_at', 'submittedAt', 'createdAt'];
+      const candidates = (dateFrom || dateTo) ? dateRangePrefer : defaultPrefer;
       for (const k of candidates) {
         const val = d[k];
         const parsed = parseTicketDate(val);
         if (parsed) return parsed;
       }
-      // final attempt on common raw fields
-      const fallbackStrings = [d.submitted_at, d.date, d.created_at, d.submittedAt, d.createdAt];
+      // additional fallback: some rows might put date in different fields
+      const extra = ['created_at', 'submittedAt', 'createdAt', 'date_iso', 'date', 'submitted_at'];
+      for (const k of extra) {
+        const parsed = parseTicketDate(d[k]);
+        if (parsed) return parsed;
+      }
+      // last resort: try parsing common text fields (unlikely)
+      const fallbackStrings = [
+        d.submitted_at,
+        d.date,
+        d.date_iso,
+        d.created_at,
+        d.submittedAt,
+        d.createdAt,
+      ];
       for (const s of fallbackStrings) {
         const parsed = parseTicketDate(s);
         if (parsed) return parsed;
@@ -586,56 +709,47 @@ export default function WeightReports() {
       return null;
     }
 
-    // primary attempt: prefer DB 'date' field first when user supplied a date range
-    if (hasDateRange) {
-      // first attempt: prefer date -> submitted_at
-      const primaryCandidates = ['date', 'submitted_at', 'created_at', 'submittedAt', 'createdAt'];
-      const filteredPrimary = arr.filter((ticket) => {
-        const ticketDate = getParsedDateFromCandidates(ticket, primaryCandidates);
-        if (!ticketDate) return false;
-        if (start && ticketDate < start) return false;
-        if (end && ticketDate > end) return false;
+    arr = arr.filter((ticket) => {
+      const ticketDate = getTicketDateForFiltering(ticket);
+      if (!ticketDate) {
+        // If the ticket has no parseable date:
+        // - if user supplied a date range, fall back to explicit submitted_at if available
+        if (dateFrom || dateTo) {
+          const fallback = parseTicketDate(ticket.data?.submitted_at) || parseTicketDate(ticket.data?.date) || parseTicketDate(ticket.data?.date_iso) || null;
+          if (!fallback) return false;
+          const s = start ? new Date(start) : new Date(-8640000000000000);
+          const e = end ? new Date(end) : new Date(8640000000000000);
+          return fallback >= s && fallback <= e;
+        }
+        // otherwise don't exclude
         return true;
-      });
-
-      // If no rows found with preferred 'date' candidate ordering, fallback to submitted_at-first ordering
-      if (filteredPrimary.length === 0) {
-        const fallbackCandidates = ['submitted_at', 'created_at', 'date', 'submittedAt', 'createdAt'];
-        const filteredFallback = arr.filter((ticket) => {
-          const ticketDate = getParsedDateFromCandidates(ticket, fallbackCandidates);
-          if (!ticketDate) return false;
-          if (start && ticketDate < start) return false;
-          if (end && ticketDate > end) return false;
-          return true;
-        });
-
-        // Use fallback if it yields rows, else keep primary (even if empty)
-        arr = filteredFallback.length > 0 ? filteredFallback : filteredPrimary;
-      } else {
-        arr = filteredPrimary;
       }
-    } else if (hasTimeRangeOnly) {
-      // Only time range (apply to ticket's time-of-day)
-      const fromM = parseTimeToMinutes(timeFrom) ?? 0;
-      const toM = parseTimeToMinutes(timeTo) ?? (24 * 60 - 1);
 
-      arr = arr.filter((ticket) => {
-        // prefer submitted_at then date for time-only comparisons
-        const ticketDate = getParsedDateFromCandidates(ticket, ['submitted_at', 'date', 'created_at']);
-        if (!ticketDate) return false;
-        const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
-        if (fromM <= toM) return mins >= fromM && mins <= toM;
-        // wrap-around case (e.g., from 22:00 to 04:00)
-        return mins >= fromM || mins <= toM;
-      });
-    }
+      if (dateFrom || dateTo) {
+        const s = start ? new Date(start) : new Date(-8640000000000000);
+        const e = end ? new Date(end) : new Date(8640000000000000);
+        return ticketDate >= s && ticketDate <= e;
+      }
 
-    // Sorting comparator
+      if (hasTimeRangeOnly) {
+        const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+        const fromM = tfMinutes !== null ? tfMinutes : 0;
+        const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
+
+        if (fromM <= toM) {
+          return ticketMinutes >= fromM && ticketMinutes <= toM;
+        }
+        return ticketMinutes >= fromM || ticketMinutes <= toM;
+      }
+
+      return true;
+    });
+
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
-        const da = getParsedDateFromCandidates(a, ['submitted_at', 'date', 'created_at']);
-        const db = getParsedDateFromCandidates(b, ['submitted_at', 'date', 'created_at']);
+        const da = getPreferredDateForSort(a);
+        const db = getPreferredDateForSort(b);
         if (!da && !db) return 0;
         if (!da) return 1;
         if (!db) return -1;
@@ -657,8 +771,19 @@ export default function WeightReports() {
       return 0;
     };
 
-    arr.sort(comparator);
+    // helper for sorting: try to get the most reliable date for sorting (prefer date_iso / date then submitted_at)
+    function getPreferredDateForSort(ticket) {
+      const d = ticket?.data || {};
+      const tryOrder = ['date_iso', 'date', 'submitted_at', 'created_at', 'submittedAt'];
+      for (const k of tryOrder) {
+        const p = parseTicketDate(d[k]);
+        if (p) return p;
+      }
+      // last resort
+      return parseTicketDate(d.submitted_at) || parseTicketDate(d.date) || null;
+    }
 
+    arr.sort(comparator);
     setFilteredTickets(arr);
 
     const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
@@ -677,7 +802,7 @@ export default function WeightReports() {
   };
 
   // -------------------------------------------
-  // handleGenerateReport - fetch tickets, dedupe, attach createdBy
+  // handleGenerateReport - fetch tickets + keep operator in ticket rows only
   // -------------------------------------------
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
@@ -702,7 +827,7 @@ export default function WeightReports() {
         data: {
           sadNo: ticket.sad_no,
           ticketNo: ticket.ticket_no,
-          submitted_at: ticket.submitted_at ?? ticket.submittedAt ?? ticket.created_at ?? null,
+          submitted_at: ticket.submitted_at ?? ticket.submittedAt ?? ticket.created_at ?? ticket.date ?? null,
           gnswTruckNo: ticket.gnsw_truck_no,
           truckOnWb: ticket.truck_on_wb,
           net: ticket.net ?? ticket.net_weight ?? null,
@@ -711,8 +836,8 @@ export default function WeightReports() {
           driver: ticket.driver || 'N/A',
           consignee: ticket.consignee,
           operator: ticket.operator || '',
-          createdBy: ticket.created_by || null,
-          user_id: ticket.user_id || null,
+          createdBy: ticket.created_by || null, // prefer created_by (text) if present
+          user_id: ticket.user_id || null, // we'll fetch username for user_id if present
           status: ticket.status,
           consolidated: ticket.consolidated,
           containerNo: ticket.container_no,
@@ -721,67 +846,114 @@ export default function WeightReports() {
           anpr: ticket.truck_on_wb,
           truckNo: ticket.truck_no,
           fileUrl: ticket.file_url || null,
+          // preserve DB date fields explicitly:
           date: ticket.date ?? null,
+          date_iso: ticket.date_iso ?? null,
+          created_at: ticket.created_at ?? null,
         },
       }));
 
-      const deduped = removeDuplicatesByTicketNo(mappedTickets);
+      // Deduplicate by ticket number
+      const dedupedTickets = removeDuplicatesByTicketNo(mappedTickets);
+      if (dedupedTickets.length < mappedTickets.length) {
+        const removed = mappedTickets.length - dedupedTickets.length;
+        toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
+      }
 
-      // Resolve createdBy user mapping
+      // --- NEW: Build list of candidate user ids and emails to resolve to usernames ---
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const userIdsSet = new Set();
       const emailsSet = new Set();
-      deduped.forEach((t) => {
+
+      dedupedTickets.forEach((t) => {
         const d = t.data || {};
-        if (d.user_id && typeof d.user_id === 'string' && uuidRegex.test(d.user_id)) userIdsSet.add(d.user_id);
+        if (d.user_id && typeof d.user_id === 'string' && uuidRegex.test(d.user_id)) {
+          userIdsSet.add(d.user_id);
+        }
+        // createdBy could be uuid, email, username, or text
         const cb = d.createdBy;
         if (cb && typeof cb === 'string') {
           const v = cb.trim();
-          if (uuidRegex.test(v)) userIdsSet.add(v);
-          else if (v.includes('@')) emailsSet.add(v.toLowerCase());
+          if (uuidRegex.test(v)) {
+            userIdsSet.add(v);
+          } else if (v.includes('@')) {
+            // simple email detection
+            emailsSet.add(v.toLowerCase());
+          }
         }
       });
+
       const userIds = Array.from(userIdsSet);
       const emails = Array.from(emailsSet);
-      let userMap = {};
-      let emailMap = {};
+
+      // Fetch users by id and by email (if any)
+      let userMap = {};   // id -> displayName
+      let emailMap = {};  // email -> displayName
+
       try {
         if (userIds.length > 0) {
-          const { data: usersById, error: usersByIdErr } = await supabase.from('users').select('id, username, email, full_name').in('id', userIds);
+          const { data: usersById, error: usersByIdErr } = await supabase
+            .from('users')
+            .select('id, username, email, full_name')
+            .in('id', userIds);
           if (!usersByIdErr && Array.isArray(usersById)) {
             usersById.forEach((u) => {
               const display = u.username || u.full_name || u.email || u.id;
               if (u.id) userMap[u.id] = display;
               if (u.email) emailMap[u.email.toLowerCase()] = display;
             });
+          } else if (usersByIdErr) {
+            console.debug('usersByIdErr', usersByIdErr);
           }
         }
+
         if (emails.length > 0) {
-          const { data: usersByEmail, error: usersByEmailErr } = await supabase.from('users').select('id, username, email, full_name').in('email', emails);
+          const { data: usersByEmail, error: usersByEmailErr } = await supabase
+            .from('users')
+            .select('id, username, email, full_name')
+            .in('email', emails);
           if (!usersByEmailErr && Array.isArray(usersByEmail)) {
             usersByEmail.forEach((u) => {
               const display = u.username || u.full_name || u.email || u.id;
               if (u.id) userMap[u.id] = display;
               if (u.email) emailMap[u.email.toLowerCase()] = display;
             });
+          } else if (usersByEmailErr) {
+            console.debug('usersByEmailErr', usersByEmailErr);
           }
         }
       } catch (e) {
-        console.debug('user map fetch failed', e);
+        console.debug('Failed to fetch users for created_by mapping', e);
       }
 
-      const enriched = deduped.map((t) => {
+      // Attach createdBy usernames (prefer createdBy text field, but map UUID/email where possible)
+      const enriched = dedupedTickets.map((t) => {
         const d = t.data || {};
         const rawCreatedByText = d.createdBy ? String(d.createdBy).trim() : null;
+
+        // If rawCreatedByText is a UUID and exists in userMap, use mapped display
         let createdByFromText = null;
         if (rawCreatedByText) {
-          if (uuidRegex.test(rawCreatedByText) && userMap[rawCreatedByText]) createdByFromText = userMap[rawCreatedByText];
-          else if (rawCreatedByText.includes('@') && emailMap[rawCreatedByText.toLowerCase()]) createdByFromText = emailMap[rawCreatedByText.toLowerCase()];
-          else if (uuidRegex.test(rawCreatedByText)) createdByFromText = `${rawCreatedByText.slice(0, 8)}...`;
-          else createdByFromText = rawCreatedByText;
+          if (uuidRegex.test(rawCreatedByText) && userMap[rawCreatedByText]) {
+            createdByFromText = userMap[rawCreatedByText];
+          } else if (rawCreatedByText.includes('@') && emailMap[rawCreatedByText.toLowerCase()]) {
+            createdByFromText = emailMap[rawCreatedByText.toLowerCase()];
+          } else {
+            // If the text looks like a UUID but we couldn't map, show a shortened UUID for readability
+            if (uuidRegex.test(rawCreatedByText)) {
+              createdByFromText = `${rawCreatedByText.slice(0, 8)}...`;
+            } else {
+              createdByFromText = rawCreatedByText; // probably a username or operator name; keep as-is
+            }
+          }
         }
+
+        // createdBy from user_id (if present)
         const createdByFromUser = d.user_id && userMap[d.user_id] ? userMap[d.user_id] : null;
+
+        // final preference: explicit createdBy text (mapped), then user_id mapping, then operator, then fallback to raw user_id or empty
         const finalCreatedBy = createdByFromText || createdByFromUser || (d.operator ? String(d.operator).trim() : '') || (d.user_id ? String(d.user_id) : '');
+
         return {
           ...t,
           data: {
@@ -799,7 +971,7 @@ export default function WeightReports() {
         return sum + (Number.isFinite(val) ? val : 0);
       }, 0);
 
-      // optional SAD declaration fetch
+      // fetch SAD declaration row (optional)
       let sadRow = null;
       try {
         const { data: sadData, error: sadError } = await supabase
@@ -823,7 +995,10 @@ export default function WeightReports() {
         sadExists: !!sadRow,
       });
 
+      // compute filtered
       computeFilteredTickets(sortedOriginal);
+
+      // Provide nice success UX:
       toast({ title: `Found ${sortedOriginal.length} ticket(s)`, status: 'success', duration: 2200 });
     } catch (err) {
       console.error('fetch error', err);
@@ -833,38 +1008,42 @@ export default function WeightReports() {
     }
   };
 
-  // Debounce SAD input (auto-search when user stops typing AND length >= 3)
+  // ---------------------------------------
+  // Dynamic behavior: debounce SAD input to auto-search
   useEffect(() => {
+    // Clear previous timer
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    const q = searchSAD?.trim() || '';
-    if (!q || q.length < 3) {
-      // do not auto-search for tiny inputs; keep current state (user can press Generate)
+    // If empty, clear lists (user wants nothing)
+    if (!searchSAD || !searchSAD.trim()) {
+      setOriginalTickets([]);
+      setFilteredTickets([]);
+      setReportMeta({});
       return;
     }
+    // Debounce call to handleGenerateReport
     searchDebounceRef.current = setTimeout(() => {
       void handleGenerateReport();
-    }, 600); // slight longer debounce to ensure "stopped typing"
+    }, 400);
     return () => {
       if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchSAD]);
 
-  // Recompute live when inputs change
+  // ---------------------------------------
+  // Whenever original tickets or filter inputs change, recompute filtered tickets live
   useEffect(() => {
     computeFilteredTickets(originalTickets);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originalTickets, searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir]);
 
-  // Controls
-  const toggleSort = (key) => {
-    if (sortBy === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    else { setSortBy(key); setSortDir('desc'); }
-  };
-
+  // ---------------------------------------
   const applyRange = () => computeFilteredTickets();
   const resetRange = () => {
-    setDateFrom(''); setDateTo(''); setTimeFrom(''); setTimeTo('');
+    setDateFrom('');
+    setDateTo('');
+    setTimeFrom('');
+    setTimeTo('');
     computeFilteredTickets();
     setReportMeta((p) => ({ ...p, startTimeLabel: '', endTimeLabel: '', dateRangeText: '' }));
   };
@@ -890,8 +1069,15 @@ export default function WeightReports() {
     setTimeTo('');
   };
 
-  // recordReportGenerated (keeps existing behavior)
-  const recordReportGenerated = async ({ blob = null, reportType = 'PDF', fileNameHint = null, reportName = null, status = 'Success', remarks = null } = {}) => {
+  // ---------- NEW: recordReportGenerated helper ----------
+  const recordReportGenerated = async ({
+    blob = null,
+    reportType = 'PDF',
+    fileNameHint = null,
+    reportName = null,
+    status = 'Success',
+    remarks = null,
+  } = {}) => {
     const ALLOWED_TYPES = ['CSV', 'PDF', 'Excel', 'Dashboard', 'Other'];
     const chosenType = ALLOWED_TYPES.includes(String(reportType)) ? reportType : 'Other';
     const safeHint = (fileNameHint || reportMeta?.sad || searchSAD || 'report').toString().slice(0, 120);
@@ -900,6 +1086,7 @@ export default function WeightReports() {
     let file_url = null;
     let file_size = blob && blob.size ? Number(blob.size) : null;
 
+    // Try to upload to storage if available
     if (blob && supabase?.storage && typeof supabase.storage.from === 'function') {
       try {
         const safePart = safeHint.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'report';
@@ -949,11 +1136,17 @@ export default function WeightReports() {
     };
 
     try {
-      const { data: inserted, error: insertErr } = await supabase.from('reports_generated').insert([payload]).select().maybeSingle();
+      const { data: inserted, error: insertErr } = await supabase
+        .from('reports_generated')
+        .insert([payload])
+        .select()
+        .maybeSingle();
+
       if (insertErr) {
         console.debug('reports_generated insert error', insertErr);
         return { success: false, error: insertErr };
       }
+
       return { success: true, row: inserted || null };
     } catch (err) {
       console.debug('recordReportGenerated unexpected error', err);
@@ -961,7 +1154,7 @@ export default function WeightReports() {
     }
   };
 
-  // PDF generation helpers
+  // ---------- PDF / CSV generation + recording ----------
   const generatePdfBlob = async (ticketsToRender = [], meta = {}, generatedBy = '') => {
     const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} generatedBy={generatedBy} />;
     const asPdf = pdfRender(doc);
@@ -978,6 +1171,7 @@ export default function WeightReports() {
       setPdfGenerating(true);
       const blob = await generatePdfBlob(filteredTickets, reportMeta, loggedInUsername);
 
+      // record generated report
       try {
         await recordReportGenerated({
           blob,
@@ -985,6 +1179,7 @@ export default function WeightReports() {
           fileNameHint: searchSAD || reportMeta?.sad || 'weighbridge',
           reportName: `SAD-${searchSAD || reportMeta?.sad || 'report'}`,
         });
+        toast({ title: 'Report recorded', status: 'success', duration: 1500 });
       } catch (e) {
         console.debug('recording report failed', e);
       }
@@ -999,6 +1194,7 @@ export default function WeightReports() {
       URL.revokeObjectURL(url);
       toast({ title: 'Download started', status: 'success', duration: 3000 });
 
+      // small celebration
       triggerConfetti();
     } catch (err) {
       console.error('PDF generation failed', err);
@@ -1095,12 +1291,13 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- CSV export ---------------
+  // ----------------- CSV export (unchanged columns; operator included if present) -----------------
   const exportCsv = async () => {
     if (!filteredTickets || filteredTickets.length === 0) {
       toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
       return;
     }
+    // include createdBy column — use submitted_at column name for date
     const header = ['sadNo', 'ticketNo', 'submitted_at', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'createdBy', 'containerNo', 'passNumber', 'scaleName'];
     const rows = filteredTickets.map((t) => {
       const d = t.data || {};
@@ -1131,6 +1328,7 @@ export default function WeightReports() {
 
     try {
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+
       try {
         await recordReportGenerated({
           blob,
@@ -1144,6 +1342,8 @@ export default function WeightReports() {
 
       exportToCSV(rows, `SAD-${searchSAD || 'report'}.csv`);
       toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
+
+      // confetti as delight
       triggerConfetti();
     } catch (err) {
       console.error('CSV export error', err);
@@ -1151,7 +1351,6 @@ export default function WeightReports() {
     }
   };
 
-  // re-used exportToCSV
   function exportToCSV(rows = [], filename = 'export.csv') {
     if (!rows || rows.length === 0) return;
     const headers = Object.keys(rows[0]);
@@ -1180,7 +1379,7 @@ export default function WeightReports() {
     URL.revokeObjectURL(url);
   }
 
-  // ---------- Edit / Delete logic ----------
+  // ---------- Edit / Delete logic (kept intact) ----------
   const isTicketEditable = (ticket) => {
     const status = String(ticket?.data?.status || '').toLowerCase();
     return status !== 'exited';
@@ -1487,7 +1686,7 @@ export default function WeightReports() {
     });
   };
 
-  // Confetti
+  // ------------- Confetti helper (dynamically loads canvas-confetti) -------------
   const triggerConfetti = async (count = 120) => {
     try {
       if (typeof window !== 'undefined' && !window.confetti) {
@@ -1511,7 +1710,7 @@ export default function WeightReports() {
     }
   };
 
-  // Voice recognition
+  // ------------- Voice commands (Web Speech API) -------------
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -1611,7 +1810,7 @@ export default function WeightReports() {
     setTimeout(() => row.classList.remove('highlight-flash'), 2200);
   };
 
-  // Magic orb
+  // ---------- Magic Orb Generate (playful modal + confetti + stardust)
   const handleMagicGenerate = async () => {
     await triggerConfetti(160);
     setTimeout(async () => {
@@ -1622,7 +1821,7 @@ export default function WeightReports() {
     }, 300);
   };
 
-  // UI helpers
+  // -------------- UI helpers --------------
   const cumulativeNetWeight = useMemo(() => {
     return filteredTickets.reduce((total, ticket) => {
       const computed = computeWeightsFromObj({
@@ -1643,7 +1842,7 @@ export default function WeightReports() {
     onOpen();
   };
 
-  // Render (UI kept essentially identical to your previous file)
+  // ---------- Render ----------
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }} className="wr-container">
       <Box mb={6} className="panel-3d">
@@ -1787,6 +1986,7 @@ export default function WeightReports() {
           </Flex>
         </Box>
 
+        {/* Re-introduced SAD stat cards (Declared / Discharged / SAD Status) */}
         {(reportMeta?.sad || originalTickets.length > 0) && (
           <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={4}>
             <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
@@ -1809,6 +2009,7 @@ export default function WeightReports() {
           </SimpleGrid>
         )}
 
+        {/* voice commands */}
         <Flex align="center" gap={3} mb={2}>
           <Box fontSize="sm" color="gray.600">Voice commands:</Box>
           <Button size="sm" leftIcon={voiceActive ? <FaMicrophoneSlash /> : <FaMicrophone />} onClick={() => (voiceActive ? stopVoice() : startVoice())} colorScheme={voiceActive ? 'red' : 'teal'}>
@@ -1988,6 +2189,7 @@ export default function WeightReports() {
         )}
       </Box>
 
+      {/* Audit logs */}
       <Box mt={6} p={4} borderRadius="md" className="glass-card">
         <Flex align="center" mb={3}>
           <Heading size="sm">Recent Audit Logs</Heading>
@@ -2238,50 +2440,4 @@ export default function WeightReports() {
       </Box>
     </Container>
   );
-}
-
-// --------------- Utility functions moved to bottom for readability ---------------
-function sortTicketsByDateDesc(arr) {
-  return (arr || []).slice().sort((a, b) => {
-    const da = parseTicketDate(a?.data?.submitted_at) || parseTicketDate(a?.data?.date);
-    const db = parseTicketDate(b?.data?.submitted_at) || parseTicketDate(b?.data?.date);
-    if (!da && !db) return 0;
-    if (!da) return 1;
-    if (!db) return -1;
-    return db.getTime() - da.getTime();
-  });
-}
-
-function removeDuplicatesByTicketNo(tickets = []) {
-  const map = new Map();
-  for (const t of tickets) {
-    const rawKey =
-      (t.data && (t.data.ticketNo ?? t.data.ticketId)) ||
-      t.ticketId ||
-      (t.data && t.data.ticket_no) ||
-      '';
-    const key = String(rawKey || '').trim().toUpperCase();
-    if (!key) {
-      const fallbackKey = `__NO_TICKET__${Math.random().toString(36).slice(2, 9)}`;
-      map.set(fallbackKey, t);
-      continue;
-    }
-    const existing = map.get(key);
-    if (!existing) {
-      map.set(key, t);
-      continue;
-    }
-    const da = parseTicketDate(existing.data?.submitted_at) || parseTicketDate(existing.data?.date);
-    const db = parseTicketDate(t.data?.submitted_at) || parseTicketDate(t.data?.date);
-    if (db && (!da || db.getTime() > da.getTime())) {
-      map.set(key, t);
-      continue;
-    }
-    if (!da && !db) {
-      if ((t.data?.fileUrl) && !existing.data?.fileUrl) {
-        map.set(key, t);
-      }
-    }
-  }
-  return Array.from(map.values());
 }
