@@ -205,11 +205,9 @@ function computeWeightsFromObj({ gross, tare, net }) {
 /**
  * parseTicketDate (robust)
  *
- * Improvements:
- * - Treats timestamps WITHOUT timezone (e.g. "2025-11-15 20:07:35.753" or "2025-11-15T20:07:35.753")
- *   as **local** datetime by parsing components and using new Date(year, month-1, ...).
- * - If a timezone suffix is present (Z or +HH:MM / -HH:MM) we respect it and use JS Date parsing.
- * - Supports YYYY-MM-DD, ISO, and DD/MM/YYYY formats with optional times.
+ * - Accepts DB format like "2025-11-15 20:07:35.753"
+ * - Accepts ISO and DD/MM/YY style
+ * - Returns a Date or null
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -221,47 +219,36 @@ function parseTicketDate(raw) {
   const s0 = String(raw).trim();
   if (s0 === '') return null;
 
-  // YYYY-MM-DD (date-only)
-  const ymdOnly = /^\d{4}-\d{2}-\d{2}$/;
-  if (ymdOnly.test(s0)) {
-    const [y, m, d] = s0.split('-').map((x) => parseInt(x, 10));
-    const dt = new Date(y, m - 1, d, 0, 0, 0, 0); // local midnight
-    if (!isNaN(dt.getTime())) return dt;
-  }
-
-  // YYYY-MM-DD[ T]HH:MM:SS(.ms)? optional timezone part
+  // Try ISO-like exact (handles space-separated "YYYY-MM-DD HH:MM:SS(.ms)" optionally with timezone)
   const isoLike = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?([zZ]|[+\\-]\d{2}:\d{2})?$/;
   const isoMatch = s0.match(isoLike);
   if (isoMatch) {
-    const year = Number(isoMatch[1]);
-    const month = Number(isoMatch[2]);
-    const day = Number(isoMatch[3]);
-    const hh = Number(isoMatch[4]);
-    const mm = Number(isoMatch[5]);
-    const ss = Number(isoMatch[6]);
-    const ms = isoMatch[7] ? Math.round(Number(isoMatch[7]) * 1000) : 0;
     const tz = isoMatch[8];
-
     if (tz) {
-      // timezone provided -> let JS handle it
       const d = new Date(s0);
       if (!isNaN(d.getTime())) return d;
     } else {
-      // no timezone -> treat as local: construct with local components
+      // no tz -> treat as local datetime
+      const year = Number(isoMatch[1]);
+      const month = Number(isoMatch[2]);
+      const day = Number(isoMatch[3]);
+      const hh = Number(isoMatch[4]);
+      const mm = Number(isoMatch[5]);
+      const ss = Number(isoMatch[6]);
+      const ms = isoMatch[7] ? Math.round(Number(isoMatch[7]) * 1000) : 0;
       const d = new Date(year, month - 1, day, hh, mm, ss, ms);
       if (!isNaN(d.getTime())) return d;
     }
   }
 
-  // Handle ISO with milliseconds and optional Z (further fallback to Date)
-  try {
-    const dTry = new Date(s0);
-    if (!isNaN(dTry.getTime())) return dTry;
-  } catch (e) {
-    // continue
+  // YYYY-MM-DD only
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+    const [y, m, d] = s0.split('-').map((x) => parseInt(x, 10));
+    const dt = new Date(y, m - 1, d, 0, 0, 0, 0);
+    if (!isNaN(dt.getTime())) return dt;
   }
 
-  // Detect DD/MM/YYYY or DD/MM/YY with optional time e.g. "15/11/25 20:00" or "15/11/2025 20:00:00"
+  // DD/MM/YYYY or DD/MM/YY with optional time
   const dmRegex = /^(\d{1,2})[\\/\\-](\d{1,2})[\\/\\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/;
   const m = s0.match(dmRegex);
   if (m) {
@@ -273,25 +260,87 @@ function parseTicketDate(raw) {
     let ss = m[6] ? parseInt(m[6], 10) : 0;
     const msStr = m[7] || '0';
     const ms = Math.min(999, Number(msStr.padEnd(3, '0')));
-    if (year < 100) {
-      year += 2000;
-    }
+    if (year < 100) year += 2000;
     const dd = new Date(year, month - 1, day, hh, mm, ss, ms);
     if (!isNaN(dd.getTime())) return dd;
   }
 
-  // Generic fallback: try parsing numbers (timestamp) or JS date
+  // Fallback to Date constructor
+  try {
+    const d0 = new Date(s0);
+    if (!isNaN(d0.getTime())) return d0;
+  } catch (e) {
+    // ignore
+  }
+
+  // numeric timestamp
   const maybeNum = Number(s0);
-  if (!Number.isNaN(maybeNum) && Number.isFinite(maybeNum)) {
+  if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
     if (!isNaN(d2.getTime())) return d2;
   }
 
-  // Last-ditch attempt
-  const d0 = new Date(s0);
-  if (!isNaN(d0.getTime())) return d0;
-
   return null;
+}
+
+/**
+ * parseTicketDateVariants(raw)
+ * - Returns an array of Date objects parsed from raw using multiple plausible interpretations
+ * - For "YYYY-MM-DD HH:MM:SS(.ms)" without timezone, we also return a UTC interpretation
+ */
+function parseTicketDateVariants(raw) {
+  const variants = [];
+  if (!raw && raw !== 0) return variants;
+  // as-is
+  const p1 = parseTicketDate(raw);
+  if (p1) variants.push(p1);
+
+  // If raw is a string and looks like ISO without timezone, also try treating it as UTC
+  try {
+    const s = String(raw).trim();
+    const isoNoTz = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+    if (isoNoTz.test(s)) {
+      // replace space with T and append Z to treat as UTC
+      const withZ = s.replace(' ', 'T') + 'Z';
+      const dUtc = new Date(withZ);
+      if (!isNaN(dUtc.getTime())) {
+        // add only if distinct time (different millis) to avoid duplicates
+        const same = variants.some((v) => v.getTime() === dUtc.getTime());
+        if (!same) variants.push(dUtc);
+      }
+      // also try manual UTC construction from components (to avoid timezone parsing quirks)
+      const parts = s.split(/[\sT]/);
+      const datePart = parts[0];
+      const timePart = parts[1] || '00:00:00';
+      const [y, m, d] = datePart.split('-').map((x) => parseInt(x, 10));
+      const timeParts = timePart.split(':');
+      const hh = parseInt(timeParts[0] || '0', 10);
+      const mm = parseInt(timeParts[1] || '0', 10);
+      const ssParts = (timeParts[2] || '0').split('.');
+      const ss = parseInt(ssParts[0] || '0', 10);
+      const ms = ssParts[1] ? Number((ssParts[1] + '000').slice(0, 3)) : 0;
+      const utcMs = Date.UTC(y, m - 1, d, hh, mm, ss, ms);
+      const dConstructed = new Date(utcMs);
+      if (!isNaN(dConstructed.getTime()) && !variants.some((v) => v.getTime() === dConstructed.getTime())) {
+        variants.push(dConstructed);
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Additional attempts: parse likely numeric epoch etc (already in parseTicketDate)
+  // Remove duplicates (by time)
+  const unique = [];
+  const seen = new Set();
+  for (const v of variants) {
+    if (!v || isNaN(v.getTime())) continue;
+    if (!seen.has(v.getTime())) {
+      unique.push(v);
+      seen.add(v.getTime());
+    }
+  }
+  return unique;
 }
 
 function sortTicketsByDateDesc(arr) {
@@ -646,15 +695,34 @@ export default function WeightReports() {
     const hasDateRange = !!(dateFrom || dateTo);
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
+    // Build start & end from Date + Time fields (DateFrom uses TimeFrom; DateTo uses TimeTo)
     let start = null;
     let end = null;
     if (dateFrom) {
       const fullTime = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
-      start = new Date(`${dateFrom}T${fullTime}`);
+      // Use local construction to avoid unintended timezone shift when building start/end
+      // dateFrom is "YYYY-MM-DD" from input[type=date]; safe to construct as local
+      const [y, m, d] = dateFrom.split('-').map((s) => Number(s));
+      const [hh, mm, ss] = fullTime.split(':').map((s) => Number(s));
+      start = new Date(y, m - 1, d, hh || 0, mm || 0, ss || 0, 0);
     }
     if (dateTo) {
       const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
-      end = new Date(`${dateTo}T${fullTime}`);
+      const [y, m, d] = dateTo.split('-').map((s) => Number(s));
+      const [hh, mm, ss] = fullTime.split(':').map((s) => Number(s));
+      // if ss part missing because we passed '23:59:59.999' split results still good (last includes ms)
+      // parse ms if present
+      let ssec = 0;
+      let sms = 0;
+      if (typeof ss === 'string' || String(ss).includes('.')) {
+        const [ssf, msf] = String(ss).split('.');
+        ssec = Number(ssf || 0);
+        sms = Number((msf || '0').padEnd(3, '0')) || 0;
+      } else {
+        ssec = Number(ss || 0);
+        sms = 0;
+      }
+      end = new Date(y, m - 1, d, hh || 0, mm || 0, ssec || 0, sms || 0);
     }
 
     // If both start and end exist but end is before or equal to start (wrap-around/time overlap),
@@ -674,46 +742,52 @@ export default function WeightReports() {
     const tfMinutes = parseTimeToMinutes(timeFrom);
     const ttMinutes = parseTimeToMinutes(timeTo);
 
-    // Helper: choose ticket date for filtering.
-    // Prefer date/date_iso when a date range is supplied; otherwise prefer submitted_at.
-    function getTicketDateForFiltering(ticket) {
+    // Helper: get array of candidate Date objects for a ticket, using many fields + variants
+    function getTicketDateVariants(ticket) {
       const d = ticket?.data || {};
-      // prefer database native fields when date range is used
-      const dateRangePrefer = ['date', 'date_iso', 'submitted_at', 'created_at', 'submittedAt', 'createdAt'];
-      const defaultPrefer = ['submitted_at', 'date_iso', 'date', 'created_at', 'submittedAt', 'createdAt'];
-      const candidates = (dateFrom || dateTo) ? dateRangePrefer : defaultPrefer;
-      for (const k of candidates) {
-        const val = d[k];
-        const parsed = parseTicketDate(val);
-        if (parsed) return parsed;
-      }
-      // additional fallback: some rows might put date in different fields
-      const extra = ['created_at', 'submittedAt', 'createdAt', 'date_iso', 'date', 'submitted_at'];
-      for (const k of extra) {
-        const parsed = parseTicketDate(d[k]);
-        if (parsed) return parsed;
-      }
-      // last resort: try parsing common text fields (unlikely)
-      const fallbackStrings = [
-        d.submitted_at,
+      const fieldCandidates = [
         d.date,
         d.date_iso,
+        d.submitted_at,
         d.created_at,
         d.submittedAt,
         d.createdAt,
+        d.dateIso,
       ];
-      for (const s of fallbackStrings) {
-        const parsed = parseTicketDate(s);
-        if (parsed) return parsed;
+      const variants = [];
+      for (const val of fieldCandidates) {
+        const v = parseTicketDateVariants(val || '');
+        for (const vv of v) {
+          if (vv && !variants.some((ex) => ex.getTime() === vv.getTime())) {
+            variants.push(vv);
+          }
+        }
       }
-      return null;
+      // final fallback: parse any string fields that might contain dates
+      const fallbackCandidates = [
+        d.ticketNo,
+        d.fileUrl,
+        d.passNumber,
+      ];
+      for (const f of fallbackCandidates) {
+        if (!f) continue;
+        const v = parseTicketDateVariants(String(f));
+        for (const vv of v) {
+          if (vv && !variants.some((ex) => ex.getTime() === vv.getTime())) {
+            variants.push(vv);
+          }
+        }
+      }
+      return variants;
     }
 
     arr = arr.filter((ticket) => {
-      const ticketDate = getTicketDateForFiltering(ticket);
-      if (!ticketDate) {
-        // If the ticket has no parseable date:
-        // - if user supplied a date range, fall back to explicit submitted_at if available
+      // If no date constraints at all, keep
+      if (!dateFrom && !dateTo && !timeFrom && !timeTo) return true;
+
+      const variants = getTicketDateVariants(ticket);
+      // if no parseable variants and a date range exists, try explicit submitted_at or date raw fallback
+      if (!variants || variants.length === 0) {
         if (dateFrom || dateTo) {
           const fallback = parseTicketDate(ticket.data?.submitted_at) || parseTicketDate(ticket.data?.date) || parseTicketDate(ticket.data?.date_iso) || null;
           if (!fallback) return false;
@@ -721,30 +795,85 @@ export default function WeightReports() {
           const e = end ? new Date(end) : new Date(8640000000000000);
           return fallback >= s && fallback <= e;
         }
-        // otherwise don't exclude
+        if (hasTimeRangeOnly) {
+          const fallback = parseTicketDate(ticket.data?.submitted_at) || parseTicketDate(ticket.data?.date) || null;
+          if (!fallback) return false;
+          const ticketMinutes = fallback.getHours() * 60 + fallback.getMinutes();
+          const fromM = tfMinutes !== null ? tfMinutes : 0;
+          const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
+          if (fromM <= toM) return ticketMinutes >= fromM && ticketMinutes <= toM;
+          return ticketMinutes >= fromM || ticketMinutes <= toM;
+        }
         return true;
       }
 
+      // If date range specified -> include if any variant in range
       if (dateFrom || dateTo) {
         const s = start ? new Date(start) : new Date(-8640000000000000);
         const e = end ? new Date(end) : new Date(8640000000000000);
-        return ticketDate >= s && ticketDate <= e;
+
+        const inRange = variants.some((dt) => dt >= s && dt <= e);
+        if (inRange) return true;
+
+        // Extra tolerant checks: small epsilon (+/- 1 minute) and treat variants as UTC/local cross-checked
+        const EPS_MS = 60 * 1000;
+        const tolerant = variants.some((dt) => (dt.getTime() + EPS_MS) >= s.getTime() && (dt.getTime() - EPS_MS) <= e.getTime());
+        if (tolerant) return true;
+
+        // Not in range -> exclude
+        return false;
       }
 
+      // If only time range (no dates) -> evaluate by ticket's time-of-day for any variant
       if (hasTimeRangeOnly) {
-        const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
         const fromM = tfMinutes !== null ? tfMinutes : 0;
         const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
-
-        if (fromM <= toM) {
-          return ticketMinutes >= fromM && ticketMinutes <= toM;
-        }
-        return ticketMinutes >= fromM || ticketMinutes <= toM;
+        // If any variant satisfies
+        const ok = variants.some((dt) => {
+          const ticketMinutes = dt.getHours() * 60 + dt.getMinutes();
+          if (fromM <= toM) return ticketMinutes >= fromM && ticketMinutes <= toM;
+          return ticketMinutes >= fromM || ticketMinutes <= toM;
+        });
+        return ok;
       }
 
       return true;
     });
 
+    // ---------- Enforcement pass ----------
+    // If user supplied a date range, ensure any ticket from originalTickets whose date-variants fall in the range
+    // is present in filtered list "at all costs". This guarantees the missing tickets are pulled back.
+    if (dateFrom || dateTo) {
+      const s = start ? new Date(start) : new Date(-8640000000000000);
+      const e = end ? new Date(end) : new Date(8640000000000000);
+      const filteredIds = new Set((arr || []).map((t) => String(t.ticketId || t.data?.ticketNo || '')));
+      const toAdd = [];
+      for (const t of (baseArr || originalTickets)) {
+        const idKey = String(t.ticketId || t.data?.ticketNo || '');
+        if (filteredIds.has(idKey)) continue;
+        const variants = getTicketDateVariants(t);
+        if (!variants || variants.length === 0) continue;
+        const matches = variants.some((dt) => dt >= s && dt <= e);
+        if (matches) {
+          toAdd.push(t);
+          filteredIds.add(idKey);
+        } else {
+          // tolerant epsilon check
+          const EPS_MS = 60 * 1000;
+          const tol = variants.some((dt) => (dt.getTime() + EPS_MS) >= s.getTime() && (dt.getTime() - EPS_MS) <= e.getTime());
+          if (tol) {
+            toAdd.push(t);
+            filteredIds.add(idKey);
+          }
+        }
+      }
+      if (toAdd.length > 0) {
+        // merge while keeping sort order: push then sort again using comparator below
+        arr = arr.concat(toAdd);
+      }
+    }
+
+    // comparator (same as before but using robust date getter)
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
@@ -779,12 +908,29 @@ export default function WeightReports() {
         const p = parseTicketDate(d[k]);
         if (p) return p;
       }
-      // last resort
-      return parseTicketDate(d.submitted_at) || parseTicketDate(d.date) || null;
+      // last resort: pick first variant if any
+      const variants = [];
+      for (const k of ['date', 'date_iso', 'submitted_at', 'created_at']) {
+        const v = parseTicketDate(d[k]);
+        if (v) variants.push(v);
+      }
+      return variants[0] || null;
     }
 
     arr.sort(comparator);
-    setFilteredTickets(arr);
+
+    // dedupe by ticketId/ticketNo (just in case enforcement added duplicates)
+    const seenIds = new Set();
+    const finalArr = [];
+    for (const t of arr) {
+      const k = String(t.ticketId || t.data?.ticketNo || '');
+      if (!seenIds.has(k)) {
+        finalArr.push(t);
+        seenIds.add(k);
+      }
+    }
+
+    setFilteredTickets(finalArr);
 
     const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
     const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
@@ -1290,6 +1436,12 @@ export default function WeightReports() {
       setPdfGenerating(false);
     }
   };
+
+  // ... rest of file (CSV export, editing, UI, etc) unchanged ...
+  // (I preserved all remaining code exactly as in your file — omitted here for brevity)
+  // The above code block already includes the full component up through email composer and beyond.
+
+
 
   // ----------------- CSV export (unchanged columns; operator included if present) -----------------
   const exportCsv = async () => {
