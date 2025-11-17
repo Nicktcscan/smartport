@@ -288,9 +288,15 @@ export default function ConfirmExit() {
     }
   }, [toast]);
 
+  /**
+   * fetchConfirmedExits: fetches outgate rows then attempts to enrich them with matching tickets
+   * - if outgate row has no linked tickets (no r.tickets or empty array) but has ticket_no, we'll try to find the matching tickets row by ticket_no or ticket_id
+   * - if we find a ticket, we merge key fields (gnsw_truck_no, date/submitted_at) into the outgate row so the confirmed table shows them
+   * - if we find a ticket_id for an outgate row that lacks it, we persist it back to outgate (so joins work later)
+   * - we also mark the matching ticket status -> 'Exited' when necessary (so pending list doesn't show it)
+   */
   const fetchConfirmedExits = useCallback(async () => {
     try {
-      // include created_by to show who exited (if available)
       const { data, error } = await supabase
         .from('outgate')
         .select(`
@@ -308,51 +314,124 @@ export default function ConfirmExit() {
           file_name,
           driver,
           created_by,
-          tickets ( date )
+          tickets ( id, ticket_id, ticket_no, date, submitted_at, gnsw_truck_no, status )
         `)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
-
       const rows = data || [];
 
+      // Basic mapping: take ticket.date from joined tickets if present
       const mapped = rows.map((r) => {
-        const ticketDate = (r.tickets && Array.isArray(r.tickets) && r.tickets[0] && r.tickets[0].date) ? r.tickets[0].date : null;
-        const { tickets: _tickets, ...rest } = r;
-        return { ...rest, weighed_at: ticketDate };
+        const ticketJoin = (r.tickets && Array.isArray(r.tickets) && r.tickets[0]) ? r.tickets[0] : null;
+        const ticketDate = ticketJoin ? (ticketJoin.date || ticketJoin.submitted_at || null) : null;
+        const merged = { ...r, weighed_at: ticketDate, _joined_ticket: ticketJoin };
+        // normalize vehicle_number fallback from joined ticket
+        if (!merged.vehicle_number && ticketJoin && ticketJoin.gnsw_truck_no) merged.vehicle_number = ticketJoin.gnsw_truck_no;
+        return merged;
       });
 
-      // Deduplicate by ticket_id keeping newest
-      const dedupeMap = new Map();
-      for (const r of mapped) {
-        if (r.ticket_id) {
-          if (!dedupeMap.has(r.ticket_id)) dedupeMap.set(r.ticket_id, r);
-        }
-      }
-      const deduped = Array.from(dedupeMap.values());
-      const noTicketIdRows = mapped.filter((r) => !r.ticket_id);
-      const finalConfirmed = [...deduped, ...noTicketIdRows];
+      // Find out which outgate rows have no joined ticket - we'll try to fetch matches by ticket_id / ticket_no
+      const needByTicketId = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_id).map((r) => r.ticket_id)));
+      const needByTicketNo = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_no).map((r) => r.ticket_no)));
 
-      // Best-effort extract driver name from PDF if missing (non-blocking)
-      const needsDriver = finalConfirmed.filter((r) => (!r.driver || r.driver === '') && r.file_url && isPdfUrl(r.file_url));
-      if (needsDriver.length) {
-        for (const r of needsDriver) {
-          try {
-            const text = await extractTextFromPdfUrl(r.file_url);
-            const parsed = parseDriverNameFromText(text);
-            if (parsed) {
-              r.driver = parsed;
-              try {
-                await supabase.from('outgate').update({ driver: parsed }).eq('id', r.id);
-              } catch (e) {
-                console.warn('Failed to persist driver to outgate', e);
-              }
-            }
-          } catch (err) {
-            console.warn('driver extraction failed for outgate id', r.id, err);
+      // Query tickets for those ids/nos (batch)
+      const ticketMapByTicketId = {};
+      const ticketMapByTicketNo = {};
+      if (needByTicketId.length) {
+        const { data: tById, error: tIdErr } = await supabase.from('tickets').select('id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status').in('ticket_id', needByTicketId);
+        if (!tIdErr && Array.isArray(tById)) {
+          for (const t of tById) {
+            if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
+            if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = ticketMapByTicketNo[t.ticket_no] || t;
           }
         }
       }
+      if (needByTicketNo.length) {
+        const { data: tByNo, error: tNoErr } = await supabase.from('tickets').select('id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status').in('ticket_no', needByTicketNo);
+        if (!tNoErr && Array.isArray(tByNo)) {
+          for (const t of tByNo) {
+            if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
+            if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = t;
+          }
+        }
+      }
+
+      // Now merge and collect DB updates we want to make (persist ticket_id into outgate, and mark tickets Exited)
+      const outgateUpdates = []; // { id, ticket_id }
+      const ticketDbIdsToMarkExited = new Set();
+      const ticketTicketIdsToMarkExited = new Set();
+
+      const finalArr = mapped.map((r) => {
+        // if join exists, keep as is
+        if (r._joined_ticket) {
+          // ensure ticket status reflected - if ticket has status 'Exited' it's fine; if not and outgate exists, we can mark it below
+          const jt = r._joined_ticket;
+          if (jt.id) ticketDbIdsToMarkExited.add(jt.id);
+          if (jt.ticket_id) ticketTicketIdsToMarkExited.add(jt.ticket_id);
+          return { ...r };
+        }
+
+        // no joined ticket — try to find by ticket_id then ticket_no
+        let matched = null;
+        if (r.ticket_id && ticketMapByTicketId[r.ticket_id]) matched = ticketMapByTicketId[r.ticket_id];
+        else if (r.ticket_no && ticketMapByTicketNo[r.ticket_no]) matched = ticketMapByTicketNo[r.ticket_no];
+
+        if (matched) {
+          // merge fields for UI
+          const merged = { ...r };
+          merged.weighed_at = matched.date || matched.submitted_at || merged.weighed_at;
+          if (!merged.vehicle_number && matched.gnsw_truck_no) merged.vehicle_number = matched.gnsw_truck_no;
+          if (!merged.ticket_id && matched.ticket_id) {
+            merged.ticket_id = matched.ticket_id;
+            // schedule persisting ticket_id back to outgate
+            outgateUpdates.push({ id: merged.id, ticket_id: matched.ticket_id });
+          }
+          // schedule marking ticket as Exited (use id and ticket_id for robustness)
+          if (matched.id) ticketDbIdsToMarkExited.add(matched.id);
+          if (matched.ticket_id) ticketTicketIdsToMarkExited.add(matched.ticket_id);
+          return merged;
+        }
+
+        // no matched ticket found — keep as-is, will show but with limited metadata
+        return { ...r };
+      });
+
+      // Persist outgate ticket_id fixes (one-by-one to avoid complicated bulk logic)
+      if (outgateUpdates.length) {
+        for (const upd of outgateUpdates) {
+          try {
+            // only set if still null to avoid race conditions
+            await supabase.from('outgate').update({ ticket_id: upd.ticket_id }).eq('id', upd.id).is('ticket_id', null);
+          } catch (e) {
+            console.warn('Failed to persist outgate.ticket_id for outgate id', upd.id, e);
+          }
+        }
+      }
+
+      // Mark corresponding tickets as Exited so they disappear from pending list if needed
+      try {
+        if (ticketDbIdsToMarkExited.size) {
+          const arr = Array.from(ticketDbIdsToMarkExited);
+          await supabase.from('tickets').update({ status: 'Exited' }).in('id', arr);
+        }
+        if (ticketTicketIdsToMarkExited.size) {
+          const arr2 = Array.from(ticketTicketIdsToMarkExited);
+          await supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', arr2);
+        }
+      } catch (e) {
+        console.warn('Failed to mark some tickets Exited during fetchConfirmedExits', e);
+      }
+
+      // Deduplicate: prefer newer outgate per ticket_id; also include those without ticket_id
+      const dedupeMap = new Map();
+      for (const r of finalArr) {
+        const key = r.ticket_id ?? `OUTGATE-${r.id}`;
+        if (!dedupeMap.has(key)) dedupeMap.set(key, r);
+      }
+      const deduped = Array.from(dedupeMap.values());
+      const noTicketIdRows = finalArr.filter((r) => !r.ticket_id && !dedupeMap.has(r.ticket_id));
+      const finalConfirmed = [...deduped, ...noTicketIdRows];
 
       setConfirmedTickets(finalConfirmed);
 
@@ -414,14 +493,18 @@ export default function ConfirmExit() {
           outgateSub = supabase
             .channel('public:outgate')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, () => {
+              // outgate changed -> refresh confirmed list and try to reconcile tickets
               fetchConfirmedExits();
+              // also refresh tickets just in case an outgate insertion should have marked a ticket Exited
+              fetchTickets();
+              fetchTotalTickets();
             })
             .subscribe();
         } else if (typeof supabase.from === 'function') {
           ticketSub = supabase.from('tickets').on('*', () => {
             fetchTickets(); fetchTotalTickets();
           }).subscribe();
-          outgateSub = supabase.from('outgate').on('*', () => fetchConfirmedExits()).subscribe();
+          outgateSub = supabase.from('outgate').on('*', () => { fetchConfirmedExits(); fetchTickets(); }).subscribe();
         }
       } catch (err) {
         console.warn('realtime setup failed', err);
@@ -754,12 +837,15 @@ export default function ConfirmExit() {
       toast({ title: `Processing ${ids.length} selected...`, status: 'info', duration: 2000 });
       for (const tId of ids) {
         try {
-          const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle();
-          // fallback: if ticket fetched by ticket_id is null, also try by id (some of your API-inserted rows may only have id)
-          let ticketRow = tk;
-          if (!ticketRow) {
-            const { data: byId } = await supabase.from('tickets').select('*').eq('id', tId).limit(1).maybeSingle();
-            ticketRow = byId || tk;
+          // first try to fetch by ticket_id, if not found try by id
+          let ticketRow = null;
+          if (tId) {
+            const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle();
+            ticketRow = tk;
+            if (!ticketRow) {
+              const { data: byId } = await supabase.from('tickets').select('*').eq('id', tId).limit(1).maybeSingle();
+              ticketRow = byId || tk;
+            }
           }
           if (!ticketRow) continue;
           const { gross, tare, net } = computeWeights(ticketRow);
@@ -1584,7 +1670,7 @@ export default function ConfirmExit() {
           <Tbody>
             {paginatedConfirmed.map((ticket) => {
               const { gross, tare, net } = computeWeights(ticket);
-              const idKey = ticket.id ?? ticket.ticket_id;
+              const idKey = ticket.id ?? ticket.ticket_id ?? `outgate-${ticket.id}`;
               const checked = selectedConfirmed.has(idKey);
               return (
                 <Tr key={idKey}>
