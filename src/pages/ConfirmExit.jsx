@@ -255,7 +255,7 @@ export default function ConfirmExit() {
   const isMobile = useBreakpointValue({ base: true, md: false });
 
   // selection state
-  const [selectedPending, setSelectedPending] = useState(new Set()); // ticket_id values (or ticket_no fallback not used here)
+  const [selectedPending, setSelectedPending] = useState(new Set()); // ticket_id values
   const [selectedConfirmed, setSelectedConfirmed] = useState(new Set());
 
   // keyboard navigation
@@ -275,7 +275,6 @@ export default function ConfirmExit() {
   // ---------------------
   const fetchTickets = useCallback(async () => {
     try {
-      // include id so we can fall back to id when ticket_id is null
       const { data, error } = await supabase
         .from('tickets')
         .select('id, ticket_id, ticket_no, gnsw_truck_no, container_no, date, sad_no, status, gross, tare, net, file_url, file_name, submitted_at, driver')
@@ -446,17 +445,14 @@ export default function ConfirmExit() {
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
   // Exclude confirmed tickets from pending list
-  // NOTE: tightened to also exclude any ticket with status === 'Exited'
   useEffect(() => {
-    const confirmedIds = new Set(
-      confirmedTickets
-        .filter((t) => t.ticket_id)
-        .map((t) => t.ticket_id)
-    );
+    const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
+    const confirmedNos = new Set(confirmedTickets.filter((t) => t.ticket_no).map((t) => t.ticket_no));
 
     const unconfirmed = allTickets.filter((t) =>
-      // hide anything already marked Exited OR already present in confirmed outgate set
-      t.status !== 'Exited' && !confirmedIds.has(t.ticket_id)
+      t.status !== 'Exited' &&
+      !confirmedIds.has(t.ticket_id) &&
+      !confirmedNos.has(t.ticket_no)
     );
 
     setFilteredResults(unconfirmed);
@@ -476,9 +472,10 @@ export default function ConfirmExit() {
     return hh * 60 + mm;
   };
 
-  // Search & filter for pending tickets - prefer submitted_at over date
+  // Search & filter for pending tickets
   const handleSearch = () => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
+    const confirmedNos = new Set(confirmedTickets.filter((t) => t.ticket_no).map((t) => t.ticket_no));
     const df = dateFrom ? new Date(dateFrom) : null;
     const dt = dateTo ? new Date(dateTo) : null;
     if (dt) dt.setHours(23, 59, 59, 999);
@@ -491,9 +488,10 @@ export default function ConfirmExit() {
       const matchesSAD = (ticket.sad_no || '').toLowerCase().includes(searchParams.sadNumber.toLowerCase());
       if (!(matchesVehicle && matchesTicket && matchesSAD)) return false;
       if (confirmedIds.has(ticket.ticket_id)) return false;
+      if (confirmedNos.has(ticket.ticket_no)) return false;
       if (ticket.status === 'Exited') return false;
 
-      // use submitted_at for pending ticket filtering
+      // For pending tickets, use submitted_at primarily (per request)
       const dateStr = ticket.submitted_at || ticket.date;
       if (df || dt || tFrom !== null || tTo !== null) {
         if (!dateStr) return false;
@@ -522,7 +520,8 @@ export default function ConfirmExit() {
     setTimeFrom('');
     setTimeTo('');
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
-    const unconfirmed = allTickets.filter((t) => t.status !== 'Exited' && !confirmedIds.has(t.ticket_id));
+    const confirmedNos = new Set(confirmedTickets.filter((t) => t.ticket_no).map((t) => t.ticket_no));
+    const unconfirmed = allTickets.filter((t) => t.status !== 'Exited' && !confirmedIds.has(t.ticket_id) && !confirmedNos.has(t.ticket_no));
     setFilteredResults(unconfirmed);
     setCurrentPage(1);
     setSortKey('ticket_no');
@@ -543,7 +542,7 @@ export default function ConfirmExit() {
       let va = a[sortKey];
       let vb = b[sortKey];
       if (sortKey === 'date') {
-        // For pending tickets prefer submitted_at over date
+        // For sorting by date on pending list, use submitted_at primarily
         va = new Date(a.submitted_at || a.date || 0);
         vb = new Date(b.submitted_at || b.date || 0);
       } else {
@@ -583,32 +582,6 @@ export default function ConfirmExit() {
   }, [filteredConfirmed, confirmedPage]);
 
   const totalConfirmedPages = Math.max(1, Math.ceil(filteredConfirmed.length / PAGE_SIZE));
-
-  // Robust helper to mark ticket status => Exited using multiple fallbacks (ticket_id, ticket_no, id)
-  const markTicketExited = useCallback(async (ticket) => {
-    if (!ticket) return false;
-    try {
-      // Try by ticket_id first
-      if (ticket.ticket_id) {
-        const { data, error } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticket.ticket_id).select();
-        if (!error && data && data.length) return true;
-      }
-      // Fallback to ticket_no
-      if (ticket.ticket_no) {
-        const { data, error } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticket.ticket_no).select();
-        if (!error && data && data.length) return true;
-      }
-      // Fallback to internal id
-      if (ticket.id) {
-        const { data, error } = await supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticket.id).select();
-        if (!error && data && data.length) return true;
-      }
-      return false;
-    } catch (e) {
-      console.warn('markTicketExited error', e);
-      return false;
-    }
-  }, []);
 
   // ---------------------
   // Modal actions (unchanged logic, but attach created_by & edited_by)
@@ -654,7 +627,6 @@ export default function ConfirmExit() {
       }
       const { gross, tare, net } = computeWeights(selectedTicket);
 
-      // For pending tickets prefer submitted_at as their "weighed/date" source
       const payload = {
         ticket_id: selectedTicket.ticket_id || null,
         ticket_no: selectedTicket.ticket_no || null,
@@ -664,8 +636,7 @@ export default function ConfirmExit() {
         gross,
         tare,
         net,
-        // use submitted_at for pending; outgate.created_at will be the exit time
-        date: selectedTicket.submitted_at || selectedTicket.date || null,
+        date: selectedTicket.date || null,
         file_url: selectedTicket.file_url || null,
         file_name: selectedTicket.file_name || null,
         driver: resolvedDriver || null,
@@ -675,125 +646,95 @@ export default function ConfirmExit() {
       if (user && user.id) payload.created_by = user.id;
       if (currentUsername) payload.edited_by = currentUsername;
 
-      // Check for existing outgate by ticket_id OR ticket_no
-      if (payload.ticket_id) {
-        const { data: existing, error: existingErr } = await supabase
-          .from('outgate')
-          .select('id, created_at')
-          .eq('ticket_id', payload.ticket_id)
-          .limit(1);
-        if (existingErr) console.warn('check existing outgate error', existingErr);
+      // Check if an outgate already exists for this ticket (by ticket_id OR ticket_no)
+      try {
+        const orParts = [];
+        if (payload.ticket_id) orParts.push(`ticket_id.eq.${payload.ticket_id}`);
+        if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
+        let existing = null;
+        if (orParts.length) {
+          const q = supabase.from('outgate').select('id,created_at').or(orParts.join(','));
+          const { data: exData, error: exErr } = await q.limit(1);
+          if (exErr) console.warn('check existing outgate error', exErr);
+          existing = exData;
+        }
         if (existing && existing.length) {
           toast({
             title: 'Already confirmed',
-            description: `Ticket ${payload.ticket_id} already has a confirmed exit.`,
+            description: `Ticket ${payload.ticket_no || payload.ticket_id} already has a confirmed exit.`,
             status: 'warning',
             duration: 4000,
             isClosable: true,
           });
 
-          // Try to ensure underlying ticket row is set to Exited (robustly)
-          await markTicketExited(selectedTicket);
+          // Ensure tickets row is marked Exited using best available identifier (id -> ticket_id -> ticket_no)
+          try {
+            if (selectedTicket.id) {
+              await supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id);
+            } else if (selectedTicket.ticket_id) {
+              await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
+            } else if (selectedTicket.ticket_no) {
+              await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no);
+            }
 
-          // Immediately reflect change in UI so row disappears
-          setFilteredResults((prev) => prev.filter((t) =>
-            !(t.ticket_id && payload.ticket_id && t.ticket_id === payload.ticket_id) &&
-            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
-            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
-          ));
-          setAllTickets((prev) => prev.filter((t) =>
-            !(t.ticket_id && payload.ticket_id && t.ticket_id === payload.ticket_id) &&
-            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
-            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
-          ));
-          setSelectedPending((prev) => {
-            const next = new Set(prev);
-            next.delete(payload.ticket_id);
-            // also remove any possible ticket_no keys (if you stored them elsewhere)
-            return next;
-          });
+            // Immediately reflect change in UI so row disappears
+            setFilteredResults((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
+            setAllTickets((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
+            setSelectedPending((prev) => {
+              const next = new Set(prev);
+              if (selectedTicket.ticket_id) next.delete(selectedTicket.ticket_id);
+              return next;
+            });
 
-          await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+            await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+          } catch (e) {
+            console.warn('mark exited after existing outgate failed', e);
+          }
+
           onClose();
           return;
         }
-      } else if (payload.ticket_no) {
-        // If there's no ticket_id, check by ticket_no for existing outgate
-        const { data: existing2, error: existingErr2 } = await supabase
-          .from('outgate')
-          .select('id, created_at')
-          .eq('ticket_no', payload.ticket_no)
-          .limit(1);
-        if (existingErr2) console.warn('check existing outgate error by ticket_no', existingErr2);
-        if (existing2 && existing2.length) {
-          toast({
-            title: 'Already confirmed',
-            description: `Ticket ${payload.ticket_no} already has a confirmed exit.`,
-            status: 'warning',
-            duration: 4000,
-            isClosable: true,
-          });
-
-          await markTicketExited(selectedTicket);
-
-          setFilteredResults((prev) => prev.filter((t) =>
-            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
-            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
-          ));
-          setAllTickets((prev) => prev.filter((t) =>
-            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
-            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
-          ));
-          setSelectedPending((prev) => {
-            const next = new Set(prev);
-            // remove possible entries
-            return next;
-          });
-
-          await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
-          onClose();
-          return;
-        }
+      } catch (e) {
+        console.warn('existing outgate check failed', e);
       }
 
-      // Insert outgate row
+      // Insert outgate
       const { error: insertErr } = await supabase.from('outgate').insert([payload]);
       if (insertErr) {
         toast({ title: 'Error confirming exit', description: insertErr.message, status: 'error', duration: 5000, isClosable: true });
         return;
       }
 
-      // After creating outgate, robustly update tickets.status to 'Exited'
-      const marked = await markTicketExited(selectedTicket);
-      if (!marked) {
-        // Try extra attempts by ticket_no or id if initial didn't work (already inside markTicketExited)
-        console.warn('Could not mark ticket as Exited via primary identifiers. It may not exist or needs manual update.');
+      // Update tickets.status -> 'Exited' robustly (use id when present, else ticket_id, else ticket_no)
+      try {
+        if (selectedTicket.id) {
+          const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id);
+          if (updErr) console.warn('Failed to update tickets by id', updErr);
+        } else if (selectedTicket.ticket_id) {
+          const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
+          if (updErr) console.warn('Failed to update tickets by ticket_id', updErr);
+        } else if (selectedTicket.ticket_no) {
+          const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no);
+          if (updErr) console.warn('Failed to update tickets by ticket_no', updErr);
+        } else {
+          console.warn('No id/ticket_id/ticket_no present to update tickets.status', selectedTicket);
+        }
+      } catch (e) {
+        console.warn('Error updating tickets status', e);
       }
 
-      toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no || selectedTicket.vehicle_number}`, status: 'success', duration: 3000, isClosable: true });
+      toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no}`, status: 'success', duration: 3000, isClosable: true });
 
       // Instantly remove from UI (fixes "not leaving table" issue)
-      setFilteredResults((prev) =>
-        prev.filter((t) =>
-          !(t.ticket_id && selectedTicket.ticket_id && t.ticket_id === selectedTicket.ticket_id) &&
-          !(t.ticket_no && selectedTicket.ticket_no && t.ticket_no === selectedTicket.ticket_no) &&
-          !(t.id && selectedTicket.id && t.id === selectedTicket.id)
-        )
-      );
-      setAllTickets((prev) =>
-        prev.filter((t) =>
-          !(t.ticket_id && selectedTicket.ticket_id && t.ticket_id === selectedTicket.ticket_id) &&
-          !(t.ticket_no && selectedTicket.ticket_no && t.ticket_no === selectedTicket.ticket_no) &&
-          !(t.id && selectedTicket.id && t.id === selectedTicket.id)
-        )
-      );
+      setFilteredResults((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
+      setAllTickets((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
       setSelectedPending((prev) => {
         const next = new Set(prev);
-        next.delete(selectedTicket.ticket_id);
+        if (selectedTicket.ticket_id) next.delete(selectedTicket.ticket_id);
         return next;
       });
 
-      // Allow Supabase async refresh to kick in afterward
+      // Re-fetch to ensure confirmed list and counts are fresh
       await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
       onClose();
     } catch (err) {
@@ -813,41 +754,57 @@ export default function ConfirmExit() {
       toast({ title: `Processing ${ids.length} selected...`, status: 'info', duration: 2000 });
       for (const tId of ids) {
         try {
-          // fetch full ticket row by ticket_id
           const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle();
-          if (!tk) {
-            // fallback: try to fetch by id == tId or by ticket_no
-            continue;
+          // fallback: if ticket fetched by ticket_id is null, also try by id (some of your API-inserted rows may only have id)
+          let ticketRow = tk;
+          if (!ticketRow) {
+            const { data: byId } = await supabase.from('tickets').select('*').eq('id', tId).limit(1).maybeSingle();
+            ticketRow = byId || tk;
           }
-          const { gross, tare, net } = computeWeights(tk);
+          if (!ticketRow) continue;
+          const { gross, tare, net } = computeWeights(ticketRow);
           const payload = {
-            ticket_id: tk.ticket_id,
-            ticket_no: tk.ticket_no || null,
-            vehicle_number: tk.gnsw_truck_no || null,
-            container_id: tk.container_no || null,
-            sad_no: tk.sad_no || null,
+            ticket_id: ticketRow.ticket_id,
+            ticket_no: ticketRow.ticket_no || null,
+            vehicle_number: ticketRow.gnsw_truck_no || null,
+            container_id: ticketRow.container_no || null,
+            sad_no: ticketRow.sad_no || null,
             gross,
             tare,
             net,
-            date: tk.submitted_at || tk.date || tk.submitted_at || null,
-            file_url: tk.file_url || null,
-            file_name: tk.file_name || null,
-            driver: tk.driver || null,
+            date: ticketRow.date || ticketRow.submitted_at || null,
+            file_url: ticketRow.file_url || null,
+            file_name: ticketRow.file_name || null,
+            driver: ticketRow.driver || null,
           };
           if (user && user.id) payload.created_by = user.id;
           if (currentUsername) payload.edited_by = currentUsername;
 
-          const { data: existing } = await supabase.from('outgate').select('id').eq('ticket_id', tId).limit(1);
-          if (!(existing && existing.length)) {
+          // check existing outgate by ticket_id or ticket_no
+          const orParts = [];
+          if (payload.ticket_id) orParts.push(`ticket_id.eq.${payload.ticket_id}`);
+          if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
+          let exists = null;
+          if (orParts.length) {
+            const { data: exData } = await supabase.from('outgate').select('id').or(orParts.join(',')).limit(1);
+            exists = exData;
+          }
+          if (!(exists && exists.length)) {
             await supabase.from('outgate').insert([payload]);
           }
 
-          // robustly mark ticket exited by ticket_id/ticket_no/id
-          await markTicketExited(tk);
+          // Update ticket row status: prefer id if available in ticketRow
+          if (ticketRow.id) {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticketRow.id);
+          } else if (ticketRow.ticket_id) {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticketRow.ticket_id);
+          } else if (ticketRow.ticket_no) {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticketRow.ticket_no);
+          }
 
           // Remove from UI immediately
-          setFilteredResults((prev) => prev.filter((t) => !(t.ticket_id && t.ticket_id === tId)));
-          setAllTickets((prev) => prev.filter((t) => !(t.ticket_id && t.ticket_id === tId)));
+          setFilteredResults((prev) => prev.filter((t) => t.id !== ticketRow.id && t.ticket_id !== ticketRow.ticket_id && t.ticket_no !== ticketRow.ticket_no));
+          setAllTickets((prev) => prev.filter((t) => t.id !== ticketRow.id && t.ticket_id !== ticketRow.ticket_id && t.ticket_no !== ticketRow.ticket_no));
         } catch (e) {
           console.warn('bulk confirm per-ticket failed', tId, e);
         }
@@ -1020,37 +977,57 @@ export default function ConfirmExit() {
       toast({ title: `Bulk confirming ${ids.length} tickets...`, status: 'info', duration: 2000 });
       for (const id of ids) {
         try {
+          // try by ticket_id, fallback by id
           const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', id).limit(1).maybeSingle();
-          if (!tk) continue;
-          const { gross, tare, net } = computeWeights(tk);
+          let ticketRow = tk;
+          if (!ticketRow) {
+            const { data: byId } = await supabase.from('tickets').select('*').eq('id', id).limit(1).maybeSingle();
+            ticketRow = byId || tk;
+          }
+          if (!ticketRow) continue;
+          const { gross, tare, net } = computeWeights(ticketRow);
           const payload = {
-            ticket_id: tk.ticket_id,
-            ticket_no: tk.ticket_no || null,
-            vehicle_number: tk.gnsw_truck_no || null,
-            container_id: tk.container_no || null,
-            sad_no: tk.sad_no || null,
+            ticket_id: ticketRow.ticket_id,
+            ticket_no: ticketRow.ticket_no || null,
+            vehicle_number: ticketRow.gnsw_truck_no || null,
+            container_id: ticketRow.container_no || null,
+            sad_no: ticketRow.sad_no || null,
             gross,
             tare,
             net,
-            date: tk.submitted_at || tk.date || null,
-            file_url: tk.file_url || null,
-            file_name: tk.file_name || null,
-            driver: tk.driver || null,
+            date: ticketRow.date || ticketRow.submitted_at || null,
+            file_url: ticketRow.file_url || null,
+            file_name: ticketRow.file_name || null,
+            driver: ticketRow.driver || null,
           };
           if (user && user.id) payload.created_by = user.id;
           if (currentUsername) payload.edited_by = currentUsername;
 
-          const { data: existing } = await supabase.from('outgate').select('id').eq('ticket_id', id).limit(1);
-          if (!(existing && existing.length)) {
+          // check existing outgate
+          const orParts = [];
+          if (payload.ticket_id) orParts.push(`ticket_id.eq.${payload.ticket_id}`);
+          if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
+          if (orParts.length) {
+            const { data: exData } = await supabase.from('outgate').select('id').or(orParts.join(',')).limit(1);
+            if (!(exData && exData.length)) {
+              await supabase.from('outgate').insert([payload]);
+            }
+          } else {
             await supabase.from('outgate').insert([payload]);
           }
 
-          // robustly update tickets table status
-          await markTicketExited(tk);
+          // update tickets.status
+          if (ticketRow.id) {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticketRow.id);
+          } else if (ticketRow.ticket_id) {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticketRow.ticket_id);
+          } else if (ticketRow.ticket_no) {
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticketRow.ticket_no);
+          }
 
           // remove from UI immediately
-          setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== id));
-          setAllTickets((prev) => prev.filter((t) => t.ticket_id !== id));
+          setFilteredResults((prev) => prev.filter((t) => t.id !== ticketRow.id && t.ticket_id !== ticketRow.ticket_id && t.ticket_no !== ticketRow.ticket_no));
+          setAllTickets((prev) => prev.filter((t) => t.id !== ticketRow.id && t.ticket_id !== ticketRow.ticket_id && t.ticket_no !== ticketRow.ticket_no));
         } catch (e) {
           console.warn('orb confirm per-ticket failed', id, e);
         }
@@ -1151,13 +1128,14 @@ export default function ConfirmExit() {
     return d.toLocaleString();
   };
 
-  // Render pending card (mobile) — use submitted_at as primary date for pending tickets
+  // Render pending card (mobile)
   const renderPendingCard = (ticket, idx) => {
     const { gross, tare, net } = computeWeights(ticket);
-    const ticketDate = ticket.submitted_at ? formatDate(ticket.submitted_at) : ticket.date ? formatDate(ticket.date) : ticket.submitted_at ? formatDate(ticket.submitted_at) : '—';
+    // Per request: pending tickets should use submitted_at instead of date
+    const ticketDate = ticket.submitted_at ? formatDate(ticket.submitted_at) : (ticket.date ? formatDate(ticket.date) : '—');
     const checked = selectedPending.has(ticket.ticket_id);
     return (
-      <Box key={ticket.ticket_id || ticket.ticket_no || ticket.id} p={4}
+      <Box key={ticket.ticket_id || ticket.ticket_no} p={4}
         borderRadius="14px" boxShadow="0 10px 30px rgba(2,6,23,0.06)" mb={3} border="1px solid rgba(2,6,23,0.06)"
         tabIndex={0}>
         <Flex justify="space-between" align="center" mb={2}>
@@ -1392,8 +1370,8 @@ export default function ConfirmExit() {
             <Tbody>
               {paginatedResults.map((ticket, idx) => {
                 const { gross, tare, net } = computeWeights(ticket);
-                // For pending rows, show submitted_at first
-                const ticketDate = ticket.submitted_at ? formatDate(ticket.submitted_at) : ticket.date ? formatDate(ticket.date) : '—';
+                // Per request: pending tickets should use submitted_at instead of date
+                const ticketDate = ticket.submitted_at ? formatDate(ticket.submitted_at) : (ticket.date ? formatDate(ticket.date) : '—');
                 const checked = selectedPending.has(ticket.ticket_id);
                 return (
                   <Tr
@@ -1455,10 +1433,11 @@ export default function ConfirmExit() {
           <ModalBody ref={printRef}>
             {actionType === 'exit' && selectedTicket && (
               <Stack spacing={4}>
-                <Text>Confirm exit for <strong>{selectedTicket.gnsw_truck_no || selectedTicket.vehicle_number}</strong> — container <strong>{selectedTicket.container_no || '—'}</strong>?</Text>
+                <Text>Confirm exit for <strong>{selectedTicket.gnsw_truck_no}</strong> — container <strong>{selectedTicket.container_no || '—'}</strong>?</Text>
                 <Box>
                   <Text fontSize="sm" color="gray.600">Ticket No: {selectedTicket.ticket_no || '—'}</Text>
                   <Text fontSize="sm" color="gray.600">SAD No: {selectedTicket.sad_no || '—'}</Text>
+                  {/* Use submitted_at for pending tickets as requested */}
                   <Text fontSize="sm" color="gray.600">Entry Date: {selectedTicket.submitted_at ? formatDate(selectedTicket.submitted_at) : (selectedTicket.date ? formatDate(selectedTicket.date) : '—')}</Text>
                 </Box>
                 <Box>
