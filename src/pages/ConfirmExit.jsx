@@ -177,64 +177,6 @@ function isImageUrl(url) {
 }
 
 /* -----------------------
-   Date helpers (robust parsing and preference for submitted_at)
------------------------ */
-
-const DEFAULT_DATE_DISPLAY = '1/1/1, 12:00:00 AM';
-
-/**
- * Try to parse a DB date string (robust):
- * - Accepts Date objects and numbers
- * - Tries new Date(str)
- * - If fails, tries replacing first space with 'T' (common "YYYY-MM-DD HH:mm:ss" -> "YYYY-MM-DDTHH:mm:ss")
- * - If still fails, returns null
- */
-function parseDbDate(raw) {
-  if (!raw && raw !== 0) return null;
-  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
-  if (typeof raw === 'number') {
-    const d = new Date(raw);
-    return isNaN(d.getTime()) ? null : d;
-  }
-  const s = String(raw).trim();
-  if (!s) return null;
-
-  // try native parsing first
-  let d = new Date(s);
-  if (!isNaN(d.getTime())) return d;
-
-  // try replace space with T (common format from Postgres without timezone)
-  const s2 = s.replace(' ', 'T');
-  d = new Date(s2);
-  if (!isNaN(d.getTime())) return d;
-
-  // try append Z (UTC) to be more forgiving if no timezone provided
-  const s3 = s2 + 'Z';
-  d = new Date(s3);
-  if (!isNaN(d.getTime())) return d;
-
-  // try numeric
-  const num = Number(s);
-  if (!Number.isNaN(num)) {
-    d = new Date(num);
-    if (!isNaN(d.getTime())) return d;
-  }
-
-  return null;
-}
-
-/**
- * formatDate: returns a human friendly date/time string.
- * If provided value is falsy or invalid, returns DEFAULT_DATE_DISPLAY (requested).
- */
-const formatDate = (iso) => {
-  if (!iso && iso !== 0) return DEFAULT_DATE_DISPLAY;
-  const d = parseDbDate(iso);
-  if (!d) return DEFAULT_DATE_DISPLAY;
-  return d.toLocaleString();
-};
-
-/* -----------------------
    Component
 ----------------------- */
 export default function ConfirmExit() {
@@ -313,7 +255,7 @@ export default function ConfirmExit() {
   const isMobile = useBreakpointValue({ base: true, md: false });
 
   // selection state
-  const [selectedPending, setSelectedPending] = useState(new Set()); // ticket_id values
+  const [selectedPending, setSelectedPending] = useState(new Set()); // ticket_id values (or ticket_no fallback not used here)
   const [selectedConfirmed, setSelectedConfirmed] = useState(new Set());
 
   // keyboard navigation
@@ -333,11 +275,12 @@ export default function ConfirmExit() {
   // ---------------------
   const fetchTickets = useCallback(async () => {
     try {
+      // include id so we can fall back to id when ticket_id is null
       const { data, error } = await supabase
         .from('tickets')
-        .select('ticket_id, ticket_no, gnsw_truck_no, container_no, date, sad_no, status, gross, tare, net, file_url, file_name, submitted_at, driver')
+        .select('id, ticket_id, ticket_no, gnsw_truck_no, container_no, date, sad_no, status, gross, tare, net, file_url, file_name, submitted_at, driver')
         .eq('status', 'Pending')
-        .order('date', { ascending: false });
+        .order('submitted_at', { ascending: false });
 
       if (error) throw error;
       setAllTickets(data || []);
@@ -533,26 +476,12 @@ export default function ConfirmExit() {
     return hh * 60 + mm;
   };
 
-  // Search & filter for pending tickets
+  // Search & filter for pending tickets - prefer submitted_at over date
   const handleSearch = () => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
-
-    // Build start/end datetimes if dateFrom/dateTo provided (Time From applies to Date From, Time To applies to Date To)
-    let start = null;
-    let end = null;
-
-    if (dateFrom) {
-      const tf = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
-      start = parseDbDate(`${dateFrom}T${tf}`) || parseDbDate(`${dateFrom} ${tf}`) || new Date(`${dateFrom}T${tf}`);
-      if (start && isNaN(start.getTime())) start = null;
-    }
-
-    if (dateTo) {
-      const tt = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
-      end = parseDbDate(`${dateTo}T${tt}`) || parseDbDate(`${dateTo} ${tt}`) || new Date(`${dateTo}T${tt}`);
-      if (end && isNaN(end.getTime())) end = null;
-    }
-
+    const df = dateFrom ? new Date(dateFrom) : null;
+    const dt = dateTo ? new Date(dateTo) : null;
+    if (dt) dt.setHours(23, 59, 59, 999);
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
@@ -564,52 +493,20 @@ export default function ConfirmExit() {
       if (confirmedIds.has(ticket.ticket_id)) return false;
       if (ticket.status === 'Exited') return false;
 
-      // Prefer submitted_at for date/time handling; fallback to date
-      const rawDateCandidate = ticket.submitted_at ?? ticket.date ?? ticket.created_at ?? null;
-      const ticketDate = parseDbDate(rawDateCandidate);
-
-      // If user specified dateFrom/dateTo -> use absolute start/end comparisons
-      if (start || end) {
-        // If ticketDate is missing, try alternative fields (we already tried submitted_at/date above).
-        if (!ticketDate) {
-          // attempt to coerce from any other common fields
-          const fallback = ticket.submitted_at ?? ticket.date ?? ticket.created_at ?? null;
-          if (fallback) {
-            // try parse again more aggressively
-            const p2 = parseDbDate(String(fallback).replace(' ', 'T'));
-            if (p2) {
-              if (start && p2 < start) return false;
-              if (end && p2 > end) return false;
-              // matches
-            } else {
-              // If we cannot parse ticket date, BE CONSERVATIVE: include it (user asked to make sure records appear)
-              // but only include if other non-date filters matched (they already did)
-            }
-          } else {
-            // No date available — include it (enforcement to make sure it appears)
-          }
-        } else {
-          if (start && ticketDate < start) return false;
-          if (end && ticketDate > end) return false;
-        }
-        // Additionally if user provided only times and no dates (shouldn't reach here because start/end require date)
-      } else if ((tFrom !== null) || (tTo !== null)) {
-        // No dateFrom/dateTo, but time-only filtering: check time of day of ticketDate
-        if (!ticketDate) {
-          // if there's no ticket date to test time-of-day, include (safer) — or you can exclude; user asked "no results should be left behind"
-          return true;
-        }
-        const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
-        const fromM = tFrom !== null ? tFrom : 0;
-        const toM = tTo !== null ? tTo : 24 * 60 - 1;
-        if (fromM <= toM) {
-          if (!(mins >= fromM && mins <= toM)) return false;
-        } else {
-          // overnight wrap
-          if (!(mins >= fromM || mins <= toM)) return false;
+      // use submitted_at for pending ticket filtering
+      const dateStr = ticket.submitted_at || ticket.date;
+      if (df || dt || tFrom !== null || tTo !== null) {
+        if (!dateStr) return false;
+        const ticketDate = new Date(dateStr);
+        if (Number.isNaN(ticketDate.getTime())) return false;
+        if (df && ticketDate < df) return false;
+        if (dt && ticketDate > dt) return false;
+        if (tFrom !== null || tTo !== null) {
+          const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+          if (tFrom !== null && mins < tFrom) return false;
+          if (tTo !== null && mins > tTo) return false;
         }
       }
-
       return true;
     });
 
@@ -646,9 +543,9 @@ export default function ConfirmExit() {
       let va = a[sortKey];
       let vb = b[sortKey];
       if (sortKey === 'date') {
-        // prefer submitted_at for sorting
-        va = parseDbDate(a.submitted_at ?? a.date ?? 0) || 0;
-        vb = parseDbDate(b.submitted_at ?? b.date ?? 0) || 0;
+        // For pending tickets prefer submitted_at over date
+        va = new Date(a.submitted_at || a.date || 0);
+        vb = new Date(b.submitted_at || b.date || 0);
       } else {
         va = (va ?? '').toString().toLowerCase();
         vb = (vb ?? '').toString().toLowerCase();
@@ -686,6 +583,32 @@ export default function ConfirmExit() {
   }, [filteredConfirmed, confirmedPage]);
 
   const totalConfirmedPages = Math.max(1, Math.ceil(filteredConfirmed.length / PAGE_SIZE));
+
+  // Robust helper to mark ticket status => Exited using multiple fallbacks (ticket_id, ticket_no, id)
+  const markTicketExited = useCallback(async (ticket) => {
+    if (!ticket) return false;
+    try {
+      // Try by ticket_id first
+      if (ticket.ticket_id) {
+        const { data, error } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticket.ticket_id).select();
+        if (!error && data && data.length) return true;
+      }
+      // Fallback to ticket_no
+      if (ticket.ticket_no) {
+        const { data, error } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticket.ticket_no).select();
+        if (!error && data && data.length) return true;
+      }
+      // Fallback to internal id
+      if (ticket.id) {
+        const { data, error } = await supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticket.id).select();
+        if (!error && data && data.length) return true;
+      }
+      return false;
+    } catch (e) {
+      console.warn('markTicketExited error', e);
+      return false;
+    }
+  }, []);
 
   // ---------------------
   // Modal actions (unchanged logic, but attach created_by & edited_by)
@@ -731,16 +654,18 @@ export default function ConfirmExit() {
       }
       const { gross, tare, net } = computeWeights(selectedTicket);
 
+      // For pending tickets prefer submitted_at as their "weighed/date" source
       const payload = {
-        ticket_id: selectedTicket.ticket_id,
+        ticket_id: selectedTicket.ticket_id || null,
         ticket_no: selectedTicket.ticket_no || null,
-        vehicle_number: selectedTicket.gnsw_truck_no,
-        container_id: selectedTicket.container_no,
-        sad_no: selectedTicket.sad_no,
+        vehicle_number: selectedTicket.gnsw_truck_no || selectedTicket.vehicle_number || null,
+        container_id: selectedTicket.container_no || null,
+        sad_no: selectedTicket.sad_no || null,
         gross,
         tare,
         net,
-        date: selectedTicket.date || selectedTicket.submitted_at || null,
+        // use submitted_at for pending; outgate.created_at will be the exit time
+        date: selectedTicket.submitted_at || selectedTicket.date || null,
         file_url: selectedTicket.file_url || null,
         file_name: selectedTicket.file_name || null,
         driver: resolvedDriver || null,
@@ -750,6 +675,7 @@ export default function ConfirmExit() {
       if (user && user.id) payload.created_by = user.id;
       if (currentUsername) payload.edited_by = currentUsername;
 
+      // Check for existing outgate by ticket_id OR ticket_no
       if (payload.ticket_id) {
         const { data: existing, error: existingErr } = await supabase
           .from('outgate')
@@ -765,53 +691,107 @@ export default function ConfirmExit() {
             duration: 4000,
             isClosable: true,
           });
-          try {
-            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', payload.ticket_id);
 
-            // Immediately reflect change in UI so row disappears
-            setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== payload.ticket_id));
-            setAllTickets((prev) => prev.filter((t) => t.ticket_id !== payload.ticket_id));
-            setSelectedPending((prev) => {
-              const next = new Set(prev);
-              next.delete(payload.ticket_id);
-              return next;
-            });
+          // Try to ensure underlying ticket row is set to Exited (robustly)
+          await markTicketExited(selectedTicket);
 
-            await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
-          } catch (e) {
-            console.warn('mark exited after existing outgate failed', e);
-          }
+          // Immediately reflect change in UI so row disappears
+          setFilteredResults((prev) => prev.filter((t) =>
+            !(t.ticket_id && payload.ticket_id && t.ticket_id === payload.ticket_id) &&
+            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
+            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
+          ));
+          setAllTickets((prev) => prev.filter((t) =>
+            !(t.ticket_id && payload.ticket_id && t.ticket_id === payload.ticket_id) &&
+            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
+            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
+          ));
+          setSelectedPending((prev) => {
+            const next = new Set(prev);
+            next.delete(payload.ticket_id);
+            // also remove any possible ticket_no keys (if you stored them elsewhere)
+            return next;
+          });
+
+          await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+          onClose();
+          return;
+        }
+      } else if (payload.ticket_no) {
+        // If there's no ticket_id, check by ticket_no for existing outgate
+        const { data: existing2, error: existingErr2 } = await supabase
+          .from('outgate')
+          .select('id, created_at')
+          .eq('ticket_no', payload.ticket_no)
+          .limit(1);
+        if (existingErr2) console.warn('check existing outgate error by ticket_no', existingErr2);
+        if (existing2 && existing2.length) {
+          toast({
+            title: 'Already confirmed',
+            description: `Ticket ${payload.ticket_no} already has a confirmed exit.`,
+            status: 'warning',
+            duration: 4000,
+            isClosable: true,
+          });
+
+          await markTicketExited(selectedTicket);
+
+          setFilteredResults((prev) => prev.filter((t) =>
+            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
+            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
+          ));
+          setAllTickets((prev) => prev.filter((t) =>
+            !(t.ticket_no && payload.ticket_no && t.ticket_no === payload.ticket_no) &&
+            !(t.id && selectedTicket.id && t.id === selectedTicket.id)
+          ));
+          setSelectedPending((prev) => {
+            const next = new Set(prev);
+            // remove possible entries
+            return next;
+          });
+
+          await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
           onClose();
           return;
         }
       }
 
+      // Insert outgate row
       const { error: insertErr } = await supabase.from('outgate').insert([payload]);
       if (insertErr) {
         toast({ title: 'Error confirming exit', description: insertErr.message, status: 'error', duration: 5000, isClosable: true });
         return;
       }
 
-      if (selectedTicket.ticket_id) {
-        await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
+      // After creating outgate, robustly update tickets.status to 'Exited'
+      const marked = await markTicketExited(selectedTicket);
+      if (!marked) {
+        // Try extra attempts by ticket_no or id if initial didn't work (already inside markTicketExited)
+        console.warn('Could not mark ticket as Exited via primary identifiers. It may not exist or needs manual update.');
       }
 
-      toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no}`, status: 'success', duration: 3000, isClosable: true });
+      toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no || selectedTicket.vehicle_number}`, status: 'success', duration: 3000, isClosable: true });
 
       // Instantly remove from UI (fixes "not leaving table" issue)
-      if (selectedTicket.ticket_id) {
-        setFilteredResults((prev) =>
-          prev.filter((t) => t.ticket_id !== selectedTicket.ticket_id)
-        );
-        setAllTickets((prev) =>
-          prev.filter((t) => t.ticket_id !== selectedTicket.ticket_id)
-        );
-        setSelectedPending((prev) => {
-          const next = new Set(prev);
-          next.delete(selectedTicket.ticket_id);
-          return next;
-        });
-      }
+      setFilteredResults((prev) =>
+        prev.filter((t) =>
+          !(t.ticket_id && selectedTicket.ticket_id && t.ticket_id === selectedTicket.ticket_id) &&
+          !(t.ticket_no && selectedTicket.ticket_no && t.ticket_no === selectedTicket.ticket_no) &&
+          !(t.id && selectedTicket.id && t.id === selectedTicket.id)
+        )
+      );
+      setAllTickets((prev) =>
+        prev.filter((t) =>
+          !(t.ticket_id && selectedTicket.ticket_id && t.ticket_id === selectedTicket.ticket_id) &&
+          !(t.ticket_no && selectedTicket.ticket_no && t.ticket_no === selectedTicket.ticket_no) &&
+          !(t.id && selectedTicket.id && t.id === selectedTicket.id)
+        )
+      );
+      setSelectedPending((prev) => {
+        const next = new Set(prev);
+        next.delete(selectedTicket.ticket_id);
+        return next;
+      });
 
       // Allow Supabase async refresh to kick in afterward
       await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
@@ -833,8 +813,12 @@ export default function ConfirmExit() {
       toast({ title: `Processing ${ids.length} selected...`, status: 'info', duration: 2000 });
       for (const tId of ids) {
         try {
+          // fetch full ticket row by ticket_id
           const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle();
-          if (!tk) continue;
+          if (!tk) {
+            // fallback: try to fetch by id == tId or by ticket_no
+            continue;
+          }
           const { gross, tare, net } = computeWeights(tk);
           const payload = {
             ticket_id: tk.ticket_id,
@@ -845,7 +829,7 @@ export default function ConfirmExit() {
             gross,
             tare,
             net,
-            date: tk.date || tk.submitted_at || null,
+            date: tk.submitted_at || tk.date || tk.submitted_at || null,
             file_url: tk.file_url || null,
             file_name: tk.file_name || null,
             driver: tk.driver || null,
@@ -857,11 +841,13 @@ export default function ConfirmExit() {
           if (!(existing && existing.length)) {
             await supabase.from('outgate').insert([payload]);
           }
-          await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', tId);
+
+          // robustly mark ticket exited by ticket_id/ticket_no/id
+          await markTicketExited(tk);
 
           // Remove from UI immediately
-          setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== tId));
-          setAllTickets((prev) => prev.filter((t) => t.ticket_id !== tId));
+          setFilteredResults((prev) => prev.filter((t) => !(t.ticket_id && t.ticket_id === tId)));
+          setAllTickets((prev) => prev.filter((t) => !(t.ticket_id && t.ticket_id === tId)));
         } catch (e) {
           console.warn('bulk confirm per-ticket failed', tId, e);
         }
@@ -887,6 +873,7 @@ export default function ConfirmExit() {
     }
   };
 
+  // Bulk export selected confirmed
   const bulkExportConfirmedSelected = () => {
     if (!selectedConfirmed.size) {
       toast({ title: 'No selection', status: 'info' });
@@ -914,6 +901,7 @@ export default function ConfirmExit() {
     setSelectedConfirmed(new Set());
   };
 
+  // ----- handleExportConfirmed (existing full export) -----
   const handleExportConfirmed = () => {
     const rows = filteredConfirmed.map((r) => {
       const w = computeWeights(r);
@@ -1044,7 +1032,7 @@ export default function ConfirmExit() {
             gross,
             tare,
             net,
-            date: tk.date || tk.submitted_at || null,
+            date: tk.submitted_at || tk.date || null,
             file_url: tk.file_url || null,
             file_name: tk.file_name || null,
             driver: tk.driver || null,
@@ -1056,7 +1044,9 @@ export default function ConfirmExit() {
           if (!(existing && existing.length)) {
             await supabase.from('outgate').insert([payload]);
           }
-          await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', id);
+
+          // robustly update tickets table status
+          await markTicketExited(tk);
 
           // remove from UI immediately
           setFilteredResults((prev) => prev.filter((t) => t.ticket_id !== id));
@@ -1154,18 +1144,20 @@ export default function ConfirmExit() {
   };
 
   // small helper to format date in the page
-  // NOTE: uses submitted_at preferred inside formatDate helper above
-  // const formatDate = (iso) => { ... } // already defined above
+  const formatDate = (iso) => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  };
 
-  // Render pending card (mobile)
+  // Render pending card (mobile) — use submitted_at as primary date for pending tickets
   const renderPendingCard = (ticket, idx) => {
     const { gross, tare, net } = computeWeights(ticket);
-    // Prefer submitted_at for display; fallback to date; fallback to default constant
-    const ticketDateValue = ticket.submitted_at ?? ticket.date ?? null;
-    const ticketDate = ticketDateValue ? formatDate(ticketDateValue) : DEFAULT_DATE_DISPLAY;
+    const ticketDate = ticket.submitted_at ? formatDate(ticket.submitted_at) : ticket.date ? formatDate(ticket.date) : ticket.submitted_at ? formatDate(ticket.submitted_at) : '—';
     const checked = selectedPending.has(ticket.ticket_id);
     return (
-      <Box key={ticket.ticket_id || ticket.ticket_no} p={4}
+      <Box key={ticket.ticket_id || ticket.ticket_no || ticket.id} p={4}
         borderRadius="14px" boxShadow="0 10px 30px rgba(2,6,23,0.06)" mb={3} border="1px solid rgba(2,6,23,0.06)"
         tabIndex={0}>
         <Flex justify="space-between" align="center" mb={2}>
@@ -1282,7 +1274,7 @@ export default function ConfirmExit() {
                 'Truck': t.gnsw_truck_no || '',
                 'SAD No': t.sad_no || '',
                 'Container': t.container_no || '',
-                'Entry Date': t.submitted_at ? formatDate(t.submitted_at) : t.date ? formatDate(t.date) : DEFAULT_DATE_DISPLAY,
+                'Entry Date': t.submitted_at ? formatDate(t.submitted_at) : (t.date ? formatDate(t.date) : ''),
                 'Gross (KG)': w.gross ?? '',
                 'Tare (KG)': w.tare ?? '',
                 'Net (KG)': w.net ?? '',
@@ -1400,12 +1392,12 @@ export default function ConfirmExit() {
             <Tbody>
               {paginatedResults.map((ticket, idx) => {
                 const { gross, tare, net } = computeWeights(ticket);
-                const ticketDateValue = ticket.submitted_at ?? ticket.date ?? null;
-                const ticketDate = ticketDateValue ? formatDate(ticketDateValue) : DEFAULT_DATE_DISPLAY;
+                // For pending rows, show submitted_at first
+                const ticketDate = ticket.submitted_at ? formatDate(ticket.submitted_at) : ticket.date ? formatDate(ticket.date) : '—';
                 const checked = selectedPending.has(ticket.ticket_id);
                 return (
                   <Tr
-                    key={ticket.ticket_id || ticket.ticket_no}
+                    key={ticket.ticket_id || ticket.ticket_no || ticket.id}
                     tabIndex={0}
                     ref={(el) => (pendingRowRefs.current[idx] = el)}
                     className={focusedPendingIndex === idx ? 'row-focus' : undefined}
@@ -1463,11 +1455,11 @@ export default function ConfirmExit() {
           <ModalBody ref={printRef}>
             {actionType === 'exit' && selectedTicket && (
               <Stack spacing={4}>
-                <Text>Confirm exit for <strong>{selectedTicket.gnsw_truck_no}</strong> — container <strong>{selectedTicket.container_no || '—'}</strong>?</Text>
+                <Text>Confirm exit for <strong>{selectedTicket.gnsw_truck_no || selectedTicket.vehicle_number}</strong> — container <strong>{selectedTicket.container_no || '—'}</strong>?</Text>
                 <Box>
                   <Text fontSize="sm" color="gray.600">Ticket No: {selectedTicket.ticket_no || '—'}</Text>
                   <Text fontSize="sm" color="gray.600">SAD No: {selectedTicket.sad_no || '—'}</Text>
-                  <Text fontSize="sm" color="gray.600">Entry Date: {selectedTicket.submitted_at ? formatDate(selectedTicket.submitted_at) : (selectedTicket.date ? formatDate(selectedTicket.date) : DEFAULT_DATE_DISPLAY)}</Text>
+                  <Text fontSize="sm" color="gray.600">Entry Date: {selectedTicket.submitted_at ? formatDate(selectedTicket.submitted_at) : (selectedTicket.date ? formatDate(selectedTicket.date) : '—')}</Text>
                 </Box>
                 <Box>
                   <Text fontWeight="semibold">Weight Summary</Text>
