@@ -177,6 +177,64 @@ function isImageUrl(url) {
 }
 
 /* -----------------------
+   Date helpers (robust parsing and preference for submitted_at)
+----------------------- */
+
+const DEFAULT_DATE_DISPLAY = '1/1/1, 12:00:00 AM';
+
+/**
+ * Try to parse a DB date string (robust):
+ * - Accepts Date objects and numbers
+ * - Tries new Date(str)
+ * - If fails, tries replacing first space with 'T' (common "YYYY-MM-DD HH:mm:ss" -> "YYYY-MM-DDTHH:mm:ss")
+ * - If still fails, returns null
+ */
+function parseDbDate(raw) {
+  if (!raw && raw !== 0) return null;
+  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+  if (typeof raw === 'number') {
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  // try native parsing first
+  let d = new Date(s);
+  if (!isNaN(d.getTime())) return d;
+
+  // try replace space with T (common format from Postgres without timezone)
+  const s2 = s.replace(' ', 'T');
+  d = new Date(s2);
+  if (!isNaN(d.getTime())) return d;
+
+  // try append Z (UTC) to be more forgiving if no timezone provided
+  const s3 = s2 + 'Z';
+  d = new Date(s3);
+  if (!isNaN(d.getTime())) return d;
+
+  // try numeric
+  const num = Number(s);
+  if (!Number.isNaN(num)) {
+    d = new Date(num);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  return null;
+}
+
+/**
+ * formatDate: returns a human friendly date/time string.
+ * If provided value is falsy or invalid, returns DEFAULT_DATE_DISPLAY (requested).
+ */
+const formatDate = (iso) => {
+  if (!iso && iso !== 0) return DEFAULT_DATE_DISPLAY;
+  const d = parseDbDate(iso);
+  if (!d) return DEFAULT_DATE_DISPLAY;
+  return d.toLocaleString();
+};
+
+/* -----------------------
    Component
 ----------------------- */
 export default function ConfirmExit() {
@@ -478,9 +536,23 @@ export default function ConfirmExit() {
   // Search & filter for pending tickets
   const handleSearch = () => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
-    const df = dateFrom ? new Date(dateFrom) : null;
-    const dt = dateTo ? new Date(dateTo) : null;
-    if (dt) dt.setHours(23, 59, 59, 999);
+
+    // Build start/end datetimes if dateFrom/dateTo provided (Time From applies to Date From, Time To applies to Date To)
+    let start = null;
+    let end = null;
+
+    if (dateFrom) {
+      const tf = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
+      start = parseDbDate(`${dateFrom}T${tf}`) || parseDbDate(`${dateFrom} ${tf}`) || new Date(`${dateFrom}T${tf}`);
+      if (start && isNaN(start.getTime())) start = null;
+    }
+
+    if (dateTo) {
+      const tt = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
+      end = parseDbDate(`${dateTo}T${tt}`) || parseDbDate(`${dateTo} ${tt}`) || new Date(`${dateTo}T${tt}`);
+      if (end && isNaN(end.getTime())) end = null;
+    }
+
     const tFrom = parseTimeToMinutes(timeFrom);
     const tTo = parseTimeToMinutes(timeTo);
 
@@ -492,19 +564,52 @@ export default function ConfirmExit() {
       if (confirmedIds.has(ticket.ticket_id)) return false;
       if (ticket.status === 'Exited') return false;
 
-      const dateStr = ticket.date || ticket.submitted_at;
-      if (df || dt || tFrom !== null || tTo !== null) {
-        if (!dateStr) return false;
-        const ticketDate = new Date(dateStr);
-        if (Number.isNaN(ticketDate.getTime())) return false;
-        if (df && ticketDate < df) return false;
-        if (dt && ticketDate > dt) return false;
-        if (tFrom !== null || tTo !== null) {
-          const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
-          if (tFrom !== null && mins < tFrom) return false;
-          if (tTo !== null && mins > tTo) return false;
+      // Prefer submitted_at for date/time handling; fallback to date
+      const rawDateCandidate = ticket.submitted_at ?? ticket.date ?? ticket.created_at ?? null;
+      const ticketDate = parseDbDate(rawDateCandidate);
+
+      // If user specified dateFrom/dateTo -> use absolute start/end comparisons
+      if (start || end) {
+        // If ticketDate is missing, try alternative fields (we already tried submitted_at/date above).
+        if (!ticketDate) {
+          // attempt to coerce from any other common fields
+          const fallback = ticket.submitted_at ?? ticket.date ?? ticket.created_at ?? null;
+          if (fallback) {
+            // try parse again more aggressively
+            const p2 = parseDbDate(String(fallback).replace(' ', 'T'));
+            if (p2) {
+              if (start && p2 < start) return false;
+              if (end && p2 > end) return false;
+              // matches
+            } else {
+              // If we cannot parse ticket date, BE CONSERVATIVE: include it (user asked to make sure records appear)
+              // but only include if other non-date filters matched (they already did)
+            }
+          } else {
+            // No date available — include it (enforcement to make sure it appears)
+          }
+        } else {
+          if (start && ticketDate < start) return false;
+          if (end && ticketDate > end) return false;
+        }
+        // Additionally if user provided only times and no dates (shouldn't reach here because start/end require date)
+      } else if ((tFrom !== null) || (tTo !== null)) {
+        // No dateFrom/dateTo, but time-only filtering: check time of day of ticketDate
+        if (!ticketDate) {
+          // if there's no ticket date to test time-of-day, include (safer) — or you can exclude; user asked "no results should be left behind"
+          return true;
+        }
+        const mins = ticketDate.getHours() * 60 + ticketDate.getMinutes();
+        const fromM = tFrom !== null ? tFrom : 0;
+        const toM = tTo !== null ? tTo : 24 * 60 - 1;
+        if (fromM <= toM) {
+          if (!(mins >= fromM && mins <= toM)) return false;
+        } else {
+          // overnight wrap
+          if (!(mins >= fromM || mins <= toM)) return false;
         }
       }
+
       return true;
     });
 
@@ -541,8 +646,9 @@ export default function ConfirmExit() {
       let va = a[sortKey];
       let vb = b[sortKey];
       if (sortKey === 'date') {
-        va = new Date(a.date || a.submitted_at || 0);
-        vb = new Date(b.date || b.submitted_at || 0);
+        // prefer submitted_at for sorting
+        va = parseDbDate(a.submitted_at ?? a.date ?? 0) || 0;
+        vb = parseDbDate(b.submitted_at ?? b.date ?? 0) || 0;
       } else {
         va = (va ?? '').toString().toLowerCase();
         vb = (vb ?? '').toString().toLowerCase();
@@ -634,7 +740,7 @@ export default function ConfirmExit() {
         gross,
         tare,
         net,
-        date: selectedTicket.date || null,
+        date: selectedTicket.date || selectedTicket.submitted_at || null,
         file_url: selectedTicket.file_url || null,
         file_name: selectedTicket.file_name || null,
         driver: resolvedDriver || null,
@@ -781,7 +887,6 @@ export default function ConfirmExit() {
     }
   };
 
-  // Bulk export selected confirmed
   const bulkExportConfirmedSelected = () => {
     if (!selectedConfirmed.size) {
       toast({ title: 'No selection', status: 'info' });
@@ -809,7 +914,6 @@ export default function ConfirmExit() {
     setSelectedConfirmed(new Set());
   };
 
-  // ----- handleExportConfirmed (existing full export) -----
   const handleExportConfirmed = () => {
     const rows = filteredConfirmed.map((r) => {
       const w = computeWeights(r);
@@ -1050,17 +1154,15 @@ export default function ConfirmExit() {
   };
 
   // small helper to format date in the page
-  const formatDate = (iso) => {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString();
-  };
+  // NOTE: uses submitted_at preferred inside formatDate helper above
+  // const formatDate = (iso) => { ... } // already defined above
 
   // Render pending card (mobile)
   const renderPendingCard = (ticket, idx) => {
     const { gross, tare, net } = computeWeights(ticket);
-    const ticketDate = ticket.date ? formatDate(ticket.date) : ticket.submitted_at ? formatDate(ticket.submitted_at) : '—';
+    // Prefer submitted_at for display; fallback to date; fallback to default constant
+    const ticketDateValue = ticket.submitted_at ?? ticket.date ?? null;
+    const ticketDate = ticketDateValue ? formatDate(ticketDateValue) : DEFAULT_DATE_DISPLAY;
     const checked = selectedPending.has(ticket.ticket_id);
     return (
       <Box key={ticket.ticket_id || ticket.ticket_no} p={4}
@@ -1180,7 +1282,7 @@ export default function ConfirmExit() {
                 'Truck': t.gnsw_truck_no || '',
                 'SAD No': t.sad_no || '',
                 'Container': t.container_no || '',
-                'Entry Date': t.date ? formatDate(t.date) : t.submitted_at ? formatDate(t.submitted_at) : '',
+                'Entry Date': t.submitted_at ? formatDate(t.submitted_at) : t.date ? formatDate(t.date) : DEFAULT_DATE_DISPLAY,
                 'Gross (KG)': w.gross ?? '',
                 'Tare (KG)': w.tare ?? '',
                 'Net (KG)': w.net ?? '',
@@ -1298,7 +1400,8 @@ export default function ConfirmExit() {
             <Tbody>
               {paginatedResults.map((ticket, idx) => {
                 const { gross, tare, net } = computeWeights(ticket);
-                const ticketDate = ticket.date ? formatDate(ticket.date) : ticket.submitted_at ? formatDate(ticket.submitted_at) : '—';
+                const ticketDateValue = ticket.submitted_at ?? ticket.date ?? null;
+                const ticketDate = ticketDateValue ? formatDate(ticketDateValue) : DEFAULT_DATE_DISPLAY;
                 const checked = selectedPending.has(ticket.ticket_id);
                 return (
                   <Tr
@@ -1364,7 +1467,7 @@ export default function ConfirmExit() {
                 <Box>
                   <Text fontSize="sm" color="gray.600">Ticket No: {selectedTicket.ticket_no || '—'}</Text>
                   <Text fontSize="sm" color="gray.600">SAD No: {selectedTicket.sad_no || '—'}</Text>
-                  <Text fontSize="sm" color="gray.600">Entry Date: {selectedTicket.date ? formatDate(selectedTicket.date) : (selectedTicket.submitted_at ? formatDate(selectedTicket.submitted_at) : '—')}</Text>
+                  <Text fontSize="sm" color="gray.600">Entry Date: {selectedTicket.submitted_at ? formatDate(selectedTicket.submitted_at) : (selectedTicket.date ? formatDate(selectedTicket.date) : DEFAULT_DATE_DISPLAY)}</Text>
                 </Box>
                 <Box>
                   <Text fontWeight="semibold">Weight Summary</Text>
@@ -1471,7 +1574,7 @@ export default function ConfirmExit() {
       <Flex align="center" justify="space-between" mt={10} mb={4} gap={4} flexWrap="wrap">
         <Heading size="md">Confirmed Exits</Heading>
         <HStack spacing={2}>
-          <Input placeholder="Search confirmed by Truck, Driver, SAD, or Ticket No (live)" value={confirmedQuery} onChange={(e) => { setConfirmedQuery(e.target.value); setConfirmedPage(1); }} size="sm" maxW="380px" /> 
+          <Input placeholder="Search confirmed by Truck, Driver, SAD, or Ticket No (live)" value={confirmedQuery} onChange={(e) => { setConfirmedQuery(e.target.value); setConfirmedPage(1); }} size="sm" maxW="380px" />
           <Button size="sm" onClick={() => { setConfirmedQuery(''); setConfirmedPage(1); }}>Clear</Button>
           <Button size="sm" variant="ghost" onClick={() => {
             if (!selectedConfirmed.size) return toast({ title: 'No selection', status: 'info' });
