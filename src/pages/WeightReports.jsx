@@ -204,10 +204,6 @@ function computeWeightsFromObj({ gross, tare, net }) {
 
 /**
  * parseTicketDate (robust)
- *
- * Improvements:
- * - Treats timestamps WITHOUT timezone (e.g. "2025-11-15 20:07:35.753") as local.
- * - Supports ISO, DD/MM/YY, and common formats.
  */
 function parseTicketDate(raw) {
   if (!raw) return null;
@@ -219,66 +215,24 @@ function parseTicketDate(raw) {
   const s0 = String(raw).trim();
   if (s0 === '') return null;
 
-  // YYYY-MM-DD (date-only)
-  const ymdOnly = /^\d{4}-\d{2}-\d{2}$/;
-  if (ymdOnly.test(s0)) {
-    const [y, m, d] = s0.split('-').map((x) => parseInt(x, 10));
-    const dt = new Date(y, m - 1, d, 0, 0, 0, 0); // local midnight
-    if (!isNaN(dt.getTime())) return dt;
+  // handle plain yyyy-mm-dd
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s0)) {
+    const d = new Date(`${s0}T00:00:00`);
+    return isNaN(d.getTime()) ? null : d;
   }
 
-  // YYYY-MM-DD[ T]HH:MM:SS(.ms)? optional timezone part
-  const isoLike = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(\.\d+)?([zZ]|[+\-]\d{2}:\d{2})?$/;
-  const isoMatch = s0.match(isoLike);
-  if (isoMatch) {
-    const year = Number(isoMatch[1]);
-    const month = Number(isoMatch[2]);
-    const day = Number(isoMatch[3]);
-    const hh = Number(isoMatch[4]);
-    const mm = Number(isoMatch[5]);
-    const ss = Number(isoMatch[6]);
-    const ms = isoMatch[7] ? Math.round(Number(isoMatch[7]) * 1000) : 0;
-    const tz = isoMatch[8];
-
-    if (tz) {
-      // timezone provided -> let JS handle it
-      const d = new Date(s0);
-      if (!isNaN(d.getTime())) return d;
-    } else {
-      // no timezone -> treat as local: construct with local components
-      const d = new Date(year, month - 1, day, hh, mm, ss, ms);
-      if (!isNaN(d.getTime())) return d;
-    }
+  // handle yyyy-mm-dd hh:mm:ss(.sss)?
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s0)) {
+    const iso = s0.replace(' ', 'T');
+    const d = new Date(iso);
+    if (!isNaN(d.getTime())) return d;
   }
 
-  // Generic fallback: try parsing numbers (timestamp) or JS date
-  try {
-    const dTry = new Date(s0);
-    if (!isNaN(dTry.getTime())) return dTry;
-  } catch (e) {
-    // continue
-  }
+  // try JS Date parse
+  const d0 = new Date(s0);
+  if (!isNaN(d0.getTime())) return d0;
 
-  // Detect DD/MM/YYYY or DD/MM/YY with optional time e.g. "15/11/25 20:00"
-  const dmRegex = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?)?$/;
-  const m = s0.match(dmRegex);
-  if (m) {
-    let day = parseInt(m[1], 10);
-    let month = parseInt(m[2], 10);
-    let year = parseInt(m[3], 10);
-    let hh = m[4] ? parseInt(m[4], 10) : 0;
-    let mm = m[5] ? parseInt(m[5], 10) : 0;
-    let ss = m[6] ? parseInt(m[6], 10) : 0;
-    const msStr = m[7] || '0';
-    const ms = Math.min(999, Number(msStr.padEnd(3, '0')));
-    if (year < 100) {
-      year += 2000;
-    }
-    const dd = new Date(year, month - 1, day, hh, mm, ss, ms);
-    if (!isNaN(dd.getTime())) return dd;
-  }
-
-  // Numeric timestamp fallback
+  // try numeric epoch
   const maybeNum = Number(s0);
   if (!Number.isNaN(maybeNum)) {
     const d2 = new Date(maybeNum);
@@ -290,8 +244,8 @@ function parseTicketDate(raw) {
 
 function sortTicketsByDateDesc(arr) {
   return (arr || []).slice().sort((a, b) => {
-    const da = parseTicketDate(a?.data?.submitted_at);
-    const db = parseTicketDate(b?.data?.submitted_at);
+    const da = getTicketDate(a);
+    const db = getTicketDate(b);
     if (!da && !db) return 0;
     if (!da) return 1;
     if (!db) return -1;
@@ -318,8 +272,8 @@ function removeDuplicatesByTicketNo(tickets = []) {
       map.set(key, t);
       continue;
     }
-    const da = parseTicketDate(existing.data?.submitted_at);
-    const db = parseTicketDate(t.data?.submitted_at);
+    const da = getTicketDate(existing);
+    const db = getTicketDate(t);
     if (db && (!da || db.getTime() > da.getTime())) {
       map.set(key, t);
       continue;
@@ -333,6 +287,39 @@ function removeDuplicatesByTicketNo(tickets = []) {
   return Array.from(map.values());
 }
 
+// ---------- NEW helper: getTicketDate with fallback order ----------
+function getTicketDate(ticket) {
+  if (!ticket) return null;
+  const d = ticket.data || {};
+  // Prefer submitted_at (if set), then date_iso (normalized), then date, then created_at, then ticket.date
+  const candidates = [
+    d.submitted_at,
+    d.submittedAt,
+    d.date_iso,
+    d.dateIso,
+    d.date,
+    d.created_at,
+    d.createdAt,
+    d.submittedAt, // double-check casing
+  ];
+
+  for (const c of candidates) {
+    const parsed = parseTicketDate(c);
+    if (parsed) return parsed;
+  }
+
+  // As last resort, try any timestamp-like fields (ticket-level)
+  if (ticket.submitted_at) {
+    const p = parseTicketDate(ticket.submitted_at);
+    if (p) return p;
+  }
+  if (ticket.created_at) {
+    const p2 = parseTicketDate(ticket.created_at);
+    if (p2) return p2;
+  }
+  return null;
+}
+
 // =======================================
 // PDF components (SAD column removed)
 function PdfTicketRow({ ticket }) {
@@ -340,7 +327,7 @@ function PdfTicketRow({ ticket }) {
   const computed = computeWeightsFromObj({ gross: d.gross, tare: d.tare, net: d.net });
   const ticketNo = d.ticketNo ?? ticket.ticketId ?? 'N/A';
   const truckText = d.gnswTruckNo ?? d.anpr ?? d.truckOnWb ?? d.truckNo ?? 'N/A';
-  const dateText = d.submitted_at ? new Date(d.submitted_at).toLocaleString() : 'N/A';
+  const dateText = getTicketDate(ticket) ? getTicketDate(ticket).toLocaleString() : 'N/A';
   const driverText = d.driver ?? 'N/A';
   const createdByText = d.createdBy ?? d.operator ?? 'N/A';
 
@@ -513,8 +500,6 @@ export default function WeightReports() {
   const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
   const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
 
-  const searchDebounceRef = useRef(null);
-
   // Style injection (glassmorphism + orb + 3D panels)
   useEffect(() => {
     const css = `
@@ -611,7 +596,7 @@ export default function WeightReports() {
     }
   };
 
-  // computeFilteredTickets
+  // ---------- NEW: reactive computeFilteredTickets with proper date handling ----------
   const computeFilteredTickets = (baseArr = null) => {
     if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
       setFilteredTickets([]);
@@ -619,11 +604,13 @@ export default function WeightReports() {
     }
     let arr = (baseArr || originalTickets).slice();
 
+    // filter by driver if provided
     if (searchDriver && searchDriver.trim()) {
       const q = searchDriver.trim().toLowerCase();
       arr = arr.filter((t) => (t.data.driver || '').toString().toLowerCase().includes(q));
     }
 
+    // filter by truck if provided
     if (searchTruck && searchTruck.trim()) {
       const q = searchTruck.trim().toLowerCase();
       arr = arr.filter((t) => {
@@ -637,26 +624,33 @@ export default function WeightReports() {
       });
     }
 
-    const hasDateRange = !!(dateFrom || dateTo);
+    // Date/time range handling (with requested semantics):
+    // - Time From is applied to Date From
+    // - Time To is applied to Date To
+    // - We use the fallback order for each ticket: submitted_at -> date_iso -> date -> created_at
+    const hasDateFrom = !!dateFrom;
+    const hasDateTo = !!dateTo;
+    const hasDateRange = hasDateFrom || hasDateTo;
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
+    // build start & end using the requested mapping:
     let start = null;
     let end = null;
-    if (dateFrom) {
-      const fullTime = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
-      start = new Date(`${dateFrom}T${fullTime}`);
+    if (hasDateFrom) {
+      const tf = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
+      start = new Date(`${dateFrom}T${tf}`);
+      if (isNaN(start.getTime())) start = null;
     }
-    if (dateTo) {
-      const fullTime = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
-      end = new Date(`${dateTo}T${fullTime}`);
+    if (hasDateTo) {
+      const tt = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
+      end = new Date(`${dateTo}T${tt}`);
+      if (isNaN(end.getTime())) end = null;
     }
 
-    // If both start and end exist but end is before or equal to start (wrap-around/time overlap),
-    // advance end forward by whole days until it is after start.
+    // If both start and end exist but end <= start, advance end by 1 day intervals until it's after start (safe-guard)
     if (start && end && end.getTime() <= start.getTime()) {
       let e = new Date(end);
       const DAY_MS = 24 * 60 * 60 * 1000;
-      // Avoid infinite loops; limit to adding up to 7 days just in case user input was wildly off.
       let attempts = 0;
       while (e.getTime() <= start.getTime() && attempts < 7) {
         e = new Date(e.getTime() + DAY_MS);
@@ -668,36 +662,19 @@ export default function WeightReports() {
     const tfMinutes = parseTimeToMinutes(timeFrom);
     const ttMinutes = parseTimeToMinutes(timeTo);
 
-    // Helper: use submitted_at as primary date for filtering/sorting/display
-    function getSubmittedAt(ticket) {
-      const d = ticket?.data || {};
-      // primary: submitted_at
-      const primary = parseTicketDate(d.submitted_at);
-      if (primary) return primary;
-      // fallback: created_at or date_iso or date
-      const fallbackCandidates = [d.created_at, d.date_iso, d.date, d.submittedAt, d.createdAt];
-      for (const cand of fallbackCandidates) {
-        const p = parseTicketDate(cand);
-        if (p) return p;
-      }
-      return null;
-    }
-
+    // Filtering using getTicketDate() which already implements the fallback order
     arr = arr.filter((ticket) => {
-      const ticketDate = getSubmittedAt(ticket);
-      if (!ticketDate) {
-        // No parseable submitted_at or fallback — if user provided date range, we exclude
-        if (dateFrom || dateTo) return false;
-        return true;
-      }
+      const ticketDate = getTicketDate(ticket);
+      if (!ticketDate) return false;
 
-      if (dateFrom || dateTo) {
+      if (hasDateRange) {
         const s = start ? new Date(start) : new Date(-8640000000000000);
         const e = end ? new Date(end) : new Date(8640000000000000);
         return ticketDate >= s && ticketDate <= e;
       }
 
       if (hasTimeRangeOnly) {
+        // Compare only time of day
         const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
         const fromM = tfMinutes !== null ? tfMinutes : 0;
         const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
@@ -711,12 +688,40 @@ export default function WeightReports() {
       return true;
     });
 
-    // comparator uses submitted_at primarily
+    // If after applying date range we got zero results but base had items, attempt a second pass with looser fallbacks:
+    // This helps when some tickets have only `date` and others have `submitted_at`.
+    if (arr.length === 0 && baseArr && baseArr.length > 0) {
+      // try a "lenient" pass: if start/end exist, attempt to compare both submitted_at and date separately (OR logic)
+      if (start || end) {
+        const s = start ? new Date(start) : new Date(-8640000000000000);
+        const e = end ? new Date(end) : new Date(8640000000000000);
+
+        const altArr = (baseArr || originalTickets).filter((ticket) => {
+          // check submitted_at first
+          const sa = parseTicketDate(ticket.data?.submitted_at);
+          if (sa && sa >= s && sa <= e) return true;
+          // then date_iso
+          const di = parseTicketDate(ticket.data?.date_iso || ticket.data?.dateIso);
+          if (di && di >= s && di <= e) return true;
+          // then date
+          const dd = parseTicketDate(ticket.data?.date);
+          if (dd && dd >= s && dd <= e) return true;
+          // finally created_at
+          const ca = parseTicketDate(ticket.data?.created_at);
+          if (ca && ca >= s && ca <= e) return true;
+          return false;
+        });
+
+        if (altArr.length > 0) arr = altArr;
+      }
+    }
+
+    // Sorting comparator (keeps your previous behavior)
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
-        const da = parseTicketDate(a?.data?.submitted_at) || parseTicketDate(a?.data?.created_at) || parseTicketDate(a?.data?.date_iso) || parseTicketDate(a?.data?.date);
-        const db = parseTicketDate(b?.data?.submitted_at) || parseTicketDate(b?.data?.created_at) || parseTicketDate(b?.data?.date_iso) || parseTicketDate(b?.data?.date);
+        const da = getTicketDate(a);
+        const db = getTicketDate(b);
         if (!da && !db) return 0;
         if (!da) return 1;
         if (!db) return -1;
@@ -750,7 +755,7 @@ export default function WeightReports() {
 
     setReportMeta((prev) => ({
       ...prev,
-      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && originalTickets[0].data.submitted_at ? new Date(originalTickets[0].data.submitted_at).toLocaleDateString() : ''),
+      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && getTicketDate(originalTickets[0]) ? getTicketDate(originalTickets[0]).toLocaleDateString() : ''),
       startTimeLabel: startLabel || prev.startTimeLabel || '',
       endTimeLabel: endLabel || prev.endTimeLabel || '',
     }));
@@ -758,6 +763,7 @@ export default function WeightReports() {
 
   // -------------------------------------------
   // handleGenerateReport - fetch tickets + keep operator in ticket rows only
+  // (unchanged function body except it uses computeFilteredTickets which now is robust)
   // -------------------------------------------
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
@@ -782,7 +788,6 @@ export default function WeightReports() {
         data: {
           sadNo: ticket.sad_no,
           ticketNo: ticket.ticket_no,
-          // primary timestamp used everywhere is submitted_at
           submitted_at: ticket.submitted_at ?? ticket.submittedAt ?? ticket.created_at ?? ticket.date ?? null,
           gnswTruckNo: ticket.gnsw_truck_no,
           truckOnWb: ticket.truck_on_wb,
@@ -792,8 +797,8 @@ export default function WeightReports() {
           driver: ticket.driver || 'N/A',
           consignee: ticket.consignee,
           operator: ticket.operator || '',
-          createdBy: ticket.created_by || null,
-          user_id: ticket.user_id || null,
+          createdBy: ticket.created_by || null, // prefer created_by (text) if present
+          user_id: ticket.user_id || null, // we'll fetch username for user_id if present
           status: ticket.status,
           consolidated: ticket.consolidated,
           containerNo: ticket.container_no,
@@ -802,7 +807,6 @@ export default function WeightReports() {
           anpr: ticket.truck_on_wb,
           truckNo: ticket.truck_no,
           fileUrl: ticket.file_url || null,
-          // preserve original DB date fields (kept for fallback / inspection)
           date: ticket.date ?? null,
           date_iso: ticket.date_iso ?? null,
           created_at: ticket.created_at ?? null,
@@ -941,7 +945,7 @@ export default function WeightReports() {
       }
 
       setReportMeta({
-        dateRangeText: sortedOriginal.length > 0 ? (sortedOriginal[0].data.submitted_at ? new Date(sortedOriginal[0].data.submitted_at).toLocaleDateString() : '') : '',
+        dateRangeText: sortedOriginal.length > 0 ? (getTicketDate(sortedOriginal[0]) ? getTicketDate(sortedOriginal[0]).toLocaleDateString() : '') : '',
         startTimeLabel: '',
         endTimeLabel: '',
         sad: `${searchSAD.trim()}`,
@@ -964,36 +968,31 @@ export default function WeightReports() {
     }
   };
 
-  // ---------------------------------------
-  // Dynamic behavior: debounce SAD input to auto-search
+  // ---------- run computeFilteredTickets reactively when filters/originalTickets change ----------
   useEffect(() => {
-    // Clear previous timer
-    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    // If empty, clear lists (user wants nothing)
-    if (!searchSAD || !searchSAD.trim()) {
+    computeFilteredTickets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir, originalTickets]);
+
+  // ---------- debounce auto-search for SAD as user types (dynamic experience) ----------
+  useEffect(() => {
+    if (!searchSAD || searchSAD.trim() === '') {
+      // clearing SAD should clear the results
       setOriginalTickets([]);
       setFilteredTickets([]);
       setReportMeta({});
       return;
     }
-    // Debounce call to handleGenerateReport
-    searchDebounceRef.current = setTimeout(() => {
-      void handleGenerateReport();
-    }, 400);
-    return () => {
-      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    };
+
+    const handler = setTimeout(() => {
+      // call server search dynamically as user types
+      handleGenerateReport();
+    }, 600); // 600ms debounce
+
+    return () => clearTimeout(handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchSAD]);
 
-  // ---------------------------------------
-  // Whenever original tickets or filter inputs change, recompute filtered tickets live
-  useEffect(() => {
-    computeFilteredTickets(originalTickets);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [originalTickets, searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir]);
-
-  // ---------------------------------------
   const applyRange = () => computeFilteredTickets();
   const resetRange = () => {
     setDateFrom('');
@@ -1025,7 +1024,7 @@ export default function WeightReports() {
     setTimeTo('');
   };
 
-  // ---------- NEW: recordReportGenerated helper ----------
+  // ---------- NEW: recordReportGenerated helper (unchanged) ----------
   const recordReportGenerated = async ({
     blob = null,
     reportType = 'PDF',
@@ -1110,7 +1109,7 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- PDF / CSV generation + recording ----------
+  // ---------- PDF / CSV generation + recording (unchanged) ----------
   const generatePdfBlob = async (ticketsToRender = [], meta = {}, generatedBy = '') => {
     const doc = <CombinedDocument tickets={ticketsToRender} reportMeta={meta} generatedBy={generatedBy} />;
     const asPdf = pdfRender(doc);
@@ -1247,7 +1246,7 @@ export default function WeightReports() {
     }
   };
 
-  // ----------------- CSV export (unchanged columns; operator included if present) -----------------
+  // ---------------- CSV export (unchanged columns; operator included if present) -----------------
   const exportCsv = async () => {
     if (!filteredTickets || filteredTickets.length === 0) {
       toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
@@ -1818,6 +1817,7 @@ export default function WeightReports() {
               <Stat className="glass-card">
                 <StatLabel>Total Discharged (KG)</StatLabel>
                 <StatNumber fontSize="lg">{formatNumber(String(cumulativeNetWeight)) || '0'}</StatNumber>
+                <StatHelpText>Sum of ticket nets (fetched)</StatHelpText>
               </Stat>
             </StatGroup>
           </Flex>
@@ -2007,7 +2007,7 @@ export default function WeightReports() {
                           <HStack>
                             <Text fontWeight="bold">{t.data.ticketNo || t.ticketId}</Text>
                           </HStack>
-                          <Text fontSize="sm" color="gray.500">{t.data.submitted_at ? new Date(t.data.submitted_at).toLocaleString() : 'N/A'}</Text>
+                          <Text fontSize="sm" color="gray.500">{getTicketDate(t) ? getTicketDate(t).toLocaleString() : 'N/A'}</Text>
                         </Box>
 
                         <Box textAlign="right">
@@ -2102,7 +2102,7 @@ export default function WeightReports() {
                       return (
                         <Tr key={ticket.ticketId}>
                           <Td>{ticket.data.ticketNo}</Td>
-                          <Td>{ticket.data.submitted_at ? new Date(ticket.data.submitted_at).toLocaleString() : 'N/A'}</Td>
+                          <Td>{getTicketDate(ticket) ? getTicketDate(ticket).toLocaleString() : 'N/A'}</Td>
                           <Td>{displayTruck}</Td>
                           <Td isNumeric>{computed.grossDisplay || '0'}</Td>
                           <Td isNumeric>{computed.tareDisplay || '0'}</Td>
@@ -2206,7 +2206,7 @@ export default function WeightReports() {
                   <Box>
                     <Text fontWeight="bold">Ticket Details</Text>
                     <Text fontSize="sm" color="gray.500">
-                      {selectedTicket?.ticketId} • {selectedTicket?.data?.submitted_at ? new Date(selectedTicket.data.submitted_at).toLocaleDateString() : ''}
+                      {selectedTicket?.ticketId} • {selectedTicket?.data?.submitted_at ? new Date(selectedTicket.data.submitted_at).toLocaleDateString() : (getTicketDate(selectedTicket) ? getTicketDate(selectedTicket).toLocaleDateString() : '')}
                     </Text>
                   </Box>
                 </Flex>
