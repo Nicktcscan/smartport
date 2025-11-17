@@ -291,9 +291,11 @@ export default function ConfirmExit() {
   /**
    * fetchConfirmedExits: fetches outgate rows then attempts to enrich them with matching tickets
    * - if outgate row has no linked tickets (no r.tickets or empty array) but has ticket_no, we'll try to find the matching tickets row by ticket_no or ticket_id
-   * - if we find a ticket, we merge key fields (gnsw_truck_no, date/submitted_at) into the outgate row so the confirmed table shows them
+   * - if we find a ticket, we merge ticket fields into the outgate row so the confirmed table shows them
    * - if we find a ticket_id for an outgate row that lacks it, we persist it back to outgate (so joins work later)
    * - we also mark the matching ticket status -> 'Exited' when necessary (so pending list doesn't show it)
+   *
+   * IMPORTANT: weighed_at is always derived from tickets.submitted_at (if a linked ticket exists)
    */
   const fetchConfirmedExits = useCallback(async () => {
     try {
@@ -321,10 +323,11 @@ export default function ConfirmExit() {
       if (error) throw error;
       const rows = data || [];
 
-      // Basic mapping: take ticket.date from joined tickets if present
+      // Basic mapping: take ticket.submitted_at from joined tickets if present (per request)
       const mapped = rows.map((r) => {
         const ticketJoin = (r.tickets && Array.isArray(r.tickets) && r.tickets[0]) ? r.tickets[0] : null;
-        const ticketDate = ticketJoin ? (ticketJoin.date || ticketJoin.submitted_at || null) : null;
+        // ALWAYS prefer submitted_at for weighed_at column if joined ticket exists
+        const ticketDate = ticketJoin ? (ticketJoin.submitted_at || null) : null;
         const merged = { ...r, weighed_at: ticketDate, _joined_ticket: ticketJoin };
         // normalize vehicle_number fallback from joined ticket
         if (!merged.vehicle_number && ticketJoin && ticketJoin.gnsw_truck_no) merged.vehicle_number = ticketJoin.gnsw_truck_no;
@@ -365,7 +368,6 @@ export default function ConfirmExit() {
       const finalArr = mapped.map((r) => {
         // if join exists, keep as is
         if (r._joined_ticket) {
-          // ensure ticket status reflected - if ticket has status 'Exited' it's fine; if not and outgate exists, we can mark it below
           const jt = r._joined_ticket;
           if (jt.id) ticketDbIdsToMarkExited.add(jt.id);
           if (jt.ticket_id) ticketTicketIdsToMarkExited.add(jt.ticket_id);
@@ -380,7 +382,8 @@ export default function ConfirmExit() {
         if (matched) {
           // merge fields for UI
           const merged = { ...r };
-          merged.weighed_at = matched.date || matched.submitted_at || merged.weighed_at;
+          // IMPORTANT: weighed_at must come from matched.submitted_at per request
+          merged.weighed_at = matched.submitted_at || merged.weighed_at;
           if (!merged.vehicle_number && matched.gnsw_truck_no) merged.vehicle_number = matched.gnsw_truck_no;
           if (!merged.ticket_id && matched.ticket_id) {
             merged.ticket_id = matched.ticket_id;
