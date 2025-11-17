@@ -228,7 +228,7 @@ function parseTicketDate(raw) {
     if (!isNaN(d.getTime())) return d;
   }
 
-  // try JS Date parse
+  // try JS Date parse (covers ISO like 2025-11-16T07:21:34.891Z or with offset)
   const d0 = new Date(s0);
   if (!isNaN(d0.getTime())) return d0;
 
@@ -287,37 +287,32 @@ function removeDuplicatesByTicketNo(tickets = []) {
   return Array.from(map.values());
 }
 
-// ---------- NEW helper: getTicketDate with fallback order ----------
-function getTicketDate(ticket) {
+// ---------- NEW helper: getTicketSubmittedAt (prefer submitted_at) ----------
+function getTicketSubmittedAt(ticket) {
   if (!ticket) return null;
   const d = ticket.data || {};
-  // Prefer submitted_at (if set), then date_iso (normalized), then date, then created_at, then ticket.date
   const candidates = [
     d.submitted_at,
     d.submittedAt,
+    ticket.submitted_at,
+    ticket.submittedAt,
     d.date_iso,
     d.dateIso,
     d.date,
+    ticket.date,
     d.created_at,
-    d.createdAt,
-    d.submittedAt, // double-check casing
+    ticket.created_at,
   ];
-
   for (const c of candidates) {
     const parsed = parseTicketDate(c);
     if (parsed) return parsed;
   }
-
-  // As last resort, try any timestamp-like fields (ticket-level)
-  if (ticket.submitted_at) {
-    const p = parseTicketDate(ticket.submitted_at);
-    if (p) return p;
-  }
-  if (ticket.created_at) {
-    const p2 = parseTicketDate(ticket.created_at);
-    if (p2) return p2;
-  }
   return null;
+}
+
+// kept name getTicketDate but it now delegates to submitted_at
+function getTicketDate(ticket) {
+  return getTicketSubmittedAt(ticket);
 }
 
 // =======================================
@@ -596,13 +591,36 @@ export default function WeightReports() {
     }
   };
 
-  // ---------- NEW: reactive computeFilteredTickets with proper date handling ----------
+  // helper: build local Date from date string (YYYY-MM-DD) and time string (HH:MM or HH:MM:SS)
+  const buildLocalDate = (dateStr, timeStr, isEnd = false) => {
+    if (!dateStr) return null;
+    const [y, m, d] = String(dateStr).split('-').map((x) => Number(x));
+    if ([y, m, d].some((n) => Number.isNaN(n))) return null;
+    let hh = 0, mm = 0, ss = 0, ms = 0;
+    if (timeStr) {
+      const tparts = String(timeStr).split(':').map((x) => Number(x));
+      if (tparts.length >= 1 && !Number.isNaN(tparts[0])) hh = tparts[0];
+      if (tparts.length >= 2 && !Number.isNaN(tparts[1])) mm = tparts[1];
+      if (tparts.length >= 3 && !Number.isNaN(tparts[2])) ss = tparts[2];
+    } else {
+      if (isEnd) {
+        hh = 23; mm = 59; ss = 59; ms = 999;
+      } else {
+        hh = 0; mm = 0; ss = 0; ms = 0;
+      }
+    }
+    return new Date(y, m - 1, d, hh, mm, ss, ms);
+  };
+
+  // ---------- NEW: reactive computeFilteredTickets with strict submitted_at handling ----------
   const computeFilteredTickets = (baseArr = null) => {
-    if (!baseArr && (!originalTickets || originalTickets.length === 0)) {
+    const source = baseArr || originalTickets || [];
+    if (!source || source.length === 0) {
       setFilteredTickets([]);
       return;
     }
-    let arr = (baseArr || originalTickets).slice();
+
+    let arr = source.slice();
 
     // filter by driver if provided
     if (searchDriver && searchDriver.trim()) {
@@ -624,57 +642,54 @@ export default function WeightReports() {
       });
     }
 
-    // Date/time range handling (with requested semantics):
-    // - Time From is applied to Date From
-    // - Time To is applied to Date To
-    // - We use the fallback order for each ticket: submitted_at -> date_iso -> date -> created_at
+    // Date/time semantics:
+    // - primary field used for all date filtering is submitted_at (with safe fallbacks)
+    // - Time From applies to Date From; Time To applies to Date To
+    // - if dateFrom==dateTo and times not set, search full day (00:00 -> 23:59:59.999)
+    // - comparisons are inclusive
     const hasDateFrom = !!dateFrom;
     const hasDateTo = !!dateTo;
     const hasDateRange = hasDateFrom || hasDateTo;
     const hasTimeRangeOnly = !hasDateRange && (timeFrom || timeTo);
 
-    // build start & end using the requested mapping:
+    // Build start & end as local Date objects (so user inputs match local times)
     let start = null;
     let end = null;
+
     if (hasDateFrom) {
-      const tf = timeFrom ? (timeFrom.length <= 5 ? `${timeFrom}:00` : timeFrom) : '00:00:00';
-      start = new Date(`${dateFrom}T${tf}`);
-      if (isNaN(start.getTime())) start = null;
-    }
-    if (hasDateTo) {
-      const tt = timeTo ? (timeTo.length <= 5 ? `${timeTo}:00` : timeTo) : '23:59:59.999';
-      end = new Date(`${dateTo}T${tt}`);
-      if (isNaN(end.getTime())) end = null;
+      start = buildLocalDate(dateFrom, timeFrom || '00:00:00', false);
     }
 
-    // If both start and end exist but end <= start, advance end by 1 day intervals until it's after start (safe-guard)
-    if (start && end && end.getTime() <= start.getTime()) {
-      let e = new Date(end);
-      const DAY_MS = 24 * 60 * 60 * 1000;
-      let attempts = 0;
-      while (e.getTime() <= start.getTime() && attempts < 7) {
-        e = new Date(e.getTime() + DAY_MS);
-        attempts += 1;
+    if (hasDateTo) {
+      // If timeTo absent, end-of-day
+      end = buildLocalDate(dateTo, timeTo || null, true);
+    }
+
+    // If both present and end < start, keep them as-is (user likely meant next day?) — but we will NOT automatically roll forward across many days.
+    // However, if user accidentally set end earlier than start and dates equal, broaden end to end-of-day for that date.
+    if (start && end && end.getTime() < start.getTime()) {
+      // If same calendar date, extend end to end-of-day
+      const sameDay = start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth() && start.getDate() === end.getDate();
+      if (sameDay) {
+        end = buildLocalDate(dateTo, null, true);
       }
-      end = e;
     }
 
     const tfMinutes = parseTimeToMinutes(timeFrom);
     const ttMinutes = parseTimeToMinutes(timeTo);
 
-    // Filtering using getTicketDate() which already implements the fallback order
     arr = arr.filter((ticket) => {
-      const ticketDate = getTicketDate(ticket);
+      const ticketDate = getTicketSubmittedAt(ticket); // primary
       if (!ticketDate) return false;
 
       if (hasDateRange) {
         const s = start ? new Date(start) : new Date(-8640000000000000);
         const e = end ? new Date(end) : new Date(8640000000000000);
-        return ticketDate >= s && ticketDate <= e;
+        return ticketDate.getTime() >= s.getTime() && ticketDate.getTime() <= e.getTime();
       }
 
       if (hasTimeRangeOnly) {
-        // Compare only time of day
+        // Compare only time-of-day against submitted_at's local time-of-day
         const ticketMinutes = ticketDate.getHours() * 60 + ticketDate.getMinutes();
         const fromM = tfMinutes !== null ? tfMinutes : 0;
         const toM = ttMinutes !== null ? ttMinutes : 24 * 60 - 1;
@@ -682,46 +697,43 @@ export default function WeightReports() {
         if (fromM <= toM) {
           return ticketMinutes >= fromM && ticketMinutes <= toM;
         }
+        // wrap-around case (e.g., 22:00 -> 06:00)
         return ticketMinutes >= fromM || ticketMinutes <= toM;
       }
 
       return true;
     });
 
-    // If after applying date range we got zero results but base had items, attempt a second pass with looser fallbacks:
-    // This helps when some tickets have only `date` and others have `submitted_at`.
-    if (arr.length === 0 && baseArr && baseArr.length > 0) {
-      // try a "lenient" pass: if start/end exist, attempt to compare both submitted_at and date separately (OR logic)
-      if (start || end) {
-        const s = start ? new Date(start) : new Date(-8640000000000000);
-        const e = end ? new Date(end) : new Date(8640000000000000);
+    // If after applying date range we got zero results but base had items, attempt a second pass using explicit submitted_at fallback checks
+    if (arr.length === 0 && (start || end)) {
+      const s = start ? new Date(start) : new Date(-8640000000000000);
+      const e = end ? new Date(end) : new Date(8640000000000000);
 
-        const altArr = (baseArr || originalTickets).filter((ticket) => {
-          // check submitted_at first
-          const sa = parseTicketDate(ticket.data?.submitted_at);
-          if (sa && sa >= s && sa <= e) return true;
-          // then date_iso
-          const di = parseTicketDate(ticket.data?.date_iso || ticket.data?.dateIso);
-          if (di && di >= s && di <= e) return true;
-          // then date
-          const dd = parseTicketDate(ticket.data?.date);
-          if (dd && dd >= s && dd <= e) return true;
-          // finally created_at
-          const ca = parseTicketDate(ticket.data?.created_at);
-          if (ca && ca >= s && ca <= e) return true;
-          return false;
-        });
+      const altArr = source.filter((ticket) => {
+        // Try submitted_at exact
+        const sa = parseTicketDate(ticket.data?.submitted_at ?? ticket.submitted_at ?? ticket.data?.submittedAt ?? ticket.submittedAt);
+        if (sa && sa.getTime() >= s.getTime() && sa.getTime() <= e.getTime()) return true;
+        // date_iso
+        const di = parseTicketDate(ticket.data?.date_iso ?? ticket.data?.dateIso);
+        if (di && di.getTime() >= s.getTime() && di.getTime() <= e.getTime()) return true;
+        // date
+        const dd = parseTicketDate(ticket.data?.date ?? ticket.date);
+        if (dd && dd.getTime() >= s.getTime() && dd.getTime() <= e.getTime()) return true;
+        // created_at
+        const ca = parseTicketDate(ticket.data?.created_at ?? ticket.created_at);
+        if (ca && ca.getTime() >= s.getTime() && ca.getTime() <= e.getTime()) return true;
+        return false;
+      });
 
-        if (altArr.length > 0) arr = altArr;
-      }
+      if (altArr.length > 0) arr = altArr;
     }
 
-    // Sorting comparator (keeps your previous behavior)
+    // Sorting comparator (date uses submitted_at)
     const comparator = (a, b) => {
       const dir = sortDir === 'asc' ? 1 : -1;
       if (sortBy === 'date') {
-        const da = getTicketDate(a);
-        const db = getTicketDate(b);
+        const da = getTicketSubmittedAt(a);
+        const db = getTicketSubmittedAt(b);
         if (!da && !db) return 0;
         if (!da) return 1;
         if (!db) return -1;
@@ -746,6 +758,7 @@ export default function WeightReports() {
     arr.sort(comparator);
     setFilteredTickets(arr);
 
+    // update report meta labels
     const startLabel = dateFrom ? `${timeFrom || '00:00'} (${dateFrom})` : timeFrom ? `${timeFrom}` : '';
     const endLabel = dateTo ? `${timeTo || '23:59'} (${dateTo})` : timeTo ? `${timeTo}` : '';
     let dateRangeText = '';
@@ -755,7 +768,7 @@ export default function WeightReports() {
 
     setReportMeta((prev) => ({
       ...prev,
-      dateRangeText: dateRangeText || prev.dateRangeText || (originalTickets.length > 0 && getTicketDate(originalTickets[0]) ? getTicketDate(originalTickets[0]).toLocaleDateString() : ''),
+      dateRangeText: dateRangeText || prev.dateRangeText || '',
       startTimeLabel: startLabel || prev.startTimeLabel || '',
       endTimeLabel: endLabel || prev.endTimeLabel || '',
     }));
@@ -763,7 +776,6 @@ export default function WeightReports() {
 
   // -------------------------------------------
   // handleGenerateReport - fetch tickets + keep operator in ticket rows only
-  // (unchanged function body except it uses computeFilteredTickets which now is robust)
   // -------------------------------------------
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
@@ -788,6 +800,7 @@ export default function WeightReports() {
         data: {
           sadNo: ticket.sad_no,
           ticketNo: ticket.ticket_no,
+          // prefer submitted_at (db timestamp with tz) — store raw value for parsing
           submitted_at: ticket.submitted_at ?? ticket.submittedAt ?? ticket.created_at ?? ticket.date ?? null,
           gnswTruckNo: ticket.gnsw_truck_no,
           truckOnWb: ticket.truck_on_wb,
@@ -797,8 +810,8 @@ export default function WeightReports() {
           driver: ticket.driver || 'N/A',
           consignee: ticket.consignee,
           operator: ticket.operator || '',
-          createdBy: ticket.created_by || null, // prefer created_by (text) if present
-          user_id: ticket.user_id || null, // we'll fetch username for user_id if present
+          createdBy: ticket.created_by || null,
+          user_id: ticket.user_id || null,
           status: ticket.status,
           consolidated: ticket.consolidated,
           containerNo: ticket.container_no,
@@ -820,7 +833,7 @@ export default function WeightReports() {
         toast({ title: 'Duplicates removed', description: `${removed} duplicate(s) removed by ticket number`, status: 'info', duration: 3500, isClosable: true });
       }
 
-      // --- NEW: Build list of candidate user ids and emails to resolve to usernames ---
+      // Resolve created_by usernames where possible
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
       const userIdsSet = new Set();
       const emailsSet = new Set();
@@ -830,14 +843,12 @@ export default function WeightReports() {
         if (d.user_id && typeof d.user_id === 'string' && uuidRegex.test(d.user_id)) {
           userIdsSet.add(d.user_id);
         }
-        // createdBy could be uuid, email, username, or text
         const cb = d.createdBy;
         if (cb && typeof cb === 'string') {
           const v = cb.trim();
           if (uuidRegex.test(v)) {
             userIdsSet.add(v);
           } else if (v.includes('@')) {
-            // simple email detection
             emailsSet.add(v.toLowerCase());
           }
         }
@@ -846,9 +857,8 @@ export default function WeightReports() {
       const userIds = Array.from(userIdsSet);
       const emails = Array.from(emailsSet);
 
-      // Fetch users by id and by email (if any)
-      let userMap = {};   // id -> displayName
-      let emailMap = {};  // email -> displayName
+      let userMap = {};
+      let emailMap = {};
 
       try {
         if (userIds.length > 0) {
@@ -886,12 +896,10 @@ export default function WeightReports() {
         console.debug('Failed to fetch users for created_by mapping', e);
       }
 
-      // Attach createdBy usernames (prefer createdBy text field, but map UUID/email where possible)
       const enriched = dedupedTickets.map((t) => {
         const d = t.data || {};
         const rawCreatedByText = d.createdBy ? String(d.createdBy).trim() : null;
 
-        // If rawCreatedByText is a UUID and exists in userMap, use mapped display
         let createdByFromText = null;
         if (rawCreatedByText) {
           if (uuidRegex.test(rawCreatedByText) && userMap[rawCreatedByText]) {
@@ -899,19 +907,14 @@ export default function WeightReports() {
           } else if (rawCreatedByText.includes('@') && emailMap[rawCreatedByText.toLowerCase()]) {
             createdByFromText = emailMap[rawCreatedByText.toLowerCase()];
           } else {
-            // If the text looks like a UUID but we couldn't map, show a shortened UUID for readability
             if (uuidRegex.test(rawCreatedByText)) {
               createdByFromText = `${rawCreatedByText.slice(0, 8)}...`;
             } else {
-              createdByFromText = rawCreatedByText; // probably a username or operator name; keep as-is
+              createdByFromText = rawCreatedByText;
             }
           }
         }
-
-        // createdBy from user_id (if present)
         const createdByFromUser = d.user_id && userMap[d.user_id] ? userMap[d.user_id] : null;
-
-        // final preference: explicit createdBy text (mapped), then user_id mapping, then operator, then fallback to raw user_id or empty
         const finalCreatedBy = createdByFromText || createdByFromUser || (d.operator ? String(d.operator).trim() : '') || (d.user_id ? String(d.user_id) : '');
 
         return {
@@ -958,7 +961,6 @@ export default function WeightReports() {
       // compute filtered
       computeFilteredTickets(sortedOriginal);
 
-      // Provide nice success UX:
       toast({ title: `Found ${sortedOriginal.length} ticket(s)`, status: 'success', duration: 2200 });
     } catch (err) {
       console.error('fetch error', err);
@@ -977,7 +979,6 @@ export default function WeightReports() {
   // ---------- debounce auto-search for SAD as user types (dynamic experience) ----------
   useEffect(() => {
     if (!searchSAD || searchSAD.trim() === '') {
-      // clearing SAD should clear the results
       setOriginalTickets([]);
       setFilteredTickets([]);
       setReportMeta({});
@@ -985,7 +986,6 @@ export default function WeightReports() {
     }
 
     const handler = setTimeout(() => {
-      // call server search dynamically as user types
       handleGenerateReport();
     }, 600); // 600ms debounce
 
@@ -1024,7 +1024,7 @@ export default function WeightReports() {
     setTimeTo('');
   };
 
-  // ---------- NEW: recordReportGenerated helper (unchanged) ----------
+  // ---------- recordReportGenerated helper (unchanged) ----------
   const recordReportGenerated = async ({
     blob = null,
     reportType = 'PDF',
@@ -1041,7 +1041,6 @@ export default function WeightReports() {
     let file_url = null;
     let file_size = blob && blob.size ? Number(blob.size) : null;
 
-    // Try to upload to storage if available
     if (blob && supabase?.storage && typeof supabase.storage.from === 'function') {
       try {
         const safePart = safeHint.replace(/[^a-zA-Z0-9_.-]/g, '_') || 'report';
@@ -1126,7 +1125,6 @@ export default function WeightReports() {
       setPdfGenerating(true);
       const blob = await generatePdfBlob(filteredTickets, reportMeta, loggedInUsername);
 
-      // record generated report
       try {
         await recordReportGenerated({
           blob,
@@ -1149,7 +1147,6 @@ export default function WeightReports() {
       URL.revokeObjectURL(url);
       toast({ title: 'Download started', status: 'success', duration: 3000 });
 
-      // small celebration
       triggerConfetti();
     } catch (err) {
       console.error('PDF generation failed', err);
@@ -1246,13 +1243,12 @@ export default function WeightReports() {
     }
   };
 
-  // ---------------- CSV export (unchanged columns; operator included if present) -----------------
+  // ---------------- CSV export (unchanged columns; submitted_at used) -----------------
   const exportCsv = async () => {
     if (!filteredTickets || filteredTickets.length === 0) {
       toast({ title: 'No data', description: 'No tickets to export as CSV', status: 'info', duration: 3000 });
       return;
     }
-    // include createdBy column — use submitted_at column name for date
     const header = ['sadNo', 'ticketNo', 'submitted_at', 'truck', 'driver', 'gross', 'tare', 'net', 'consignee', 'operator', 'createdBy', 'containerNo', 'passNumber', 'scaleName'];
     const rows = filteredTickets.map((t) => {
       const d = t.data || {};
@@ -1298,7 +1294,6 @@ export default function WeightReports() {
       exportToCSV(rows, `SAD-${searchSAD || 'report'}.csv`);
       toast({ title: `Export started (${rows.length} rows)`, status: 'success', duration: 2500 });
 
-      // confetti as delight
       triggerConfetti();
     } catch (err) {
       console.error('CSV export error', err);
