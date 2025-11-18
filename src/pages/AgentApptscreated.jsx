@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 /* eslint-disable react/jsx-no-undef */
 // src/pages/Appointments.jsx
 import { useEffect, useState, useRef } from 'react';
@@ -55,6 +56,7 @@ import {
   FaFilePdf,
   FaListAlt,
   FaCheck,
+  FaPrint,
 } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
@@ -278,11 +280,16 @@ export default function AppointmentsPage() {
     }
   };
 
+  /**
+   * fetchAppointments
+   * - supports searching by SAD (searches t1_records.sad_no) and regular fields
+   * - when searchQ matches SADs, we combine appointment ids found via t1_records with appointments found via direct fields
+   * - implements pagination by slicing the resulting ids and fetching those appointment rows
+   */
   const fetchAppointments = async ({ page: p = pageRef.current, size = pageSizeRef.current, q = searchQRef.current, status = statusFilter, pickup = pickupDateFilter } = {}) => {
     setLoadingList(true);
     try {
       if (!user) {
-        // if no user context, return empty (security)
         setAppointments([]);
         setTotalPages(1);
         setLoadingList(false);
@@ -292,32 +299,155 @@ export default function AppointmentsPage() {
       const from = (p - 1) * size;
       const to = p * size - 1;
 
-      // Build base query and restrict to current user unless admin
-      let baseQuery = supabase.from('appointments').select('*, t1_records(id, sad_no)', { count: 'exact' });
       const restrictToUser = !(user && user.role === 'admin');
-      if (restrictToUser) baseQuery = baseQuery.eq('created_by', user.id);
 
-      if (q && q.trim()) {
-        const escaped = q.trim().replace(/"/g, '\\"');
-        const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%,driver_name.ilike.%${escaped}%`;
-        baseQuery = baseQuery.or(orFilter);
+      const qTrim = q && q.toString().trim();
+
+      // If there is a free-text query, try to find matching appointment IDs from t1_records (SAD search)
+      let idsFromT1 = [];
+      if (qTrim) {
+        try {
+          const { data: t1Matches, error: t1Err } = await supabase
+            .from('t1_records')
+            .select('appointment_id')
+            .ilike('sad_no', `%${qTrim}%`)
+            .limit(2000);
+          if (!t1Err && Array.isArray(t1Matches)) {
+            idsFromT1 = Array.from(new Set(t1Matches.map(r => r.appointment_id).filter(Boolean)));
+          }
+        } catch (e) {
+          console.warn('t1_records search failed', e);
+          idsFromT1 = [];
+        }
       }
 
-      if (status) baseQuery = baseQuery.eq('status', status);
-      if (pickup) baseQuery = baseQuery.eq('pickup_date', pickup);
+      // Next, find appointments that match the standard appointment fields (appointment_number, weighbridge_number, agent_name, truck_number, driver_name)
+      let directAppointments = [];
+      let directCount = 0;
+      if (qTrim) {
+        try {
+          const escaped = qTrim.replace(/"/g, '\\"');
+          const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%,driver_name.ilike.%${escaped}%`;
+          let directQ = supabase.from('appointments').select('id', { count: 'exact', head: true }).or(orFilter);
+          if (restrictToUser && user?.id) directQ = directQ.eq('created_by', user.id);
+          if (status) directQ = directQ.eq('status', status);
+          if (pickup) directQ = directQ.eq('pickup_date', pickup);
+          const resp = await directQ;
+          if (!resp.error) {
+            // when using head:true + count: 'exact' the resp.data is null; resp.count contains the count
+            directCount = Number(resp.count || 0);
+          }
+          // fetch ids (we need actual ids list)
+          let idRowsQ = supabase.from('appointments').select('id').or(orFilter).order('created_at', { ascending: false }).limit(2000);
+          if (restrictToUser && user?.id) idRowsQ = idRowsQ.eq('created_by', user.id);
+          if (status) idRowsQ = idRowsQ.eq('status', status);
+          if (pickup) idRowsQ = idRowsQ.eq('pickup_date', pickup);
+          const idRowsResp = await idRowsQ;
+          if (!idRowsResp.error && Array.isArray(idRowsResp.data)) {
+            directAppointments = Array.from(new Set(idRowsResp.data.map(r => r.id).filter(Boolean)));
+          }
+        } catch (e) {
+          console.warn('direct appointment search failed', e);
+          directAppointments = [];
+          directCount = 0;
+        }
+      }
 
-      baseQuery = baseQuery.order('created_at', { ascending: false }).range(from, to);
+      // If there is no search term, use the standard paginated query
+      if (!qTrim) {
+        let baseQuery = supabase.from('appointments').select('*, t1_records(id, sad_no)', { count: 'exact' });
+        if (restrictToUser) baseQuery = baseQuery.eq('created_by', user.id);
+        if (status) baseQuery = baseQuery.eq('status', status);
+        if (pickup) baseQuery = baseQuery.eq('pickup_date', pickup);
+        baseQuery = baseQuery.order('created_at', { ascending: false }).range(from, to);
+        const resp = await baseQuery;
+        if (resp.error) throw resp.error;
+        const data = resp.data || [];
+        const count = Number(resp.count || 0);
+        setAppointments(data);
+        setTotalPages(Math.max(1, Math.ceil(count / size)));
 
-      const resp = await baseQuery;
-      if (resp.error) throw resp.error;
+        // alerts calc (same as before)
+        const alerts = {};
+        const apptNumbers = data.map(a => a.appointment_number).filter(Boolean);
+        const dupMap = {};
+        for (const n of apptNumbers) dupMap[n] = (dupMap[n] || 0) + 1;
+        const dupCandidates = Object.keys(dupMap).filter(k => dupMap[k] > 1);
+        const globalDupCounts = {};
+        if (dupCandidates.length) {
+          try {
+            for (const key of dupCandidates) {
+              const { count } = await supabase.from('appointments').select('id', { head: true, count: 'exact' }).eq('appointment_number', key);
+              globalDupCounts[key] = Number(count || 0);
+            }
+          } catch (e) { /* ignore */ }
+        }
+        for (const a of data) {
+          const id = a.id;
+          alerts[id] = [];
+          if (a.pickup_date) {
+            const pickupIso = formatDateISO(a.pickup_date);
+            const todayIso = formatDateISO(new Date());
+            if (pickupIso && todayIso && pickupIso < todayIso && (a.status || '').toLowerCase() === 'posted') {
+              alerts[id].push('pickup_overdue');
+            }
+          }
+          const num = a.appointment_number;
+          const globalCount = (num && globalDupCounts[num]) ? globalDupCounts[num] : (num && dupMap[num] ? dupMap[num] : 1);
+          if (num && Number(globalCount) > 1) alerts[id].push('duplicate_booking');
+          if (a.driver_license_expiry) {
+            const expiry = new Date(a.driver_license_expiry);
+            if (!isNaN(expiry.getTime())) {
+              const now = new Date();
+              const diffDays = Math.ceil((expiry - now) / (1000 * 60 * 60 * 24));
+              if (diffDays <= 30) alerts[id].push('driver_license_expiring');
+            }
+          }
+          const t1count = Array.isArray(a.t1_records) ? a.t1_records.length : (a.total_t1s || 0);
+          if (!t1count || Number(t1count) === 0) alerts[id].push('no_t1_records');
+        }
+        setAlertsMap(alerts);
+        setLoadingList(false);
+        return;
+      }
 
-      const data = resp.data || [];
-      const count = Number(resp.count || 0);
-      setAppointments(data);
-      setTotalPages(Math.max(1, Math.ceil(count / size)));
+      // When qTrim exists: combine idsFromT1 and directAppointments
+      const combinedIdSet = new Set([...(idsFromT1 || []), ...(directAppointments || [])].filter(Boolean));
 
+      // If there's no combined ids, show empty results
+      if (combinedIdSet.size === 0) {
+        setAppointments([]);
+        setTotalPages(1);
+        setAlertsMap({});
+        setLoadingList(false);
+        return;
+      }
+
+      // convert to array and sort by created_at desc by fetching small metadata (we'll fetch full rows later)
+      const combinedIdsArr = Array.from(combinedIdSet);
+
+      // total count is combined length
+      const totalCount = combinedIdsArr.length;
+      setTotalPages(Math.max(1, Math.ceil(totalCount / size)));
+
+      // pick ids for the requested page
+      const idsForPage = combinedIdsArr.slice(from, to + 1);
+      // fetch those appointment rows with their T1 records
+      let fetchQ = supabase.from('appointments').select('*, t1_records(id, sad_no)').in('id', idsForPage).order('created_at', { ascending: false });
+      if (restrictToUser) fetchQ = fetchQ.eq('created_by', user.id);
+      const fetchResp = await fetchQ;
+      if (fetchResp.error) throw fetchResp.error;
+      const fetchedRows = fetchResp.data || [];
+
+      // Because .in doesn't guarantee order, sort fetchedRows using index in idsForPage
+      const ordered = idsForPage.map(id => fetchedRows.find(r => r.id === id)).filter(Boolean);
+
+      setAppointments(ordered);
+      setTotalPages(Math.max(1, Math.ceil(totalCount / size)));
+
+      // alerts calculation for page rows
       const alerts = {};
-      const apptNumbers = data.map(a => a.appointment_number).filter(Boolean);
+      const apptNumbers = ordered.map(a => a.appointment_number).filter(Boolean);
       const dupMap = {};
       for (const n of apptNumbers) dupMap[n] = (dupMap[n] || 0) + 1;
       const dupCandidates = Object.keys(dupMap).filter(k => dupMap[k] > 1);
@@ -328,12 +458,9 @@ export default function AppointmentsPage() {
             const { count } = await supabase.from('appointments').select('id', { head: true, count: 'exact' }).eq('appointment_number', key);
             globalDupCounts[key] = Number(count || 0);
           }
-        } catch (e) {
-          console.warn('dup count failed', e);
-        }
+        } catch (e) { /* ignore */ }
       }
-
-      for (const a of data) {
+      for (const a of ordered) {
         const id = a.id;
         alerts[id] = [];
         if (a.pickup_date) {
@@ -343,13 +470,9 @@ export default function AppointmentsPage() {
             alerts[id].push('pickup_overdue');
           }
         }
-
         const num = a.appointment_number;
         const globalCount = (num && globalDupCounts[num]) ? globalDupCounts[num] : (num && dupMap[num] ? dupMap[num] : 1);
-        if (num && Number(globalCount) > 1) {
-          alerts[id].push('duplicate_booking');
-        }
-
+        if (num && Number(globalCount) > 1) alerts[id].push('duplicate_booking');
         if (a.driver_license_expiry) {
           const expiry = new Date(a.driver_license_expiry);
           if (!isNaN(expiry.getTime())) {
@@ -358,15 +481,10 @@ export default function AppointmentsPage() {
             if (diffDays <= 30) alerts[id].push('driver_license_expiring');
           }
         }
-
         const t1count = Array.isArray(a.t1_records) ? a.t1_records.length : (a.total_t1s || 0);
-        if (!t1count || Number(t1count) === 0) {
-          alerts[id].push('no_t1_records');
-        }
+        if (!t1count || Number(t1count) === 0) alerts[id].push('no_t1_records');
       }
-
       setAlertsMap(alerts);
-
     } catch (err) {
       console.error('fetchAppointments', err);
       toast({ title: 'Failed to load appointments', description: err?.message || 'Unexpected', status: 'error' });
@@ -793,6 +911,86 @@ export default function AppointmentsPage() {
     }
   };
 
+  /**
+   * Reprint / regenerate PDF for an appointment
+   * - If appt.pdf_url exists, just open it
+   * - Otherwise, call backend endpoint to generate the PDF and stream/download it.
+   * - If backend returns a public URL in header 'x-generated-pdf-url', persist it in the appointment row for future quick downloads.
+   *
+   * NOTE: This assumes you have a server endpoint `POST /api/appointments/:id/pdf` that returns the PDF binary
+   *       or sets header x-generated-pdf-url when it stores the file and returns a 200.
+   */
+  const reprintAppointment = async (appt) => {
+    if (!appt || !appt.id) {
+      toast({ title: 'No appointment selected', status: 'info' });
+      return;
+    }
+
+    if (appt.pdf_url) {
+      window.open(appt.pdf_url, '_blank');
+      return;
+    }
+
+    setDrawerLoading(true);
+    try {
+      // call your backend route (implement server-side) which returns a PDF
+      // fallback: if your backend returns a JSON with { url } you'll handle that too
+      const res = await fetch(`/api/appointments/${appt.id}/pdf`, { method: 'POST' });
+
+      if (!res.ok) {
+        // try to extract message
+        let msg = `${res.status} ${res.statusText}`;
+        try { msg = await res.text(); } catch (e) {}
+        throw new Error(msg);
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      // if backend returned a direct URL in JSON
+      if (contentType.includes('application/json')) {
+        const json = await res.json();
+        if (json.url) {
+          // open URL and persist to DB
+          window.open(json.url, '_blank');
+          try {
+            await supabase.from('appointments').update({ pdf_url: json.url }).eq('id', appt.id);
+            setActiveAppt(prev => prev ? { ...prev, pdf_url: json.url } : prev);
+            setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: json.url } : p));
+          } catch (e) { /* ignore persisting errors */ }
+          toast({ title: 'PDF ready', status: 'success' });
+          return;
+        }
+      }
+
+      // assume binary/pdf response
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `WeighbridgeTicket-${appt.appointment_number || appt.id}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      // check for header with persistent public URL
+      const pubUrl = res.headers.get('x-generated-pdf-url');
+      if (pubUrl) {
+        try {
+          await supabase.from('appointments').update({ pdf_url: pubUrl }).eq('id', appt.id);
+          setActiveAppt(prev => prev ? { ...prev, pdf_url: pubUrl } : prev);
+          setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: pubUrl } : p));
+        } catch (e) { /* ignore */ }
+      }
+
+      toast({ title: 'PDF generated', status: 'success' });
+    } catch (e) {
+      console.error('reprintAppointment failed', e);
+      toast({ title: 'Generate PDF failed', description: e?.message || String(e), status: 'error' });
+    } finally {
+      setDrawerLoading(false);
+    }
+  };
+
   return (
     <Container maxW="8xl" py={6}>
       <Heading mb={4}>Manage Appointments</Heading>
@@ -828,7 +1026,7 @@ export default function AppointmentsPage() {
 
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={4}>
         <Flex gap={3} wrap="wrap" align="center">
-          <Input placeholder="Search by appointment, weighbridge, agent, truck, driver..." maxW="420px" value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
+          <Input placeholder="Search by SAD, appointment#, weighbridge#, agent, truck, driver..." maxW="520px" value={searchQ} onChange={(e) => setSearchQ(e.target.value)} />
           <Select placeholder="Filter by status" value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}>
             <option value="">All</option>
             <option value="Posted">Posted</option>
@@ -966,6 +1164,7 @@ export default function AppointmentsPage() {
                               <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)}>Mark Completed</MenuItem>
                               <MenuItem icon={<FaListAlt />} onClick={() => openDrawer(a)}>View T1s</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => { if (a.pdf_url) window.open(a.pdf_url, '_blank'); else toast({ title: 'No PDF', status: 'info' }); }}>Download PDF</MenuItem>
+                              <MenuItem icon={<FaPrint />} onClick={() => reprintAppointment(a)}>Reprint / Regenerate PDF</MenuItem>
                               <MenuDivider />
                               <MenuItem icon={<FaClone />} onClick={() => cloneAppointment(a)}>Clone</MenuItem>
                               <MenuItem icon={<FaTrash />} onClick={() => deleteAppointment(a)}>Delete</MenuItem>
@@ -1055,10 +1254,16 @@ export default function AppointmentsPage() {
                 <Box>
                   <Heading size="sm">Files / PDF</Heading>
                   {activeAppt?.pdf_url ? (
-                    <Box>
+                    <Box display="flex" gap={2}>
                       <Button leftIcon={<FaFilePdf />} size="sm" onClick={() => window.open(activeAppt.pdf_url, '_blank')}>Open PDF</Button>
+                      <Button leftIcon={<FaPrint />} size="sm" onClick={() => reprintAppointment(activeAppt)}>Reprint / Regenerate</Button>
                     </Box>
-                  ) : <Text color="gray.500">No PDF attached</Text>}
+                  ) : (
+                    <Box display="flex" gap={2}>
+                      <Text color="gray.500">No PDF attached</Text>
+                      <Button leftIcon={<FaPrint />} size="sm" onClick={() => reprintAppointment(activeAppt)}>Generate PDF</Button>
+                    </Box>
+                  )}
                 </Box>
 
                 <Box>
