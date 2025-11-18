@@ -207,18 +207,52 @@ export default function AppointmentsPage() {
       const postedResp = await postedQ;
       setTotalPosted(Number(postedResp?.count || 0));
 
-      // unique SADs from t1_records (best-effort: system-wide)
+      // unique SADs from t1_records
       try {
-        const { data: t1rows, error: t1err } = await supabase
-          .from('t1_records')
-          .select('sad_no')
-          .limit(5000);
-        if (t1err) {
-          console.warn('Could not fetch t1_records for unique SAD count', t1err);
-          setUniqueSADs(0);
+        if (restrictToUser && user?.id) {
+          // Only count SADs for appointments created by this user
+          // 1) get appointment ids created_by this user (limit to 5000)
+          const { data: myAppts, error: myApptsErr } = await supabase
+            .from('appointments')
+            .select('id')
+            .eq('created_by', user.id)
+            .limit(5000);
+          if (myApptsErr) {
+            console.warn('Could not fetch user appointments for unique SAD calc', myApptsErr);
+            setUniqueSADs(0);
+          } else {
+            const apptIds = Array.isArray(myAppts) ? myAppts.map(r => r.id).filter(Boolean) : [];
+            if (!apptIds.length) {
+              setUniqueSADs(0);
+            } else {
+              // 2) fetch t1_records for those appointment ids
+              const { data: t1rows, error: t1err } = await supabase
+                .from('t1_records')
+                .select('sad_no')
+                .in('appointment_id', apptIds)
+                .limit(5000);
+              if (t1err) {
+                console.warn('Could not fetch t1_records for unique SAD count (user)', t1err);
+                setUniqueSADs(0);
+              } else {
+                const s = new Set((t1rows || []).map(r => (r.sad_no ? String(r.sad_no).trim() : null)).filter(Boolean));
+                setUniqueSADs(s.size);
+              }
+            }
+          }
         } else {
-          const s = new Set((t1rows || []).map(r => (r.sad_no ? String(r.sad_no).trim() : null)).filter(Boolean));
-          setUniqueSADs(s.size);
+          // admin / system-wide count (original behaviour)
+          const { data: t1rows, error: t1err } = await supabase
+            .from('t1_records')
+            .select('sad_no')
+            .limit(5000);
+          if (t1err) {
+            console.warn('Could not fetch t1_records for unique SAD count', t1err);
+            setUniqueSADs(0);
+          } else {
+            const s = new Set((t1rows || []).map(r => (r.sad_no ? String(r.sad_no).trim() : null)).filter(Boolean));
+            setUniqueSADs(s.size);
+          }
         }
       } catch (innerErr) {
         console.warn('unique sad fetch err', innerErr);
@@ -1086,7 +1120,7 @@ export default function AppointmentsPage() {
         <Stat p={4} borderRadius="md" boxShadow="sm" bg="linear-gradient(90deg,#10b981,#06b6d4)" color="white">
           <StatLabel>Unique SADs</StatLabel>
           <StatNumber>{loadingStats ? <Spinner size="sm" color="white" /> : uniqueSADs}</StatNumber>
-          <StatHelpText>Distinct SADs recorded in T1 records</StatHelpText>
+          <StatHelpText>Distinct SADs recorded in T1 records (your work only)</StatHelpText>
         </Stat>
       </SimpleGrid>
 
