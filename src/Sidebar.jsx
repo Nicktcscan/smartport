@@ -75,7 +75,7 @@ const customsNavItems = [
 const agentNavItems = [
   { path: '/agent', label: 'Reports', icon: FaChartBar },
   { path: '/agentsads', label: 'My SADs', icon: FaFileInvoice },
-  { path: '/agentappt', label: 'My Appointments', icon: FaCalendarCheck },
+  { path: '/agentappt', label: 'Create Appointments', icon: FaCalendarCheck },
 ];
 
 // Finance menu
