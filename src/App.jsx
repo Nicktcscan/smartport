@@ -26,6 +26,8 @@ import ExitTrucks from './pages/ExitTrucks';
 import Finance from './pages/FinanceDashboard';
 import FinanceSAD from './pages/FinanceSAD';
 import Appointments from './pages/Appointments';
+import AgentSAD from './pages/AgentSAD';
+import AgentAppt from './pages/AgentAppt';
 
 import OutgateTicketDetails from './pages/OutgateTicketDetails';
 import OutgateSearchTickets from './pages/OutgateSearchTickets';
@@ -450,6 +452,32 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <AgentDashboard />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/agentsads"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'agent']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <AgentSAD />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+             <Route
+              path="/agentappt"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'agent']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <AgentAppt />
                     </Box>
                   </Layout>
                 </ProtectedRoute>
