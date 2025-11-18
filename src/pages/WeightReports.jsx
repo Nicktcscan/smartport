@@ -784,18 +784,44 @@ export default function WeightReports() {
     }
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('tickets')
-        .select('*')
-        .ilike('sad_no', `%${searchSAD.trim()}%`);
+      // --- NEW: page through Supabase results to fetch all matching tickets (no 1000-row cap) ---
+      const pageSize = 1000; // page size; Supabase/PostgREST commonly defaults/caps around this
+      let page = 0;
+      let allRows = [];
+      let keepFetching = true;
+      const ilikePattern = `%${searchSAD.trim()}%`;
 
-      if (error) {
-        toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
-        setLoading(false);
-        return;
+      while (keepFetching) {
+        const from = page * pageSize;
+        const to = from + pageSize - 1;
+        const { data, error } = await supabase
+          .from('tickets')
+          .select('*')
+          .ilike('sad_no', ilikePattern)
+          .range(from, to);
+
+        if (error) {
+          // If there is an error on a page, bail out and show error
+          toast({ title: 'Error fetching tickets', description: error.message, status: 'error', duration: 4000, isClosable: true });
+          setLoading(false);
+          return;
+        }
+
+        if (!data || data.length === 0) {
+          keepFetching = false;
+        } else {
+          allRows = allRows.concat(data);
+          if (data.length < pageSize) {
+            // last page reached
+            keepFetching = false;
+          } else {
+            page += 1; // fetch next page
+          }
+        }
       }
 
-      const mappedTickets = (data || []).map((ticket) => ({
+      // now allRows contains all matching tickets across pages
+      const mappedTickets = (allRows || []).map((ticket) => ({
         ticketId: ticket.ticket_id || ticket.id?.toString() || `${Math.random()}`,
         data: {
           sadNo: ticket.sad_no,
@@ -1237,7 +1263,7 @@ export default function WeightReports() {
       toast({ title: 'Composer opened', description: 'PDF downloaded — attach to your email if not auto-attached', status: 'info', duration: 5000 });
     } catch (err) {
       console.error('Email/Download error', err);
-      toast({ title: 'Failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
+      toast({ title: 'Email/Download failed', description: err?.message || 'Unexpected error', status: 'error', duration: 5000 });
     } finally {
       setPdfGenerating(false);
     }
