@@ -1,3 +1,4 @@
+/* eslint-disable no-dupe-keys */
 // pages/appointment.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
@@ -18,15 +19,14 @@ import {
   Image as PdfImage,
   Font
 } from '@react-pdf/renderer';
-import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
+import { supabase } from '../supabaseClient';
+import { useAuth } from '../context/AuthContext'; // capture creating user
 
-// ---------- Assets (ensure these exist in src/assets/) ----------
+// ---------- Assets ----------
 import gralogo from '../assets/gralogo.png';
 import gnswlogo from '../assets/gnswlogo.png';
-import logo from '../assets/logo.png'; // watermark image - ensure this file exists
-
-// ---------- Monospace font registration (update path if you use a different font file) ----------
-import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists
+import logo from '../assets/logo.png';
+import MonoFont from '../assets/RobotoMono-Regular.ttf';
 Font.register({ family: 'Mono', src: MonoFont });
 
 // ---------- Config ----------
@@ -42,7 +42,7 @@ const PACKING_TYPES = [
 
 const MotionBox = motion(Box);
 
-// ---------- PDF styles (premium look) ----------
+// ---------- PDF styles ----------
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 28,
@@ -54,9 +54,7 @@ const pdfStyles = StyleSheet.create({
     color: '#0b1220',
     backgroundColor: '#ffffff',
   },
-
   headerBar: {
-    // light ash background as requested earlier
     backgroundColor: '#f3f4f6',
     paddingVertical: 12,
     paddingHorizontal: 14,
@@ -66,24 +64,17 @@ const pdfStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between'
   },
-
   headerLeft: { width: '18%', alignItems: 'flex-start', zIndex: 2 },
   headerCenter: { width: '60%', alignItems: 'center', textAlign: 'center', zIndex: 2 },
   headerRight: { width: '18%', alignItems: 'flex-end', zIndex: 2 },
-
   logoSmall: { width: 72, height: 40, objectFit: 'contain' },
-  // Title readable on light ash background
   titleBig: { fontSize: 16, fontWeight: 700, color: '#0b1220', letterSpacing: 0.6 },
   subtitle: { fontSize: 9, color: '#6b7280', marginTop: 2 },
-
   mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 16, marginBottom: 12, position: 'relative', borderRadius: 10, zIndex: 3 },
   sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
-
   label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2, color: '#0b1220' },
   value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4, color: '#0b1220' },
-
   groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#e6eef8', paddingTop: 10, marginTop: 10 },
-
   t1Table: { width: '100%', marginTop: 8, borderTopWidth: 0.5, borderTopColor: '#e6eef8' },
   t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.6, borderBottomColor: '#e6eef8', paddingVertical: 6, backgroundColor: '#f8fafc' },
   t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#f1f5f9' },
@@ -91,39 +82,30 @@ const pdfStyles = StyleSheet.create({
   t1Col2: { width: '42%', fontSize: 10.5 },
   t1Col3: { width: '22%', fontSize: 10.5 },
   t1Col4: { width: '28%', fontSize: 10.5 },
-
   qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
   qrBox: { width: '34%', alignItems: 'center', marginRight: 28, zIndex: 3 },
-
-  // Absolute barcode container centered horizontally and pushed toward bottom
   barcodeContainer: {
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 80, // pushes it toward bottom; adjust if you want it lower/higher
+    bottom: 80,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 3,
   },
-
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
-
   infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 },
-
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // Watermark kept at top as requested
     top: '6%',
-    width: '75%',   // maintained size
+    width: '75%',
     opacity: 0.06,
-    zIndex: 1,      // behind header/main content which have higher z-index
+    zIndex: 1,
   },
 });
 
-// ---------- Removed Code128: all Code128-related arrays & functions have been eliminated ----------
-
-// ---------- New: Code39 generator using JsBarcode (reliable, proven library) ----------
+// ---------- Barcode generator (Code39 via JsBarcode) ----------
 async function ensureJsBarcodeLoaded() {
   if (typeof window === 'undefined') return;
   if (window.JsBarcode) return;
@@ -136,7 +118,6 @@ async function ensureJsBarcodeLoaded() {
   });
 }
 
-// Convert SVG string to PNG data URL of given pixel size
 async function svgStringToPngDataUrl(svgString, width, height) {
   return await new Promise((resolve, reject) => {
     try {
@@ -147,10 +128,8 @@ async function svgStringToPngDataUrl(svgString, width, height) {
         canvas.width = Math.round(width);
         canvas.height = Math.round(height);
         const ctx = canvas.getContext('2d');
-        // white background
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        // Draw the SVG onto the canvas, scaling to requested size
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         try {
           const png = canvas.toDataURL('image/png');
@@ -167,36 +146,22 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
-/*
-  Generate Code39 PNG data URL:
-  - uses JsBarcode (loaded via CDN) to render an SVG for CODE39
-  - then converts the SVG to PNG (so it can be embedded in react-pdf)
-  - increased bar width (width: 3) and margin ensure higher contrast (thicker bars).
-*/
 async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   try {
-    // ensure JsBarcode available
     await ensureJsBarcodeLoaded();
-    // Build an <svg> element using JsBarcode
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-    // JsBarcode will render into svgEl
-    // Use CODE39 and no human-readable text (displayValue: false)
-    // Increased width multiplier (3) and margin (10) for stronger contrast
     window.JsBarcode(svgEl, String(payloadStr || ''), {
       format: 'CODE39',
       displayValue: false,
       height: height,
-      width: 3,          // thicker bars -> higher contrast
-      margin: 10,        // quiet zone for better scan reliability
+      width: 3,
+      margin: 10,
       background: '#ffffff',
       lineColor: '#000000',
       flat: true,
     });
-
-    // Serialize the SVG and convert to PNG
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    // Convert to PNG at the requested size (width x height)
     const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     return pngDataUrl;
   } catch (e) {
@@ -205,7 +170,7 @@ async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   }
 }
 
-// ---------- Utility functions (ensure defined to avoid ESLint no-undef) ----------
+// ---------- Utilities ----------
 function downloadBlob(blob, filename) {
   try {
     const url = URL.createObjectURL(blob);
@@ -244,7 +209,7 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (Barcode + watermark + beautiful layout) ----------
+// ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
@@ -267,10 +232,8 @@ function AppointmentPdf({ ticket }) {
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark (kept as-is) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
-        {/* Header */}
         <PdfView style={pdfStyles.headerBar}>
           <PdfView style={pdfStyles.headerLeft}>
             <PdfImage src={gralogo} style={pdfStyles.logoSmall} />
@@ -352,14 +315,12 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
         </PdfView>
 
-        {/* Absolute barcode container: centered horizontally and pushed toward bottom */}
         <PdfView style={pdfStyles.barcodeContainer}>
           {t.barcodeImage ? (
             <PdfImage src={t.barcodeImage} style={{ width: 420, height: 48 }} />
           ) : (
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
-          {/* Human-readable verification line */}
           <PdfText style={{ fontSize: 9, marginTop: 8, color: '#111827' }}>
             Appointment: {ticketData.appointmentNumber} {ticketData.weighbridgeNumber ? `  |  Weighbridge: ${ticketData.weighbridgeNumber}` : ''}
           </PdfText>
@@ -376,6 +337,7 @@ function AppointmentPdf({ ticket }) {
 // ---------- Main page component ----------
 export default function AppointmentPage() {
   const toast = useToast();
+  const { user } = useAuth() || {}; // capture user to set created_by and logs
 
   // form state
   const [agentTin, setAgentTin] = useState('');
@@ -402,8 +364,11 @@ export default function AppointmentPage() {
   const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
 
   // T1 SAD check state
-  const [t1SadStatus, setT1SadStatus] = useState(null); // null | 'checking' | 'found' | 'missing'
+  const [t1SadStatus, setT1SadStatus] = useState(null); // null | 'checking' | 'found' | 'missing' | 'completed'
   const t1CheckTimer = useRef(null);
+
+  // block creation if any of the selected SADs are already Completed (client safety)
+  const [blockedSads, setBlockedSads] = useState([]); // list of SADs that are completed among selected T1s
 
   // only need the setter (isOrbOpen was unused)
   const [, setOrbOpen] = useState(false);
@@ -413,6 +378,9 @@ export default function AppointmentPage() {
 
   const containerRef = useRef(null);
   const isMobile = useBreakpointValue({ base: true, md: false });
+
+  // subscription ref so we can unsubscribe
+  const sadSubRef = useRef(null);
 
   // utility UI highlights
   const pulseRow = (index) => {
@@ -545,6 +513,10 @@ export default function AppointmentPage() {
     if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver License required' }); return false; }
     if (t1s.length === 0) { toast({ status: 'error', title: 'Please add at least one T1 record' }); return false; }
     if (consolidated === 'N' && t1s.length > 1) { toast({ status: 'error', title: 'Consolidated = N allows only one T1 record' }); return false; }
+    if (blockedSads.length > 0) {
+      toast({ status: 'error', title: 'Closed SAD(s) present', description: `SAD(s) ${blockedSads.join(', ')} are Completed — cannot create appointment.` });
+      return false;
+    }
     return true;
   };
 
@@ -558,9 +530,17 @@ export default function AppointmentPage() {
     setT1SadStatus(null);
     setT1ModalOpen(true);
   };
-  const closeT1Modal = () => { setT1ModalOpen(false); setEditingIndex(null); setT1Sad(''); setT1Packing(PACKING_TYPES[0].value); setT1Container(''); setT1SadStatus(null); if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current); };
+  const closeT1Modal = () => {
+    setT1ModalOpen(false);
+    setEditingIndex(null);
+    setT1Sad('');
+    setT1Packing(PACKING_TYPES[0].value);
+    setT1Container('');
+    setT1SadStatus(null);
+    if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current);
+  };
 
-  // live SAD existence check (debounced)
+  // live SAD existence & status check (debounced)
   useEffect(() => {
     if (!isT1ModalOpen) return;
     if (!t1Sad || t1Sad.trim().length === 0) { setT1SadStatus(null); return; }
@@ -569,9 +549,15 @@ export default function AppointmentPage() {
     t1CheckTimer.current = setTimeout(async () => {
       try {
         const sadVal = t1Sad.trim();
-        const { data, error } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', sadVal).maybeSingle();
+        const { data, error } = await supabase.from('sad_declarations').select('sad_no, status').eq('sad_no', sadVal).maybeSingle();
         if (error) { setT1SadStatus(null); return; }
-        setT1SadStatus(data ? 'found' : 'missing');
+        if (!data) {
+          setT1SadStatus('missing');
+        } else if (String(data.status).toLowerCase() === 'completed') {
+          setT1SadStatus('completed');
+        } else {
+          setT1SadStatus('found');
+        }
       } catch (e) {
         setT1SadStatus(null);
       }
@@ -581,9 +567,33 @@ export default function AppointmentPage() {
     };
   }, [t1Sad, isT1ModalOpen]);
 
-  const handleT1Save = () => {
+  const handleT1Save = async () => {
     if (!t1Sad.trim()) { toast({ status: 'error', title: 'SAD No required' }); return; }
     if (!t1Packing) { toast({ status: 'error', title: 'Packing Type required' }); return; }
+
+    // check the SAD status server-side (final check)
+    try {
+      const sadVal = t1Sad.trim();
+      const { data: sadRow, error } = await supabase.from('sad_declarations').select('sad_no, status').eq('sad_no', sadVal).maybeSingle();
+      if (error) {
+        toast({ status: 'warning', title: 'Could not verify SAD status' });
+        return;
+      }
+      if (!sadRow) {
+        toast({ status: 'error', title: 'SAD not registered', description: 'This SAD must be registered before adding.' });
+        return;
+      }
+      if (String(sadRow.status).toLowerCase() === 'completed') {
+        toast({ status: 'error', title: 'SAD already Completed', description: `SAD ${sadVal} is Completed and cannot be used.` });
+        setBlockedSads((p) => Array.from(new Set([...p, sadVal])));
+        return;
+      }
+    } catch (e) {
+      console.warn('SAD server check failed', e);
+      toast({ status: 'warning', title: 'SAD check failed' });
+      return;
+    }
+
     if (t1Packing === 'container' && !t1Container.trim()) { toast({ status: 'error', title: 'Container No required for container packing' }); return; }
     if (consolidated === 'N' && editingIndex === null && t1s.length >= 1) { toast({ status: 'error', title: 'Consolidated = N allows only one T1' }); return; }
     if (consolidated === 'Y') {
@@ -610,9 +620,30 @@ export default function AppointmentPage() {
   const openConfirm = async () => {
     if (!validateMainForm()) return;
 
+    // final check: ensure none of the selected SADs are Completed
+    const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
+    const uniqueSads = Array.from(new Set(rawSadList));
+    if (uniqueSads.length === 0) {
+      toast({ status: 'error', title: 'Please add at least one T1 record' });
+      return;
+    }
+    try {
+      const { data: rows, error } = await supabase.from('sad_declarations').select('sad_no, status').in('sad_no', uniqueSads).limit(1000);
+      if (error) throw error;
+      const completed = (rows || []).filter(r => String(r.status).toLowerCase() === 'completed').map(r => r.sad_no);
+      if (completed.length) {
+        setBlockedSads(completed);
+        toast({ status: 'error', title: 'Cannot create appointment', description: `SAD(s) ${completed.join(', ')} are Completed.` });
+        return;
+      }
+    } catch (e) {
+      console.warn('Final SAD check failed', e);
+      toast({ status: 'warning', title: 'Could not verify all SAD statuses, try again' });
+      return;
+    }
+
     try {
       const pickup = pickupDate || new Date().toISOString().slice(0, 10);
-      // generate preview numbers
       const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(pickup);
       setPreviewAppointmentNumber(appointmentNumber);
       setPreviewWeighbridgeNumber(weighbridgeNumber);
@@ -637,7 +668,6 @@ export default function AppointmentPage() {
 
   // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
-    // Returns { appointmentNumber, weighbridgeNumber }
     const maxAttempts = 10;
     const d = new Date(pickupDateValue);
     const YY = String(d.getFullYear()).slice(-2);
@@ -646,22 +676,19 @@ export default function AppointmentPage() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        // Build base seq using count for that date (best-effort)
         const { count } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
           .eq('pickup_date', pickupDateValue);
 
         const existing = Number(count || 0);
-        const seq = existing + 1 + attempt; // add attempt to avoid repeating same seq if collision
+        const seq = existing + 1 + attempt;
         const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
-        // add attempt-based suffix only when attempt>0 to help uniqueness
         const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
         const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
         const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
-        // check both uniqueness
         const { count: wbCount } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -675,9 +702,7 @@ export default function AppointmentPage() {
         if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
           return { appointmentNumber, weighbridgeNumber };
         }
-        // else loop to try again
       } catch (e) {
-        // if any error while checking, fallback to a timestamp + random and return it
         console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
         return {
@@ -687,7 +712,6 @@ export default function AppointmentPage() {
       }
     }
 
-    // If exhausted attempts, fallback to timestamp + random
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
@@ -695,16 +719,14 @@ export default function AppointmentPage() {
     };
   }
 
-  // eslint-disable-next-line no-unused-vars
   async function generateNumbersUsingSupabase(pickupDateValue) {
-    // kept for backward compatibility – delegate to generateUniqueNumbers
     return await generateUniqueNumbers(pickupDateValue);
   }
 
+  // ---------- createDirectlyInSupabase (adds created_by, returns full object) ----------
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
-    // generate unique appointment & weighbridge numbers (ensured unique by checking DB)
     let attempts = 0;
     const maxInsertAttempts = 6;
     let lastErr = null;
@@ -715,7 +737,6 @@ export default function AppointmentPage() {
       let appointmentNumber;
       let weighbridgeNumber;
 
-      // If the caller provided preview numbers, try them first (only on first attempt).
       if (useProvidedNumbers && attempts === 1) {
         appointmentNumber = payload.appointmentNumber;
         weighbridgeNumber = payload.weighbridgeNumber;
@@ -741,6 +762,7 @@ export default function AppointmentPage() {
         regime: payload.regime || null,
         barcode: null,
         pdf_url: null,
+        created_by: user?.id || null, // capture owner
       };
 
       try {
@@ -751,16 +773,13 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (insertErr) {
-          // If uniqueness constraint triggered, loop and try again with new numbers.
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
-            // duplicate constraint — retry (and if we had used provided numbers, drop reliance on them next attempts)
             console.warn('Insert conflict on unique column, retrying generation...', insertErr);
-            await new Promise(r => setTimeout(r, 120 + Math.random() * 200)); // small jitter
+            await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
             continue;
           }
-          // other error -> throw
           throw insertErr;
         }
 
@@ -770,6 +789,7 @@ export default function AppointmentPage() {
 
         const appointmentId = inserted.id;
 
+        // insert T1 rows
         const t1Rows = (payload.t1s || []).map((r) => ({
           appointment_id: appointmentId,
           sad_no: r.sadNo,
@@ -786,6 +806,7 @@ export default function AppointmentPage() {
           }
         }
 
+        // fetch full appointment with t1s
         const { data: fullAppointment, error: fetchErr } = await supabase
           .from('appointments')
           .select('*, t1_records(*)')
@@ -793,7 +814,6 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
-          // return a best-effort object
           return {
             appointment: {
               id: appointmentId,
@@ -812,6 +832,7 @@ export default function AppointmentPage() {
               totalDocumentedWeight: appointmentInsert.total_documented_weight,
               t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
               createdAt: inserted.created_at,
+              id: appointmentId,
             }
           };
         }
@@ -834,16 +855,15 @@ export default function AppointmentPage() {
             totalDocumentedWeight: fullAppointment.total_documented_weight,
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
+            id: fullAppointment.id,
           }
         };
       } catch (finalErr) {
         lastErr = finalErr;
-        // If we've exhausted attempts, throw
         if (attempts >= maxInsertAttempts) {
           console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
           throw finalErr;
         }
-        // otherwise loop to try again
         console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
         await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
         continue;
@@ -853,10 +873,8 @@ export default function AppointmentPage() {
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
-  // helper to assemble the full payload used for barcode and generate barcode image that encodes text
-  // IMPORTANT: use appointment_number (or appointmentNumber) from the DB object directly to generate barcode
+  // ---------- buildPrintableTicketObject ----------
   async function buildPrintableTicketObject(dbAppointment) {
-    // dbAppointment = the object returned from DB/insert (may be partial)
     const appointmentNum =
       dbAppointment.appointment_number ??
       dbAppointment.appointmentNumber ??
@@ -886,13 +904,8 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Build the payload text to encode in the barcode
-    // Use a Code39-safe separator '/' so both pieces are present:
-    // Example payload: "2511160004896/WB25111600001"
     const barcodePayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
 
-    // Generate Code39 barcode data URL (PNG)
-    // IMPORTANT: generate at the same pixel width/height we'll render it in the PDF (420x48)
     let barcodeDataUrl = null;
     try {
       barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 420, 48);
@@ -902,16 +915,38 @@ export default function AppointmentPage() {
     }
 
     ticket.barcodeImage = barcodeDataUrl;
-    ticket.barcodePayload = barcodePayload; // optional for debugging
+    ticket.barcodePayload = barcodePayload;
     return ticket;
   }
 
-  // helpers for HTML escaping and base64 (not used for barcode but kept)
+  // ---------- PDF upload helper ----------
+  async function uploadPdfToStorage(blob, appointmentNumber) {
+    if (!blob) return null;
+    const filename = `${appointmentNumber || `appt-${Date.now()}`}.pdf`;
+    const path = `tickets/${filename}`;
+    try {
+      // convert blob to File (browser)
+      const file = new File([blob], filename, { type: 'application/pdf' });
+      const { error: uploadError } = await supabase.storage.from('tickets').upload(path, file, { upsert: true });
+      if (uploadError) {
+        console.warn('uploadPdfToStorage upload error', uploadError);
+        return null;
+      }
+      // get public url
+      const { data: urlData } = supabase.storage.from('tickets').getPublicUrl(path);
+      const publicUrl = urlData?.publicUrl || null;
+      return publicUrl;
+    } catch (e) {
+      console.warn('uploadPdfToStorage failed', e);
+      return null;
+    }
+  }
 
+  // ---------- handleCreateAppointment ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify all SADs exist in sad_declarations before creating appointment
+    // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -920,10 +955,9 @@ export default function AppointmentPage() {
         return;
       }
 
-      // query sad_declarations for those SAD numbers
       const { data: existing, error: sadErr } = await supabase
         .from('sad_declarations')
-        .select('sad_no')
+        .select('sad_no, status')
         .in('sad_no', uniqueSads)
         .limit(1000);
 
@@ -946,13 +980,19 @@ export default function AppointmentPage() {
         });
         return;
       }
+
+      const completed = (existing || []).filter(r => String(r.status).toLowerCase() === 'completed').map(r => r.sad_no);
+      if (completed.length > 0) {
+        setBlockedSads(completed);
+        toast({ status: 'error', title: 'Some SADs are Completed', description: `SAD(s) ${completed.join(', ')} are already Completed and cannot be used.` });
+        return;
+      }
     } catch (err) {
       console.error('SAD validation failed', err);
       toast({ status: 'error', title: 'Failed to verify SADs', description: err?.message || 'Unexpected error' });
       return;
     }
 
-    // proceed to create
     setLoadingCreate(true);
 
     const payload = {
@@ -967,7 +1007,6 @@ export default function AppointmentPage() {
       driverLicense: driverLicense.trim(),
       regime: '',
       totalDocumentedWeight: '',
-      // include preview numbers so createDirectlyInSupabase will try them first
       appointmentNumber: previewAppointmentNumber || undefined,
       weighbridgeNumber: previewWeighbridgeNumber || undefined,
       t1s: t1s.map(r => ({ sadNo: r.sadNo, packingType: r.packingType, containerNo: r.containerNo || '' })),
@@ -993,27 +1032,52 @@ export default function AppointmentPage() {
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
       });
 
-      // generate PDF & download
+      // generate PDF & download & upload
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
+
+        // Download client-side
         downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
+
+        // Try upload to Supabase storage and update appointment.pdf_url
+        try {
+          const publicUrl = await uploadPdfToStorage(blob, printable.appointmentNumber);
+          if (publicUrl && dbAppointment.id) {
+            await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+          }
+        } catch (e) {
+          console.warn('PDF storage/update failed', e);
+        }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
       }
 
+      // write appointment log
+      try {
+        await supabase.from('appointment_logs').insert([{
+          appointment_id: dbAppointment.id,
+          changed_by: user?.id || null,
+          action: 'create',
+          message: `Created appointment ${dbAppointment.appointmentNumber || dbAppointment.appointment_number}`,
+          created_at: new Date().toISOString(),
+        }]);
+      } catch (e) { console.warn('log write failed', e); }
+
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
       await triggerConfetti(160);
 
+      // reset UI
       setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
       setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
       setConfirmOpen(false);
       setPreviewAppointmentNumber('');
       setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
+      setBlockedSads([]);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
       const message = err?.message || String(err);
@@ -1090,6 +1154,107 @@ export default function AppointmentPage() {
     );
   };
 
+  // ---------- Subscription: listen to sad_declarations updates and close appointments when SAD completed ----------
+  useEffect(() => {
+    const subscribe = async () => {
+      try {
+        if (supabase.channel) {
+          const ch = supabase.channel('client:sad-declarations-appointment-sync')
+            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sad_declarations' }, async (payload) => {
+              const newRow = payload?.new;
+              if (!newRow) return;
+              const sadNo = String(newRow.sad_no || '').trim();
+              const status = String(newRow.status || '').toLowerCase();
+              if (status === 'completed') {
+                // find related appointment ids via t1_records
+                try {
+                  const { data: trows, error: terr } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(1000);
+                  if (terr) throw terr;
+                  const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
+                  if (apptIds.length) {
+                    // update appointments status to Completed
+                    const { error: upErr } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
+                    if (upErr) throw upErr;
+
+                    // log for each appointment
+                    const logs = apptIds.map(id => ({
+                      appointment_id: id,
+                      changed_by: null,
+                      action: 'sad_auto_close',
+                      message: `SAD ${sadNo} marked Completed — appointment closed`,
+                      created_at: new Date().toISOString(),
+                    }));
+                    try {
+                      // attempt batched inserts
+                      for (let i = 0; i < logs.length; i += 50) {
+                        const chunk = logs.slice(i, i + 50);
+                        await supabase.from('appointment_logs').insert(chunk);
+                      }
+                    } catch (e) { /* ignore logging errors */ }
+
+                    toast({ title: 'SAD Completed', description: `SAD ${sadNo} is Completed — ${apptIds.length} appointment(s) closed.`, status: 'info', duration: 7000 });
+                  }
+                } catch (e) {
+                  console.warn('Error closing appointments for SAD update', e);
+                }
+              }
+
+              // if this SAD is in the current t1s, mark as blocked client-side
+              try {
+                const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
+                if (mySads.has(sadNo) && status === 'completed') {
+                  setBlockedSads(prev => Array.from(new Set([...prev, sadNo])));
+                  toast({ status: 'error', title: 'SAD completed', description: `SAD ${sadNo} included in this appointment is now Completed and cannot be used.` });
+                }
+              } catch (e) { /* ignore */ }
+            })
+            .subscribe();
+
+          sadSubRef.current = ch;
+        } else {
+          // legacy realtime
+          const s = supabase.from('sad_declarations').on('UPDATE', async (payload) => {
+            const newRow = payload?.new;
+            if (!newRow) return;
+            const sadNo = String(newRow.sad_no || '').trim();
+            const status = String(newRow.status || '').toLowerCase();
+            if (status === 'completed') {
+              try {
+                const { data: trows } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(1000);
+                const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
+                if (apptIds.length) {
+                  await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
+                }
+              } catch (e) { console.warn(e); }
+            }
+            const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
+            if (mySads.has(sadNo) && status === 'completed') {
+              setBlockedSads(prev => Array.from(new Set([...prev, sadNo])));
+              toast({ status: 'error', title: 'SAD completed', description: `SAD ${sadNo} included in this appointment is now Completed and cannot be used.` });
+            }
+          }).subscribe();
+          sadSubRef.current = s;
+        }
+      } catch (e) {
+        console.warn('subscribe to sad_declarations failed', e);
+      }
+    };
+
+    subscribe();
+
+    return () => {
+      try {
+        if (sadSubRef.current && supabase.removeChannel) {
+          supabase.removeChannel(sadSubRef.current).catch(() => {});
+        } else if (sadSubRef.current && sadSubRef.current.unsubscribe) {
+          sadSubRef.current.unsubscribe();
+        }
+      } catch (e) { /* ignore */ }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t1s, user]);
+
+  // ---------- rest of UI rendering ----------
   return (
     <Container maxW="container.lg" py={8} ref={containerRef}>
       <Heading mb={4}>Weighbridge Appointment — Self Service</Heading>
@@ -1184,6 +1349,7 @@ export default function AppointmentPage() {
           <Button variant="outline" onClick={() => {
             setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
             setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
+            setBlockedSads([]);
             toast({ status: 'info', title: 'Form cleared' });
           }}>Clear</Button>
 
@@ -1218,8 +1384,8 @@ export default function AppointmentPage() {
               <ModalContent bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" borderRadius="2xl" boxShadow="0 30px 120px rgba(2,6,23,0.12)">
                 <ModalHeader display="flex" alignItems="center" justifyContent="space-between">
                   <Box>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</Box>
-                  <Badge colorScheme={t1SadStatus === 'found' ? 'green' : t1SadStatus === 'checking' ? 'yellow' : t1SadStatus === 'missing' ? 'red' : 'gray'}>
-                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found' : 'SAD status'}
+                  <Badge colorScheme={t1SadStatus === 'found' ? 'green' : t1SadStatus === 'checking' ? 'yellow' : t1SadStatus === 'missing' ? 'red' : t1SadStatus === 'completed' ? 'red' : 'gray'}>
+                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found' : t1SadStatus === 'completed' ? 'Completed' : 'SAD status'}
                   </Badge>
                 </ModalHeader>
                 <ModalCloseButton />
@@ -1237,9 +1403,10 @@ export default function AppointmentPage() {
                                 try {
                                   const sadVal = (t1Sad || '').trim();
                                   if (!sadVal) { setT1SadStatus(null); return; }
-                                  const { data } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', sadVal).maybeSingle();
-                                  setT1SadStatus(data ? 'found' : 'missing');
-                                  if (!data) toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' });
+                                  const { data } = await supabase.from('sad_declarations').select('sad_no, status').eq('sad_no', sadVal).maybeSingle();
+                                  if (!data) { setT1SadStatus('missing'); toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' }); }
+                                  else if (String(data.status).toLowerCase() === 'completed') { setT1SadStatus('completed'); }
+                                  else { setT1SadStatus('found'); }
                                 } catch (e) {
                                   setT1SadStatus(null);
                                 }
@@ -1254,6 +1421,7 @@ export default function AppointmentPage() {
                       {t1SadStatus === 'found' && <Text color="green.600" mt={1}>SAD found in declarations.</Text>}
                       {t1SadStatus === 'missing' && <Text color="red.600" mt={1}>SAD not found — it must be registered before creating an appointment with it.</Text>}
                       {t1SadStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking SAD existence...</Text>}
+                      {t1SadStatus === 'completed' && <Text color="red.600" mt={1}>This SAD is already Completed and cannot be used.</Text>}
                     </FormControl>
 
                     <FormControl isRequired>
@@ -1297,7 +1465,6 @@ export default function AppointmentPage() {
           <ModalCloseButton />
           <ModalBody>
             <Stack spacing={3}>
-              {/* Generated numbers preview */}
               {previewAppointmentNumber && previewWeighbridgeNumber && (
                 <Box border="1px solid" borderColor="gray.200" borderRadius="md" p={3} mb={2} bg="gray.50">
                   <Text fontWeight="bold" mb={2}>Generated Numbers (Preview)</Text>
