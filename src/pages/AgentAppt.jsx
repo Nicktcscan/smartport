@@ -19,6 +19,7 @@ import {
   Font
 } from '@react-pdf/renderer';
 import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
+import { useAuth } from '../context/AuthContext'; // <--- added
 
 // ---------- Assets (ensure these exist in src/assets/) ----------
 import gralogo from '../assets/gralogo.png';
@@ -56,7 +57,6 @@ const pdfStyles = StyleSheet.create({
   },
 
   headerBar: {
-    // light ash background as requested earlier
     backgroundColor: '#f3f4f6',
     paddingVertical: 12,
     paddingHorizontal: 14,
@@ -72,7 +72,6 @@ const pdfStyles = StyleSheet.create({
   headerRight: { width: '18%', alignItems: 'flex-end', zIndex: 2 },
 
   logoSmall: { width: 72, height: 40, objectFit: 'contain' },
-  // Title readable on light ash background
   titleBig: { fontSize: 16, fontWeight: 700, color: '#0b1220', letterSpacing: 0.6 },
   subtitle: { fontSize: 9, color: '#6b7280', marginTop: 2 },
 
@@ -95,12 +94,11 @@ const pdfStyles = StyleSheet.create({
   qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
   qrBox: { width: '34%', alignItems: 'center', marginRight: 28, zIndex: 3 },
 
-  // Absolute barcode container centered horizontally and pushed toward bottom
   barcodeContainer: {
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 80, // pushes it toward bottom; adjust if you want it lower/higher
+    bottom: 80,
     alignItems: 'center',
     justifyContent: 'center',
     zIndex: 3,
@@ -113,15 +111,12 @@ const pdfStyles = StyleSheet.create({
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
-    // Watermark kept at top as requested
     top: '6%',
-    width: '75%',   // maintained size
+    width: '75%',
     opacity: 0.06,
-    zIndex: 1,      // behind header/main content which have higher z-index
+    zIndex: 1,
   },
 });
-
-// ---------- Removed Code128: all Code128-related arrays & functions have been eliminated ----------
 
 // ---------- New: Code39 generator using JsBarcode (reliable, proven library) ----------
 async function ensureJsBarcodeLoaded() {
@@ -136,7 +131,6 @@ async function ensureJsBarcodeLoaded() {
   });
 }
 
-// Convert SVG string to PNG data URL of given pixel size
 async function svgStringToPngDataUrl(svgString, width, height) {
   return await new Promise((resolve, reject) => {
     try {
@@ -147,10 +141,8 @@ async function svgStringToPngDataUrl(svgString, width, height) {
         canvas.width = Math.round(width);
         canvas.height = Math.round(height);
         const ctx = canvas.getContext('2d');
-        // white background
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        // Draw the SVG onto the canvas, scaling to requested size
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         try {
           const png = canvas.toDataURL('image/png');
@@ -167,36 +159,22 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
-/*
-  Generate Code39 PNG data URL:
-  - uses JsBarcode (loaded via CDN) to render an SVG for CODE39
-  - then converts the SVG to PNG (so it can be embedded in react-pdf)
-  - increased bar width (width: 3) and margin ensure higher contrast (thicker bars).
-*/
 async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   try {
-    // ensure JsBarcode available
     await ensureJsBarcodeLoaded();
-    // Build an <svg> element using JsBarcode
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-    // JsBarcode will render into svgEl
-    // Use CODE39 and no human-readable text (displayValue: false)
-    // Increased width multiplier (3) and margin (10) for stronger contrast
     window.JsBarcode(svgEl, String(payloadStr || ''), {
       format: 'CODE39',
       displayValue: false,
       height: height,
-      width: 3,          // thicker bars -> higher contrast
-      margin: 10,        // quiet zone for better scan reliability
+      width: 3,
+      margin: 10,
       background: '#ffffff',
       lineColor: '#000000',
       flat: true,
     });
-
-    // Serialize the SVG and convert to PNG
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    // Convert to PNG at the requested size (width x height)
     const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     return pngDataUrl;
   } catch (e) {
@@ -205,7 +183,6 @@ async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   }
 }
 
-// ---------- Utility functions (ensure defined to avoid ESLint no-undef) ----------
 function downloadBlob(blob, filename) {
   try {
     const url = URL.createObjectURL(blob);
@@ -244,7 +221,7 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PDF component (Barcode + watermark + beautiful layout) ----------
+// ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
@@ -267,10 +244,8 @@ function AppointmentPdf({ ticket }) {
   return (
     <Document>
       <Page size="A4" style={pdfStyles.page}>
-        {/* Watermark (kept as-is) */}
         <PdfImage src={logo} style={pdfStyles.watermarkCenter} />
 
-        {/* Header */}
         <PdfView style={pdfStyles.headerBar}>
           <PdfView style={pdfStyles.headerLeft}>
             <PdfImage src={gralogo} style={pdfStyles.logoSmall} />
@@ -352,14 +327,12 @@ function AppointmentPdf({ ticket }) {
           </PdfView>
         </PdfView>
 
-        {/* Absolute barcode container: centered horizontally and pushed toward bottom */}
         <PdfView style={pdfStyles.barcodeContainer}>
           {t.barcodeImage ? (
             <PdfImage src={t.barcodeImage} style={{ width: 420, height: 48 }} />
           ) : (
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
-          {/* Human-readable verification line */}
           <PdfText style={{ fontSize: 9, marginTop: 8, color: '#111827' }}>
             Appointment: {ticketData.appointmentNumber} {ticketData.weighbridgeNumber ? `  |  Weighbridge: ${ticketData.weighbridgeNumber}` : ''}
           </PdfText>
@@ -376,6 +349,7 @@ function AppointmentPdf({ ticket }) {
 // ---------- Main page component ----------
 export default function AppointmentPage() {
   const toast = useToast();
+  const { user } = useAuth() || {}; // <--- added to capture logged-in user
 
   // form state
   const [agentTin, setAgentTin] = useState('');
@@ -397,15 +371,12 @@ export default function AppointmentPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
-  // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
   const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
 
-  // T1 SAD check state
   const [t1SadStatus, setT1SadStatus] = useState(null); // null | 'checking' | 'found' | 'missing'
   const t1CheckTimer = useRef(null);
 
-  // only need the setter (isOrbOpen was unused)
   const [, setOrbOpen] = useState(false);
 
   const recognitionRef = useRef(null);
@@ -414,7 +385,6 @@ export default function AppointmentPage() {
   const containerRef = useRef(null);
   const isMobile = useBreakpointValue({ base: true, md: false });
 
-  // utility UI highlights
   const pulseRow = (index) => {
     const rows = document.querySelectorAll('.panel-card');
     const idx = Math.max(0, Math.min(index, rows.length - 1));
@@ -429,7 +399,6 @@ export default function AppointmentPage() {
     setTimeout(() => els.forEach((el) => el.classList.remove('highlight-flash')), 2000);
   };
 
-  // voice command handler
   const handleVoiceCommand = (text = '') => {
     const t = String(text || '').toLowerCase().trim();
     toast({ status: 'info', title: 'Voice command', description: `"${t}"`, duration: 2000 });
@@ -498,7 +467,6 @@ export default function AppointmentPage() {
     };
   }, []);
 
-  // Speech recognition setup
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -560,7 +528,6 @@ export default function AppointmentPage() {
   };
   const closeT1Modal = () => { setT1ModalOpen(false); setEditingIndex(null); setT1Sad(''); setT1Packing(PACKING_TYPES[0].value); setT1Container(''); setT1SadStatus(null); if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current); };
 
-  // live SAD existence check (debounced)
   useEffect(() => {
     if (!isT1ModalOpen) return;
     if (!t1Sad || t1Sad.trim().length === 0) { setT1SadStatus(null); return; }
@@ -606,13 +573,11 @@ export default function AppointmentPage() {
 
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
-  // Modified openConfirm: generate numbers, set preview, then open modal
   const openConfirm = async () => {
     if (!validateMainForm()) return;
 
     try {
       const pickup = pickupDate || new Date().toISOString().slice(0, 10);
-      // generate preview numbers
       const { appointmentNumber, weighbridgeNumber } = await generateUniqueNumbers(pickup);
       setPreviewAppointmentNumber(appointmentNumber);
       setPreviewWeighbridgeNumber(weighbridgeNumber);
@@ -635,9 +600,7 @@ export default function AppointmentPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
-    // Returns { appointmentNumber, weighbridgeNumber }
     const maxAttempts = 10;
     const d = new Date(pickupDateValue);
     const YY = String(d.getFullYear()).slice(-2);
@@ -646,22 +609,19 @@ export default function AppointmentPage() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        // Build base seq using count for that date (best-effort)
         const { count } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
           .eq('pickup_date', pickupDateValue);
 
         const existing = Number(count || 0);
-        const seq = existing + 1 + attempt; // add attempt to avoid repeating same seq if collision
+        const seq = existing + 1 + attempt;
         const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
-        // add attempt-based suffix only when attempt>0 to help uniqueness
         const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
         const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
         const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
-        // check both uniqueness
         const { count: wbCount } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -675,9 +635,7 @@ export default function AppointmentPage() {
         if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
           return { appointmentNumber, weighbridgeNumber };
         }
-        // else loop to try again
       } catch (e) {
-        // if any error while checking, fallback to a timestamp + random and return it
         console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
         return {
@@ -687,7 +645,6 @@ export default function AppointmentPage() {
       }
     }
 
-    // If exhausted attempts, fallback to timestamp + random
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
@@ -695,16 +652,13 @@ export default function AppointmentPage() {
     };
   }
 
-  // eslint-disable-next-line no-unused-vars
   async function generateNumbersUsingSupabase(pickupDateValue) {
-    // kept for backward compatibility – delegate to generateUniqueNumbers
     return await generateUniqueNumbers(pickupDateValue);
   }
 
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
-    // generate unique appointment & weighbridge numbers (ensured unique by checking DB)
     let attempts = 0;
     const maxInsertAttempts = 6;
     let lastErr = null;
@@ -715,7 +669,6 @@ export default function AppointmentPage() {
       let appointmentNumber;
       let weighbridgeNumber;
 
-      // If the caller provided preview numbers, try them first (only on first attempt).
       if (useProvidedNumbers && attempts === 1) {
         appointmentNumber = payload.appointmentNumber;
         weighbridgeNumber = payload.weighbridgeNumber;
@@ -741,6 +694,7 @@ export default function AppointmentPage() {
         regime: payload.regime || null,
         barcode: null,
         pdf_url: null,
+        created_by: payload.createdBy || null, // <--- capture creator here
       };
 
       try {
@@ -751,16 +705,13 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (insertErr) {
-          // If uniqueness constraint triggered, loop and try again with new numbers.
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
-            // duplicate constraint — retry (and if we had used provided numbers, drop reliance on them next attempts)
             console.warn('Insert conflict on unique column, retrying generation...', insertErr);
-            await new Promise(r => setTimeout(r, 120 + Math.random() * 200)); // small jitter
+            await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
             continue;
           }
-          // other error -> throw
           throw insertErr;
         }
 
@@ -780,7 +731,6 @@ export default function AppointmentPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
-            // roll back appointment insertion if t1 insert failed
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
@@ -793,7 +743,6 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
-          // return a best-effort object
           return {
             appointment: {
               id: appointmentId,
@@ -812,6 +761,7 @@ export default function AppointmentPage() {
               totalDocumentedWeight: appointmentInsert.total_documented_weight,
               t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
               createdAt: inserted.created_at,
+              created_by: appointmentInsert.created_by || null,
             }
           };
         }
@@ -834,16 +784,15 @@ export default function AppointmentPage() {
             totalDocumentedWeight: fullAppointment.total_documented_weight,
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
+            created_by: fullAppointment.created_by || null,
           }
         };
       } catch (finalErr) {
         lastErr = finalErr;
-        // If we've exhausted attempts, throw
         if (attempts >= maxInsertAttempts) {
           console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
           throw finalErr;
         }
-        // otherwise loop to try again
         console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
         await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
         continue;
@@ -853,10 +802,7 @@ export default function AppointmentPage() {
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
-  // helper to assemble the full payload used for barcode and generate barcode image that encodes text
-  // IMPORTANT: use appointment_number (or appointmentNumber) from the DB object directly to generate barcode
   async function buildPrintableTicketObject(dbAppointment) {
-    // dbAppointment = the object returned from DB/insert (may be partial)
     const appointmentNum =
       dbAppointment.appointment_number ??
       dbAppointment.appointmentNumber ??
@@ -886,13 +832,8 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Build the payload text to encode in the barcode
-    // Use a Code39-safe separator '/' so both pieces are present:
-    // Example payload: "2511160004896/WB25111600001"
     const barcodePayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
 
-    // Generate Code39 barcode data URL (PNG)
-    // IMPORTANT: generate at the same pixel width/height we'll render it in the PDF (420x48)
     let barcodeDataUrl = null;
     try {
       barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 420, 48);
@@ -902,16 +843,13 @@ export default function AppointmentPage() {
     }
 
     ticket.barcodeImage = barcodeDataUrl;
-    ticket.barcodePayload = barcodePayload; // optional for debugging
+    ticket.barcodePayload = barcodePayload;
     return ticket;
   }
-
-  // helpers for HTML escaping and base64 (not used for barcode but kept)
 
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify all SADs exist in sad_declarations before creating appointment
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -920,7 +858,6 @@ export default function AppointmentPage() {
         return;
       }
 
-      // query sad_declarations for those SAD numbers
       const { data: existing, error: sadErr } = await supabase
         .from('sad_declarations')
         .select('sad_no')
@@ -952,7 +889,6 @@ export default function AppointmentPage() {
       return;
     }
 
-    // proceed to create
     setLoadingCreate(true);
 
     const payload = {
@@ -967,17 +903,17 @@ export default function AppointmentPage() {
       driverLicense: driverLicense.trim(),
       regime: '',
       totalDocumentedWeight: '',
-      // include preview numbers so createDirectlyInSupabase will try them first
       appointmentNumber: previewAppointmentNumber || undefined,
       weighbridgeNumber: previewWeighbridgeNumber || undefined,
       t1s: t1s.map(r => ({ sadNo: r.sadNo, packingType: r.packingType, containerNo: r.containerNo || '' })),
+      createdBy: user?.id || null, // <--- attach the currently logged-in user as creator
+      warehouseLabelProvided: (WAREHOUSES.find(w => w.value === warehouse) || {}).label || warehouse,
     };
 
     try {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // build printable ticket (includes barcode image)
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
@@ -993,7 +929,6 @@ export default function AppointmentPage() {
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
       });
 
-      // generate PDF & download
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
@@ -1191,7 +1126,6 @@ export default function AppointmentPage() {
         </HStack>
       </Box>
 
-      {/* Floating crystal orb CTA (opens T1 modal) */}
       <Box className="floating-orb" onClick={() => { setOrbOpen(true); setT1ModalOpen(true); }} role="button" aria-label="Add T1">
         <MotionBox
           className="orb"
@@ -1205,7 +1139,6 @@ export default function AppointmentPage() {
         </MotionBox>
       </Box>
 
-      {/* T1 Modal — upgraded */}
       <Modal isOpen={isT1ModalOpen} onClose={closeT1Modal} isCentered size="md">
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
         <AnimatePresence>
@@ -1289,7 +1222,6 @@ export default function AppointmentPage() {
         </AnimatePresence>
       </Modal>
 
-      {/* Confirm Modal */}
       <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered>
         <ModalOverlay />
         <ModalContent maxW="lg" borderRadius="lg" className="appt-glass">
@@ -1297,7 +1229,6 @@ export default function AppointmentPage() {
           <ModalCloseButton />
           <ModalBody>
             <Stack spacing={3}>
-              {/* Generated numbers preview */}
               {previewAppointmentNumber && previewWeighbridgeNumber && (
                 <Box border="1px solid" borderColor="gray.200" borderRadius="md" p={3} mb={2} bg="gray.50">
                   <Text fontWeight="bold" mb={2}>Generated Numbers (Preview)</Text>

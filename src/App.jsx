@@ -28,6 +28,7 @@ import FinanceSAD from './pages/FinanceSAD';
 import Appointments from './pages/Appointments';
 import AgentSAD from './pages/AgentSAD';
 import AgentAppt from './pages/AgentAppt';
+import AgentApptsCreated from './pages/AgentApptscreated';
 
 import OutgateTicketDetails from './pages/OutgateTicketDetails';
 import OutgateSearchTickets from './pages/OutgateSearchTickets';
@@ -478,6 +479,19 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <AgentAppt />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+                <Route
+              path="/myappointments"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'agent']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <AgentApptsCreated />
                     </Box>
                   </Layout>
                 </ProtectedRoute>
