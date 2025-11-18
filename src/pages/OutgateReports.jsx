@@ -231,13 +231,35 @@ export default function OutgateReports() {
       try {
         setLoading(true);
 
-        // fetch outgate reports (all rows)
-        const { data: outData, error: outErr } = await supabase
-          .from('outgate')
-          .select('*')
-          .order('created_at', { ascending: false });
+        // -------------------------
+        // Helper: fetch all rows by paging using range (pageSize 1000)
+        // -------------------------
+        const fetchAllPaged = async (tableName, selectCols = '*', orderBy = 'created_at', ascending = false) => {
+          const pageSize = 1000;
+          let from = 0;
+          const out = [];
+          while (true) {
+            const to = from + pageSize - 1;
+            const query = supabase
+              .from(tableName)
+              .select(selectCols)
+              .order(orderBy, { ascending })
+              .range(from, to);
+            // execute
+            const { data, error } = await query;
+            if (error) throw error;
+            if (!data || data.length === 0) {
+              break;
+            }
+            out.push(...data);
+            if (data.length < pageSize) break;
+            from += pageSize;
+          }
+          return out;
+        };
 
-        if (outErr) throw outErr;
+        // fetch outgate reports (all rows) using paging to avoid PostgREST caps
+        const outData = await fetchAllPaged('outgate', '*', 'created_at', false);
 
         const mapped = (outData || []).map((og) => {
           const computed = computeWeights(og);
@@ -268,18 +290,15 @@ export default function OutgateReports() {
         // Confirmed Exits = total rows in outgate
         setExitedCount(Array.isArray(outData) ? outData.length : mapped.length);
 
-        // --- fetch ticket statuses for summary & compute totalTransactions via map
-        const { data: ticketsData, error: ticketsErr } = await supabase
-          .from('tickets')
-          .select('ticket_no,status');
+        // --- fetch ticket statuses for summary & compute totalTransactions via paging
+        const ticketsDataAll = await fetchAllPaged('tickets', 'ticket_no,status', 'ticket_no', true);
 
-        if (ticketsErr) {
-          console.warn('Failed to load tickets for status summary', ticketsErr);
+        if (!ticketsDataAll || ticketsDataAll.length === 0) {
           setTicketStatusMap({});
           setTotalTransactions(0);
         } else {
           const map = {};
-          (ticketsData || []).forEach((t) => {
+          (ticketsDataAll || []).forEach((t) => {
             const tn = (t.ticket_no ?? '').toString().trim();
             if (!tn) return;
             map[tn] = t.status ?? map[tn] ?? 'Pending';
@@ -295,7 +314,7 @@ export default function OutgateReports() {
           setTotalTransactions(Object.keys(map).length);
         }
 
-        // --- fetch total tickets count (exact)
+        // --- fetch total tickets count (exact) (keep as before)
         try {
           const { count: ticketsCount, error: countErr } = await supabase
             .from('tickets')
@@ -311,7 +330,7 @@ export default function OutgateReports() {
           setTotalTickets(null);
         }
 
-        // --- fetch all sad_declarations and compute total count + total declared weight + total recorded (discharged) weight
+        // --- fetch all sad_declarations and compute totals (unchanged)
         try {
           const { data: sadRows, error: sadErr } = await supabase
             .from('sad_declarations')
