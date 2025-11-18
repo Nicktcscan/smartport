@@ -9,7 +9,7 @@ import {
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
 } from '@chakra-ui/react';
 import {
-  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
+  FaPlus, FaFileExport, FaEllipsisV, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
 } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
@@ -124,12 +124,6 @@ export default function SADDeclaration() {
   const [sortDir, setSortDir] = useState('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
-
-  // edit / confirmations
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editModalData, setEditModalData] = useState(null);
-  const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
-  const confirmSaveCancelRef = useRef();
 
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState(null);
@@ -493,105 +487,6 @@ export default function SADDeclaration() {
       console.error('openDetailsModal', err);
       setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
       toast({ title: 'Failed', description: 'Could not load details', status: 'error' });
-    }
-  };
-
-  // edit modal open
-  const openEditModal = (sad) => {
-    setEditModalData({
-      original_sad_no: sad.sad_no,
-      sad_no: sad.sad_no,
-      regime: sad.regime ?? '',
-      declared_weight: String(sad.declared_weight ?? ''),
-      status: sad.status ?? 'In Progress',
-    });
-    setEditModalOpen(true);
-  };
-  const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); };
-
-  // save edit modal (handles renaming and regime/code changes)
-  const saveEditModal = async () => {
-    if (!editModalData || !editModalData.original_sad_no) return;
-    const originalSad = editModalData.original_sad_no;
-    const newSad = String(editModalData.sad_no ?? '').trim();
-    const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
-    const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
-
-    // optimistic UI update
-    setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString() } : s)));
-    setConfirmSaveOpen(false);
-    closeEditModal();
-
-    try {
-      if (!newSad) throw new Error('SAD Number cannot be empty');
-
-      // ensure regime is a code; if user entered a word, convert
-      let regimeToSave = editModalData.regime;
-      if (regimeToSave && typeof regimeToSave === 'string') {
-        const low = regimeToSave.trim().toLowerCase();
-        if (WORD_TO_CODE[low]) regimeToSave = WORD_TO_CODE[low];
-      }
-
-      if (newSad !== originalSad) {
-        const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
-        if (conflict) {
-          throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
-        }
-
-        // update child tables first: tickets, reports_generated
-        const { error: tErr } = await supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad);
-        if (tErr) console.warn('tickets update returned error', tErr);
-
-        const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
-        if (rErr) console.warn('reports_generated update returned error', rErr);
-
-        // now update the parent SAD row
-        const { error: parentErr } = await supabase.from('sad_declarations').update({
-          sad_no: newSad,
-          regime: regimeToSave ?? null,
-          declared_weight: declaredParsed,
-          status: editModalData.status ?? null,
-          updated_at: new Date().toISOString(),
-          manual_update: true,
-        }).eq('sad_no', originalSad);
-        if (parentErr) {
-          // attempt rollback children updates to originalSad (best-effort)
-          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
-          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
-          throw parentErr;
-        }
-      } else {
-        // same sad_no -> simple update
-        const { error } = await supabase.from('sad_declarations').update({
-          regime: regimeToSave ?? null,
-          declared_weight: declaredParsed,
-          status: editModalData.status ?? null,
-          updated_at: new Date().toISOString(),
-          manual_update: true,
-        }).eq('sad_no', originalSad);
-        if (error) throw error;
-      }
-
-      // log change
-      try {
-        const after = {
-          ...before,
-          sad_no: newSad,
-          regime: regimeToSave,
-          declared_weight: declaredParsed,
-          status: editModalData.status,
-          updated_at: new Date().toISOString(),
-        };
-        await supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]);
-      } catch (e) { /* ignore */ }
-
-      await pushActivity(`Edited SAD ${originalSad} → ${newSad}`, { before, after: { sad_no: newSad } });
-      toast({ title: 'Saved', description: `SAD ${originalSad} updated${newSad !== originalSad ? ` → ${newSad}` : ''}`, status: 'success' });
-      fetchSADs();
-    } catch (err) {
-      console.error('saveEditModal', err);
-      toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
-      fetchSADs(); // refresh to ensure UI consistency
     }
   };
 
@@ -1151,7 +1046,6 @@ export default function SADDeclaration() {
                             <MenuList>
                               <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
                               <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
-                              <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>
                               <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
                               {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
                               <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
@@ -1226,7 +1120,7 @@ export default function SADDeclaration() {
             {selectedSad && (
               <>
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
+                <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()}</strong></Text>
                 <Text mb={2}># Transactions: <strong>{Number(selectedSad.ticket_count || 0).toLocaleString()}</strong></Text>
                 <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
 
@@ -1256,69 +1150,6 @@ export default function SADDeclaration() {
           </ModalFooter>
         </ModalContent>
       </Modal>
-
-      {/* Edit modal */}
-      <Modal isOpen={editModalOpen} onClose={closeEditModal} size="md" isCentered>
-        <ModalOverlay />
-        <ModalContent>
-          <ModalHeader>Edit SAD</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            {editModalData ? (
-              <Box>
-                <FormControl mb={3}>
-                  <FormLabel>SAD Number</FormLabel>
-                  <Input value={editModalData.sad_no} onChange={(e) => setEditModalData(d => ({ ...d, sad_no: e.target.value }))} />
-                  <Text fontSize="xs" color="gray.500">Changing SAD number will update child tickets and generated reports (best-effort).</Text>
-                </FormControl>
-
-                <FormControl mb={3}>
-                  <FormLabel>Regime</FormLabel>
-                  <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
-                    <option value="">Select regime</option>
-                    {REGIME_OPTIONS.map(code => (
-                      <option key={code} value={code}>
-                        {REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}
-                      </option>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                <FormControl mb={3}>
-                  <FormLabel>Declared Weight (kg)</FormLabel>
-                  <Input type="text" value={formatNumber(editModalData.declared_weight)} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: parseNumberString(e.target.value) }))} />
-                </FormControl>
-
-                <FormControl mb={3}>
-                  <FormLabel>Status</FormLabel>
-                  <Select value={editModalData.status} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))}>
-                    {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
-                  </Select>
-                </FormControl>
-              </Box>
-            ) : <Text>Loading...</Text>}
-          </ModalBody>
-
-          <ModalFooter>
-            <Button variant="ghost" onClick={closeEditModal} type="button">Cancel</Button>
-            <Button colorScheme="blue" ml={3} onClick={() => setConfirmSaveOpen(true)} type="button">Save</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* Confirm Save */}
-      <AlertDialog isOpen={confirmSaveOpen} leastDestructiveRef={confirmSaveCancelRef} onClose={() => setConfirmSaveOpen(false)}>
-        <AlertDialogOverlay>
-          <AlertDialogContent>
-            <AlertDialogHeader fontSize="lg" fontWeight="bold">Confirm Save</AlertDialogHeader>
-            <AlertDialogBody>Are you sure you want to save changes to SAD {editModalData?.original_sad_no}?</AlertDialogBody>
-            <AlertDialogFooter>
-              <Button ref={confirmSaveCancelRef} onClick={() => setConfirmSaveOpen(false)} type="button">Cancel</Button>
-              <Button colorScheme="red" onClick={saveEditModal} ml={3} type="button">Yes, Save</Button>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialogOverlay>
-      </AlertDialog>
 
       {/* Archive confirm */}
       <AlertDialog isOpen={archiveOpen} leastDestructiveRef={archiveCancelRef} onClose={() => setArchiveOpen(false)}>
