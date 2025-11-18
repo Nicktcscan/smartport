@@ -170,6 +170,36 @@ function dedupeReportsByTicketNo(rows = []) {
 }
 
 /* -----------------------
+   Supabase paged fetch helper
+   - pages using .range(from, to) with pageSize = 1000
+   - accepts an optional filterFn(query) to apply WHEREs / ORDERs before range
+----------------------- */
+async function fetchAllPagedSupabase(tableName, selectCols = '*', orderBy = null, ascending = false, filterFn = null) {
+  const pageSize = 1000;
+  let from = 0;
+  const out = [];
+  while (true) {
+    const to = from + pageSize - 1;
+    let baseQuery = supabase.from(tableName).select(selectCols);
+    // if caller provided filterFn, let it set WHEREs and ORDERs
+    if (typeof filterFn === 'function') {
+      baseQuery = filterFn(baseQuery);
+    } else if (orderBy) {
+      baseQuery = baseQuery.order(orderBy, { ascending });
+    }
+    const { data, error } = await baseQuery.range(from, to);
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      break;
+    }
+    out.push(...data);
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  return out;
+}
+
+/* -----------------------
    Main component
 ----------------------- */
 export default function OutgateReports() {
@@ -231,35 +261,8 @@ export default function OutgateReports() {
       try {
         setLoading(true);
 
-        // -------------------------
-        // Helper: fetch all rows by paging using range (pageSize 1000)
-        // -------------------------
-        const fetchAllPaged = async (tableName, selectCols = '*', orderBy = 'created_at', ascending = false) => {
-          const pageSize = 1000;
-          let from = 0;
-          const out = [];
-          while (true) {
-            const to = from + pageSize - 1;
-            const query = supabase
-              .from(tableName)
-              .select(selectCols)
-              .order(orderBy, { ascending })
-              .range(from, to);
-            // execute
-            const { data, error } = await query;
-            if (error) throw error;
-            if (!data || data.length === 0) {
-              break;
-            }
-            out.push(...data);
-            if (data.length < pageSize) break;
-            from += pageSize;
-          }
-          return out;
-        };
-
         // fetch outgate reports (all rows) using paging to avoid PostgREST caps
-        const outData = await fetchAllPaged('outgate', '*', 'created_at', false);
+        const outData = await fetchAllPagedSupabase('outgate', '*', 'created_at', false);
 
         const mapped = (outData || []).map((og) => {
           const computed = computeWeights(og);
@@ -290,8 +293,8 @@ export default function OutgateReports() {
         // Confirmed Exits = total rows in outgate
         setExitedCount(Array.isArray(outData) ? outData.length : mapped.length);
 
-        // --- fetch ticket statuses for summary & compute totalTransactions via paging
-        const ticketsDataAll = await fetchAllPaged('tickets', 'ticket_no,status', 'ticket_no', true);
+        // --- fetch ticket statuses for summary via paging
+        const ticketsDataAll = await fetchAllPagedSupabase('tickets', 'ticket_no,status', 'ticket_no', true);
 
         if (!ticketsDataAll || ticketsDataAll.length === 0) {
           setTicketStatusMap({});
@@ -314,7 +317,7 @@ export default function OutgateReports() {
           setTotalTransactions(Object.keys(map).length);
         }
 
-        // --- fetch total tickets count (exact) (keep as before)
+        // --- fetch total tickets count (exact)
         try {
           const { count: ticketsCount, error: countErr } = await supabase
             .from('tickets')
@@ -432,14 +435,17 @@ export default function OutgateReports() {
       setSadLoading(true);
 
       try {
-        const { data: ticketsData, error } = await supabase
-          .from('tickets')
-          .select('*')
-          .ilike('sad_no', `%${q}%`)
-          .order('date', { ascending: false });
+        // ---------- PAGED SAD tickets fetch ----------
+        // Use the reusable paged fetch helper so all matching tickets are returned
+        const ticketsData = await fetchAllPagedSupabase(
+          'tickets',
+          '*',
+          null,
+          false,
+          (qb) => qb.ilike('sad_no', `%${q}%`).order('date', { ascending: false })
+        );
 
-        if (error) {
-          console.warn('SAD lookup error', error);
+        if (!ticketsData || ticketsData.length === 0) {
           setSadResults([]);
           setSadLoading(false);
           await fetchSadDeclaration();
