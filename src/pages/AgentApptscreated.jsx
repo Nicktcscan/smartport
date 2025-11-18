@@ -285,6 +285,9 @@ export default function AppointmentsPage() {
    * - supports searching by SAD (searches t1_records.sad_no) and regular fields
    * - when searchQ matches SADs, we combine appointment ids found via t1_records with appointments found via direct fields
    * - implements pagination by slicing the resulting ids and fetching those appointment rows
+   *
+   * Important fix: when restrictToUser is true, we filter idsFromT1 to only IDs that belong to the current user
+   * so users do not see other users' appointments even when searching by SAD.
    */
   const fetchAppointments = async ({ page: p = pageRef.current, size = pageSizeRef.current, q = searchQRef.current, status = statusFilter, pickup = pickupDateFilter } = {}) => {
     setLoadingList(true);
@@ -318,6 +321,28 @@ export default function AppointmentsPage() {
         } catch (e) {
           console.warn('t1_records search failed', e);
           idsFromT1 = [];
+        }
+
+        // IMPORTANT: if restricting to user, filter these appointment ids to only those created_by = user.id
+        if (restrictToUser && idsFromT1.length) {
+          try {
+            const { data: ownedRows, error: ownedErr } = await supabase
+              .from('appointments')
+              .select('id')
+              .in('id', idsFromT1)
+              .eq('created_by', user.id)
+              .limit(2000);
+            if (!ownedErr && Array.isArray(ownedRows)) {
+              const allowed = new Set(ownedRows.map(r => r.id));
+              idsFromT1 = idsFromT1.filter(id => allowed.has(id));
+            } else {
+              // if error, to be safe, empty the list so we don't leak other user's appointments
+              idsFromT1 = [];
+            }
+          } catch (e) {
+            console.warn('filtering idsFromT1 by created_by failed', e);
+            idsFromT1 = [];
+          }
         }
       }
 
@@ -521,6 +546,7 @@ export default function AppointmentsPage() {
           .neq('status', 'Completed');
         if (updErr) throw updErr;
       } else {
+        // mark related appointments Completed
         const { error: updErr } = await supabase.from('appointments')
           .update({ status: 'Completed', updated_at: new Date().toISOString() })
           .in('id', apptIds);
@@ -654,15 +680,39 @@ export default function AppointmentsPage() {
     }
   };
 
+  // helper: show friendly closed message and return true if closed
+  const isAppointmentClosed = (appt) => {
+    if (!appt) return false;
+    return String(appt.status || '').trim() === 'Completed';
+  };
+  const closedMessage = () => {
+    toast({
+      title: 'This appointment has been closed',
+      description: 'Contact App Support for guidance',
+      status: 'info',
+      duration: 6000,
+      isClosable: true,
+    });
+  };
+
   const handleChangeStatus = async (apptId, newStatus) => {
+    // Fetch appointment locally to check status before attempting update
+    const before = (appointments.find(a => a.id === apptId)) || null;
+    if (before && isAppointmentClosed(before) && String(newStatus).trim() !== 'Completed') {
+      // prevented re-opening or other changes on closed appts
+      closedMessage();
+      return;
+    }
+
     if (!user || user.role !== 'admin') {
       toast({ title: 'Permission denied', description: 'Only admins can change appointment status', status: 'error' });
       return;
     }
     setStatusUpdating(prev => ({ ...prev, [apptId]: true }));
-    const before = (appointments.find(a => a.id === apptId)) || null;
+    // optimistic update
     setAppointments(prev => prev.map(a => (a.id === apptId ? { ...a, status: newStatus } : a)));
     try {
+      // try update on DB
       const { error } = await supabase.from('appointments').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', apptId);
       if (error) throw error;
       try {
@@ -690,11 +740,19 @@ export default function AppointmentsPage() {
 
   const markAsCompleted = async (appt) => {
     if (!appt || !appt.id) return;
+    if (isAppointmentClosed(appt)) {
+      closedMessage();
+      return;
+    }
     await handleChangeStatus(appt.id, 'Completed');
   };
 
   const cloneAppointment = async (appt) => {
     if (!appt) return;
+    if (isAppointmentClosed(appt)) {
+      closedMessage();
+      return;
+    }
     try {
       const newApptNumber = `${appt.appointment_number}-CLONE-${Date.now()}`;
       const payload = {
@@ -735,6 +793,10 @@ export default function AppointmentsPage() {
       return;
     }
     if (!appt || !appt.id) return;
+    if (isAppointmentClosed(appt)) {
+      closedMessage();
+      return;
+    }
     const ok = window.confirm(`Delete appointment ${appt.appointment_number}? This will remove the appointment and its T1 records (if cascade).`);
     if (!ok) return;
     try {
@@ -781,13 +843,19 @@ export default function AppointmentsPage() {
     if (!selectedIds.size) { toast({ title: 'No appointments selected', status: 'info' }); return; }
     if (!user || user.role !== 'admin') { toast({ title: 'Permission denied', status: 'error' }); return; }
     const ids = Array.from(selectedIds);
-    const ok = window.confirm(`Mark ${ids.length} appointment(s) as Completed?`);
+    // filter out already closed
+    const actionable = appointments.filter(a => ids.includes(a.id) && !isAppointmentClosed(a)).map(a => a.id);
+    if (actionable.length === 0) {
+      toast({ title: 'No selected appointments are actionable (already closed)', status: 'info' });
+      return;
+    }
+    const ok = window.confirm(`Mark ${actionable.length} appointment(s) as Completed?`);
     if (!ok) return;
     try {
-      const { error } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', ids);
+      const { error } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', actionable);
       if (error) throw error;
       try {
-        const logs = ids.map(id => ({ appointment_id: id, changed_by: user?.id || null, action: 'status_change', before: null, after: JSON.stringify({ status: 'Completed' }), created_at: new Date().toISOString() }));
+        const logs = actionable.map(id => ({ appointment_id: id, changed_by: user?.id || null, action: 'status_change', before: null, after: JSON.stringify({ status: 'Completed' }), created_at: new Date().toISOString() }));
         await runInBatches(logs, 50, async (rec) => supabase.from('appointment_logs').insert([rec]));
       } catch (e) { /* ignore */ }
       toast({ title: 'Marked completed', status: 'success' });
@@ -822,16 +890,22 @@ export default function AppointmentsPage() {
     if (!selectedIds.size) { toast({ title: 'No appointments selected', status: 'info' }); return; }
     if (!user || user.role !== 'admin') { toast({ title: 'Permission denied', status: 'error' }); return; }
     const ids = Array.from(selectedIds);
-    const ok = window.confirm(`Delete ${ids.length} selected appointments? This is destructive.`);
+    // filter out closed appointments
+    const actionable = appointments.filter(a => ids.includes(a.id) && !isAppointmentClosed(a)).map(a => a.id);
+    if (actionable.length === 0) {
+      toast({ title: 'No selected appointments can be deleted (already closed)', status: 'info' });
+      return;
+    }
+    const ok = window.confirm(`Delete ${actionable.length} selected appointments? This is destructive.`);
     if (!ok) return;
     try {
-      const { error } = await supabase.from('appointments').delete().in('id', ids);
+      const { error } = await supabase.from('appointments').delete().in('id', actionable);
       if (error) throw error;
       try {
-        const logs = ids.map(id => ({ appointment_id: id, changed_by: user?.id || null, action: 'bulk_delete', message: `Bulk delete by ${user?.id}`, created_at: new Date().toISOString() }));
+        const logs = actionable.map(id => ({ appointment_id: id, changed_by: user?.id || null, action: 'bulk_delete', message: `Bulk delete by ${user?.id}`, created_at: new Date().toISOString() }));
         await runInBatches(logs, 50, async (rec) => supabase.from('appointment_logs').insert([rec]));
       } catch (e) { /* ignore */ }
-      toast({ title: 'Deleted', description: `${ids.length} appointment(s) deleted`, status: 'success' });
+      toast({ title: 'Deleted', description: `${actionable.length} appointment(s) deleted`, status: 'success' });
       setSelectedIds(new Set());
       fetchStats();
       fetchAppointments({ page: 1, size: pageSize, q: searchQ });
@@ -915,10 +989,7 @@ export default function AppointmentsPage() {
    * Reprint / regenerate PDF for an appointment
    * - If appt.pdf_url exists, just open it
    * - Otherwise, call backend endpoint to generate the PDF and stream/download it.
-   * - If backend returns a public URL in header 'x-generated-pdf-url', persist it in the appointment row for future quick downloads.
-   *
-   * NOTE: This assumes you have a server endpoint `POST /api/appointments/:id/pdf` that returns the PDF binary
-   *       or sets header x-generated-pdf-url when it stores the file and returns a 200.
+   * - This action is allowed even for Completed appointments (view/print)
    */
   const reprintAppointment = async (appt) => {
     if (!appt || !appt.id) {
@@ -926,6 +997,7 @@ export default function AppointmentsPage() {
       return;
     }
 
+    // Viewing/printing allowed even if Completed — we do not block reads
     if (appt.pdf_url) {
       window.open(appt.pdf_url, '_blank');
       return;
@@ -933,23 +1005,18 @@ export default function AppointmentsPage() {
 
     setDrawerLoading(true);
     try {
-      // call your backend route (implement server-side) which returns a PDF
-      // fallback: if your backend returns a JSON with { url } you'll handle that too
       const res = await fetch(`/api/appointments/${appt.id}/pdf`, { method: 'POST' });
 
       if (!res.ok) {
-        // try to extract message
         let msg = `${res.status} ${res.statusText}`;
         try { msg = await res.text(); } catch (e) {}
         throw new Error(msg);
       }
 
       const contentType = res.headers.get('content-type') || '';
-      // if backend returned a direct URL in JSON
       if (contentType.includes('application/json')) {
         const json = await res.json();
         if (json.url) {
-          // open URL and persist to DB
           window.open(json.url, '_blank');
           try {
             await supabase.from('appointments').update({ pdf_url: json.url }).eq('id', appt.id);
@@ -961,7 +1028,6 @@ export default function AppointmentsPage() {
         }
       }
 
-      // assume binary/pdf response
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -972,7 +1038,6 @@ export default function AppointmentsPage() {
       a.remove();
       URL.revokeObjectURL(url);
 
-      // check for header with persistent public URL
       const pubUrl = res.headers.get('x-generated-pdf-url');
       if (pubUrl) {
         try {
@@ -991,6 +1056,7 @@ export default function AppointmentsPage() {
     }
   };
 
+  // render starts here (UI)
   return (
     <Container maxW="8xl" py={6}>
       <Heading mb={4}>Manage Appointments</Heading>
@@ -1093,6 +1159,7 @@ export default function AppointmentsPage() {
                   const sadTooltip = sadList.length ? sadList.join(', ') : (a.appointment_number || '');
                   const t1count = t1s.length || a.total_t1s || 0;
                   const rowAlerts = alertsMap[a.id] || [];
+                  const closed = isAppointmentClosed(a);
                   return (
                     <MotionTr key={a.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }}>
                       <Td px={2}>
@@ -1161,13 +1228,13 @@ export default function AppointmentsPage() {
                             <MenuList>
                               <MenuItem icon={<FaEye />} onClick={() => openView(a)}>View</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleAppointment(a)}>Export</MenuItem>
-                              <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)}>Mark Completed</MenuItem>
+                              <MenuItem icon={<FaCheck />} onClick={() => { if (closed) { closedMessage(); } else markAsCompleted(a); }} isDisabled={closed}>Mark Completed</MenuItem>
                               <MenuItem icon={<FaListAlt />} onClick={() => openDrawer(a)}>View T1s</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => { if (a.pdf_url) window.open(a.pdf_url, '_blank'); else toast({ title: 'No PDF', status: 'info' }); }}>Download PDF</MenuItem>
                               <MenuItem icon={<FaPrint />} onClick={() => reprintAppointment(a)}>Reprint / Regenerate PDF</MenuItem>
                               <MenuDivider />
-                              <MenuItem icon={<FaClone />} onClick={() => cloneAppointment(a)}>Clone</MenuItem>
-                              <MenuItem icon={<FaTrash />} onClick={() => deleteAppointment(a)}>Delete</MenuItem>
+                              <MenuItem icon={<FaClone />} onClick={() => { if (closed) { closedMessage(); } else cloneAppointment(a); }} isDisabled={closed}>Clone</MenuItem>
+                              <MenuItem icon={<FaTrash />} onClick={() => { if (closed) { closedMessage(); } else deleteAppointment(a); }} isDisabled={closed || !user || user.role !== 'admin'}>Delete</MenuItem>
                             </MenuList>
                           </Menu>
                         </HStack>
@@ -1223,7 +1290,7 @@ export default function AppointmentsPage() {
                       <>
                         {activityLogs.filter(l => l.action === 'status_change').map((l, i) => (
                           <Box key={i}>
-                            <Text fontSize="sm">{l.action} — {l.created_at ? new Date(l.created_at).toLocaleString() : '—'}</Text>
+                            <Text fontSize="sm">{l.action} — {l.created_at ? new Date(l.created_at).toLocaleDateString() : '—'}</Text>
                             <Text fontSize="xs" color="gray.500">{l.changed_by ? `by ${l.changed_by}` : ''} {l.message ? ` — ${l.message}` : ''}</Text>
                           </Box>
                         ))}
