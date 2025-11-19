@@ -182,6 +182,48 @@ export default function AppointmentsPage() {
     return dt.toISOString().slice(0, 10);
   };
 
+  /* ---------- helper: verify SAD ownership ---------- */
+  const verifyUserOwnsSads = async (sadNos = []) => {
+    // Returns { ok: boolean, missing: string[] }
+    const uniq = Array.from(new Set((sadNos || []).map(s => (s ? String(s).trim() : ''))).values()).filter(Boolean);
+    if (!uniq.length) return { ok: true, missing: [] };
+    try {
+      const { data: rows, error } = await supabase
+        .from('sad_declarations')
+        .select('sad_no')
+        .in('sad_no', uniq)
+        .eq('created_by', user?.id || null)
+        .limit(5000);
+      if (error) {
+        console.warn('verifyUserOwnsSads: db error', error);
+        // fail-closed: do not permit if we can't verify
+        return { ok: false, missing: uniq };
+      }
+      const ownedSet = new Set((rows || []).map(r => String(r.sad_no).trim()));
+      const missing = uniq.filter(s => !ownedSet.has(s));
+      return { ok: missing.length === 0, missing };
+    } catch (e) {
+      console.warn('verifyUserOwnsSads unexpected', e);
+      return { ok: false, missing: uniq };
+    }
+  };
+
+  const verifyUserOwnsSadsForAppointment = async (appointmentId) => {
+    if (!appointmentId) return { ok: true, missing: [] };
+    try {
+      const { data: t1s, error } = await supabase.from('t1_records').select('sad_no').eq('appointment_id', appointmentId).limit(5000);
+      if (error) {
+        console.warn('verifyUserOwnsSadsForAppointment t1 fetch error', error);
+        return { ok: false, missing: [] };
+      }
+      const sadNos = Array.from(new Set((t1s || []).map(r => r.sad_no).filter(Boolean)));
+      return await verifyUserOwnsSads(sadNos);
+    } catch (e) {
+      console.warn('verifyUserOwnsSadsForAppointment unexpected', e);
+      return { ok: false, missing: [] };
+    }
+  };
+
   // --- Fetch stats + sparklines + uniqueSADs + alerts ---
   const fetchStats = async () => {
     setLoadingStats(true);
@@ -201,17 +243,16 @@ export default function AppointmentsPage() {
       const compResp = await compQ;
       setTotalCompleted(Number(compResp?.count || 0));
 
-      // posted
+      // posted (exclude Imported entirely)
       let postedQ = supabase.from('appointments').select('id', { count: 'exact', head: true }).eq('status', 'Posted');
       if (restrictToUser && user?.id) postedQ = postedQ.eq('created_by', user.id);
       const postedResp = await postedQ;
       setTotalPosted(Number(postedResp?.count || 0));
 
-      // unique SADs from t1_records
+      // unique SADs from t1_records (user-restricted unless admin)
       try {
         if (restrictToUser && user?.id) {
           // Only count SADs for appointments created by this user
-          // 1) get appointment ids created_by this user (limit to 5000)
           const { data: myAppts, error: myApptsErr } = await supabase
             .from('appointments')
             .select('id')
@@ -225,7 +266,6 @@ export default function AppointmentsPage() {
             if (!apptIds.length) {
               setUniqueSADs(0);
             } else {
-              // 2) fetch t1_records for those appointment ids
               const { data: t1rows, error: t1err } = await supabase
                 .from('t1_records')
                 .select('sad_no')
@@ -241,7 +281,7 @@ export default function AppointmentsPage() {
             }
           }
         } else {
-          // admin / system-wide count (original behaviour)
+          // admin / system-wide count
           const { data: t1rows, error: t1err } = await supabase
             .from('t1_records')
             .select('sad_no')
@@ -320,8 +360,9 @@ export default function AppointmentsPage() {
    * - when searchQ matches SADs, we combine appointment ids found via t1_records with appointments found via direct fields
    * - implements pagination by slicing the resulting ids and fetching those appointment rows
    *
-   * Important fix: when restrictToUser is true, we filter idsFromT1 to only IDs that belong to the current user
-   * so users do not see other users' appointments even when searching by SAD.
+   * Important fixes:
+   *  - When restricting to user (non-admin), ids discovered from t1_records are filtered to only appointment IDs created_by the user.
+   *  - Default status options exclude 'Imported' completely (we only use POSTED and COMPLETED).
    */
   const fetchAppointments = async ({ page: p = pageRef.current, size = pageSizeRef.current, q = searchQRef.current, status = statusFilter, pickup = pickupDateFilter } = {}) => {
     setLoadingList(true);
@@ -370,7 +411,7 @@ export default function AppointmentsPage() {
               const allowed = new Set(ownedRows.map(r => r.id));
               idsFromT1 = idsFromT1.filter(id => allowed.has(id));
             } else {
-              // if error, to be safe, empty the list so we don't leak other user's appointments
+              // if error, empty the list so we don't leak other user's appointments
               idsFromT1 = [];
             }
           } catch (e) {
@@ -730,6 +771,12 @@ export default function AppointmentsPage() {
   };
 
   const handleChangeStatus = async (apptId, newStatus) => {
+    // disallow other statuses than Posted/Completed
+    if (!['Posted', 'Completed'].includes(newStatus)) {
+      toast({ title: 'Invalid status', description: 'Only Posted and Completed statuses are allowed', status: 'error' });
+      return;
+    }
+
     // Fetch appointment locally to check status before attempting update
     const before = (appointments.find(a => a.id === apptId)) || null;
     if (before && isAppointmentClosed(before) && String(newStatus).trim() !== 'Completed') {
@@ -787,6 +834,21 @@ export default function AppointmentsPage() {
       closedMessage();
       return;
     }
+
+    // verify ownership of all SADs in this appointment before allowing clone/create
+    if (!(user && user.role === 'admin')) {
+      const { ok, missing } = await verifyUserOwnsSadsForAppointment(appt.id);
+      if (!ok) {
+        toast({
+          title: 'Forbidden: unauthorized SAD(s)',
+          description: missing && missing.length ? `You did not register these SAD(s): ${missing.slice(0,6).join(', ')}${missing.length > 6 ? ` +${missing.length-6}` : ''}` : 'Unable to verify SAD ownership',
+          status: 'error',
+          duration: 8000,
+        });
+        return;
+      }
+    }
+
     try {
       const newApptNumber = `${appt.appointment_number}-CLONE-${Date.now()}`;
       const payload = {
@@ -811,6 +873,25 @@ export default function AppointmentsPage() {
       };
       const { data: newRow, error } = await supabase.from('appointments').insert([payload]).select().single();
       if (error) throw error;
+
+      // clone T1s: fetch original T1s and insert new rows pointing to newRow.id
+      try {
+        const { data: originalT1s } = await supabase.from('t1_records').select('sad_no, packing_type, container_no').eq('appointment_id', appt.id).order('created_at', { ascending: true });
+        if (Array.isArray(originalT1s) && originalT1s.length) {
+          const t1Rows = originalT1s.map(t => ({
+            appointment_id: newRow.id,
+            sad_no: t.sad_no,
+            packing_type: t.packing_type,
+            container_no: t.container_no ?? null,
+            created_at: new Date().toISOString(),
+          }));
+          const { error: t1err } = await supabase.from('t1_records').insert(t1Rows);
+          if (t1err) {
+            console.warn('Failed to insert cloned T1s', t1err);
+          }
+        }
+      } catch (e) { console.warn('clone t1 fetch/insert failed', e); }
+
       try { await supabase.from('appointment_logs').insert([{ appointment_id: newRow.id, changed_by: user?.id || null, action: 'clone', message: `Cloned from ${appt.appointment_number}`, created_at: new Date().toISOString(), before: JSON.stringify(appt), after: JSON.stringify(newRow) }]); } catch (e) { /* ignore */ }
       toast({ title: 'Cloned', description: `Appointment cloned as ${newRow.appointment_number}`, status: 'success' });
       fetchStats();

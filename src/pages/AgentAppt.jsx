@@ -528,6 +528,7 @@ export default function AppointmentPage() {
   };
   const closeT1Modal = () => { setT1ModalOpen(false); setEditingIndex(null); setT1Sad(''); setT1Packing(PACKING_TYPES[0].value); setT1Container(''); setT1SadStatus(null); if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current); };
 
+  // real-time check for SAD existence + ownership while typing in modal
   useEffect(() => {
     if (!isT1ModalOpen) return;
     if (!t1Sad || t1Sad.trim().length === 0) { setT1SadStatus(null); return; }
@@ -536,9 +537,19 @@ export default function AppointmentPage() {
     t1CheckTimer.current = setTimeout(async () => {
       try {
         const sadVal = t1Sad.trim();
-        const { data, error } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', sadVal).maybeSingle();
+        const { data, error } = await supabase.from('sad_declarations').select('sad_no, created_by').eq('sad_no', sadVal).maybeSingle();
         if (error) { setT1SadStatus(null); return; }
-        setT1SadStatus(data ? 'found' : 'missing');
+        if (!data) {
+          setT1SadStatus('missing');
+        } else {
+          // if admin allow any; otherwise SAD must be created_by current user
+          if (user && user.role === 'admin') setT1SadStatus('found');
+          else if (data.created_by === user?.id) setT1SadStatus('found');
+          else {
+            // SAD exists but is owned by someone else
+            setT1SadStatus('missing');
+          }
+        }
       } catch (e) {
         setT1SadStatus(null);
       }
@@ -546,9 +557,10 @@ export default function AppointmentPage() {
     return () => {
       if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current);
     };
-  }, [t1Sad, isT1ModalOpen]);
+  }, [t1Sad, isT1ModalOpen, user]);
 
-  const handleT1Save = () => {
+  // final save of a T1 record in the modal - now verifies ownership at save time too
+  const handleT1Save = async () => {
     if (!t1Sad.trim()) { toast({ status: 'error', title: 'SAD No required' }); return; }
     if (!t1Packing) { toast({ status: 'error', title: 'Packing Type required' }); return; }
     if (t1Packing === 'container' && !t1Container.trim()) { toast({ status: 'error', title: 'Container No required for container packing' }); return; }
@@ -556,6 +568,36 @@ export default function AppointmentPage() {
     if (consolidated === 'Y') {
       const existsSamePackingIndex = t1s.findIndex((r, i) => r.packingType === t1Packing && i !== editingIndex);
       if (existsSamePackingIndex !== -1) { toast({ status: 'error', title: `Packing type "${t1Packing}" already added` }); return; }
+    }
+
+    // verify ownership (server-side check)
+    try {
+      const sadVal = t1Sad.trim();
+      const { data: row, error } = await supabase.from('sad_declarations').select('sad_no, created_by').eq('sad_no', sadVal).maybeSingle();
+      if (error) {
+        console.error('Error checking SAD ownership', error);
+        toast({ status: 'error', title: 'Could not validate SAD now', description: 'Please try again' });
+        return;
+      }
+      if (!row) {
+        toast({ status: 'error', title: 'SAD not registered', description: 'This SAD is not present in sad_declarations' });
+        setT1SadStatus('missing');
+        return;
+      }
+      if (!(user && user.role === 'admin') && row.created_by !== user?.id) {
+        toast({
+          status: 'error',
+          title: 'Not allowed',
+          description: `You did not register SAD ${sadVal} — you cannot add it to an appointment`,
+          duration: 8000,
+        });
+        setT1SadStatus('missing');
+        return;
+      }
+    } catch (e) {
+      console.error('verify ownership failed', e);
+      toast({ status: 'error', title: 'SAD verification failed' });
+      return;
     }
 
     const newRow = { sadNo: t1Sad.trim(), packingType: t1Packing, containerNo: t1Packing === 'container' ? t1Container.trim() : null };
@@ -850,6 +892,7 @@ export default function AppointmentPage() {
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
+    // ownership check for all SADs before even trying to create
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -860,7 +903,7 @@ export default function AppointmentPage() {
 
       const { data: existing, error: sadErr } = await supabase
         .from('sad_declarations')
-        .select('sad_no')
+        .select('sad_no, created_by')
         .in('sad_no', uniqueSads)
         .limit(1000);
 
@@ -870,13 +913,27 @@ export default function AppointmentPage() {
         return;
       }
 
-      const present = (existing || []).map(r => String(r.sad_no).trim());
-      const missing = uniqueSads.filter(s => !present.includes(s));
+      const presentRows = (existing || []);
+      const missing = [];
+      for (const s of uniqueSads) {
+        const row = presentRows.find(r => String(r.sad_no).trim() === String(s).trim());
+        if (!row) {
+          missing.push(s);
+          continue;
+        }
+        // if not admin, ensure the current user is the creator
+        if (!(user && user.role === 'admin')) {
+          if (!row.created_by || row.created_by !== user?.id) {
+            missing.push(s);
+            continue;
+          }
+        }
+      }
 
       if (missing.length > 0) {
         toast({
-          title: "This Appointment has an SAD that has not been registered. Kindly Contact App Support or Weighbridge Operators for assistance",
-          description: `Missing SAD(s): ${missing.join(', ')}`,
+          title: "You can't create appointments for these SAD(s)",
+          description: `Missing / not authorized: ${missing.join(', ')}`,
           status: 'error',
           duration: 9000,
           isClosable: true,
@@ -1152,7 +1209,7 @@ export default function AppointmentPage() {
                 <ModalHeader display="flex" alignItems="center" justifyContent="space-between">
                   <Box>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</Box>
                   <Badge colorScheme={t1SadStatus === 'found' ? 'green' : t1SadStatus === 'checking' ? 'yellow' : t1SadStatus === 'missing' ? 'red' : 'gray'}>
-                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found' : 'SAD status'}
+                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found / Not yours' : 'SAD status'}
                   </Badge>
                 </ModalHeader>
                 <ModalCloseButton />
@@ -1170,9 +1227,18 @@ export default function AppointmentPage() {
                                 try {
                                   const sadVal = (t1Sad || '').trim();
                                   if (!sadVal) { setT1SadStatus(null); return; }
-                                  const { data } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', sadVal).maybeSingle();
-                                  setT1SadStatus(data ? 'found' : 'missing');
-                                  if (!data) toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' });
+                                  const { data } = await supabase.from('sad_declarations').select('sad_no, created_by').eq('sad_no', sadVal).maybeSingle();
+                                  if (!data) {
+                                    setT1SadStatus('missing');
+                                    toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' });
+                                  } else {
+                                    if (user && user.role === 'admin') setT1SadStatus('found');
+                                    else if (data.created_by === user?.id) setT1SadStatus('found');
+                                    else {
+                                      setT1SadStatus('missing');
+                                      toast({ status: 'error', title: 'SAD not owned', description: 'This SAD was registered by another user; you cannot create appointments for it.' });
+                                    }
+                                  }
                                 } catch (e) {
                                   setT1SadStatus(null);
                                 }
@@ -1184,8 +1250,8 @@ export default function AppointmentPage() {
                           </HStack>
                         </InputRightElement>
                       </InputGroup>
-                      {t1SadStatus === 'found' && <Text color="green.600" mt={1}>SAD found in declarations.</Text>}
-                      {t1SadStatus === 'missing' && <Text color="red.600" mt={1}>SAD not found — it must be registered before creating an appointment with it.</Text>}
+                      {t1SadStatus === 'found' && <Text color="green.600" mt={1}>SAD found and authorized for your account.</Text>}
+                      {t1SadStatus === 'missing' && <Text color="red.600" mt={1}>SAD not found — or not registered by you. It must be registered before creating an appointment with it.</Text>}
                       {t1SadStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking SAD existence...</Text>}
                     </FormControl>
 
