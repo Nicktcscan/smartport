@@ -59,13 +59,11 @@ import { supabase } from '../supabaseClient';
  *
  * Notes:
  * - Admin actions that require the Supabase service_role key must be executed from
- *   a server-side endpoint. This client calls /api/admin/updateUserPassword
- *   for password updates.
+ *   a server-side endpoint. This version uses your Supabase Edge Function URL.
  *
- * Fixes included:
- * - Build API url relative to current origin to avoid calling wrong host (405).
- * - Support optional NEXT_PUBLIC_API_BASE to override domain if needed.
- * - Helpful debug logging and toasts when server responds 405/404.
+ * Environment variables:
+ * - REACT_APP_SUPABASE_FUNCTION_URL (optional) — overrides the function url
+ * - REACT_APP_SUPABASE_ANON_KEY (optional but recommended) — anon key to call Supabase function
  */
 
 function useDebounced(value, delay = 300) {
@@ -78,6 +76,18 @@ function useDebounced(value, delay = 300) {
 }
 
 export default function UsersPage() {
+  // ---- Config for Supabase function ----
+  const DEFAULT_FUNCTION_URL = 'https://cgyjradpttmdancexdem.supabase.co/functions/v1/hyper-responder';
+  const SUPABASE_FUNCTION_URL =
+    (typeof process !== 'undefined' && process.env && process.env.REACT_APP_SUPABASE_FUNCTION_URL)
+      ? String(process.env.REACT_APP_SUPABASE_FUNCTION_URL).replace(/\/+$/,'')
+      : DEFAULT_FUNCTION_URL;
+  const SUPABASE_ANON_KEY =
+    (typeof process !== 'undefined' && process.env && process.env.REACT_APP_SUPABASE_ANON_KEY)
+      ? String(process.env.REACT_APP_SUPABASE_ANON_KEY)
+      : null;
+  // --------------------------------------
+
   const [users, setUsers] = useState([]);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounced(search, 300);
@@ -283,28 +293,29 @@ export default function UsersPage() {
           return;
         }
 
-        // If a new password is provided, call the server-side admin endpoint to update it
+        // If a new password is provided, call the Supabase Edge Function
         if (form.password && form.password.length >= 6) {
           try {
-            // Build API URL in a robust way:
-            // - If NEXT_PUBLIC_API_BASE is set (useful in deployments), use it.
-            // - Otherwise build relative to current window.location.origin so this calls the Next.js API on the same origin.
-            const envBase = typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_API_BASE
-              ? String(process.env.NEXT_PUBLIC_API_BASE).replace(/\/+$/,'')
-              : null;
+            // Build function URL (already configured at top)
+            const apiUrl = SUPABASE_FUNCTION_URL;
 
-            const apiUrl = (typeof window !== 'undefined')
-              ? (envBase ? `${envBase}/api/admin/updateUserPassword` : new URL('/api/admin/updateUserPassword', window.location.origin).toString())
-              : (envBase ? `${envBase}/api/admin/updateUserPassword` : '/api/admin/updateUserPassword');
+            // Prepare headers. Include anon key if provided.
+            const headers = {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            };
+            if (SUPABASE_ANON_KEY) {
+              headers['Authorization'] = `Bearer ${SUPABASE_ANON_KEY}`;
+            } else {
+              // warn developer via console — function may still accept unauthenticated requests depending on config
+              console.warn('No REACT_APP_SUPABASE_ANON_KEY configured — function may reject the request depending on its settings.');
+            }
 
             const resp = await fetch(apiUrl, {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-              },
-              // use same-origin so if your API relies on cookies/sessions they are sent
-              credentials: 'same-origin',
+              headers,
+              // For Supabase functions a CORS request is expected, do not send cookies by default
+              // credentials: 'omit' is default; leaving it out so browsers choose default
               body: JSON.stringify({ userId: form.id, password: form.password }),
             });
 
@@ -314,7 +325,6 @@ export default function UsersPage() {
             try { parsed = text ? JSON.parse(text) : null; } catch (err) { parsed = null; }
 
             if (!resp.ok) {
-              // helpful debug logging to browser console
               console.error('Password update failed.', {
                 url: apiUrl,
                 status: resp.status,
@@ -326,14 +336,14 @@ export default function UsersPage() {
               if (resp.status === 405) {
                 toast({
                   title: 'Password update failed (405)',
-                  description: `Server rejected method when calling ${apiUrl}. Ensure that endpoint exists at pages/api/admin/updateUserPassword.js and accepts POST and OPTIONS (for preflight).`,
+                  description: `Server rejected method when calling ${apiUrl}. Ensure the function accepts POST and OPTIONS.`,
                   status: 'error',
                   duration: 10000,
                 });
               } else if (resp.status === 404) {
                 toast({
                   title: 'Password update failed (404)',
-                  description: `Endpoint not found: ${apiUrl}. In Next.js API routes must live at src/pages/api/admin/updateUserPassword.js (or pages/api/admin/updateUserPassword.js).`,
+                  description: `Function not found at ${apiUrl}. Verify REACT_APP_SUPABASE_FUNCTION_URL or that the function is deployed.`,
                   status: 'error',
                   duration: 10000,
                 });
@@ -349,7 +359,7 @@ export default function UsersPage() {
             toast({ title: 'Password updated', status: 'success' });
           } catch (pwErr) {
             console.error('password update error', pwErr);
-            // If we already showed a helpful toast above for 405/404, don't duplicate; otherwise show a fallback
+            // If we already showed a helpful toast above for 405/404, avoid duplicating; otherwise show fallback
             if (!pwErr.message || (!pwErr.message.includes('405') && !pwErr.message.includes('404'))) {
               toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
             }
