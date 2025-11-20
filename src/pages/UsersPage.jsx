@@ -1,4 +1,3 @@
-// src/pages/UsersPage.jsx
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box,
@@ -292,11 +291,8 @@ export default function UsersPage() {
             let parsed = null;
             try {
               const text = await resp.text();
-              if (text) {
-                parsed = JSON.parse(text);
-              }
+              if (text) parsed = JSON.parse(text);
             } catch (parseErr) {
-              // ignore parse error, we'll use generic message below
               parsed = null;
             }
 
@@ -336,8 +332,6 @@ export default function UsersPage() {
       status: 'info',
       duration: 6000,
       isClosable: true,
-      // Chakra's toast doesn't officially support an 'action' prop in stable API across all versions;
-      // we use isClosable and instruct undo via normal button in UI if needed. Keep simple here.
     });
 
     // schedule actual deletion after timeout unless undone (you could wire Undo to clear this timer)

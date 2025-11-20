@@ -1,11 +1,9 @@
-// pages/api/admin/updateUserPassword.js
 import { supabaseAdmin } from '../../../lib/supabaseServer';
 
 export default async function handler(req, res) {
-  // Allow preflight
+  // Basic CORS for testing environments — scope this to your origin in production.
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  // Adjust origin as needed; for same-origin apps you may remove or scope this
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   if (req.method === 'OPTIONS') {
@@ -24,10 +22,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    // call supabaseAdmin to update password (server side, service role)
+    // Use the server-side supabaseAdmin client (must be instantiated with service_role)
     const resp = await supabaseAdmin.auth.admin.updateUserById(userId, { password });
 
-    // resp may contain { user, error } or { data, error } depending on SDK version
+    // Different SDK versions return different shapes; check for .error
     const err = resp?.error;
     if (err) {
       const msg = err?.message || JSON.stringify(err);
@@ -35,6 +33,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: msg });
     }
 
+    // Some SDK versions return { data, user } etc — we just confirm success
     return res.status(200).json({ message: 'Password updated successfully' });
   } catch (err) {
     console.error('updateUserPassword API error:', err);
