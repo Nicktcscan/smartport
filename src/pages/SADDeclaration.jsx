@@ -20,17 +20,12 @@ const SAD_DOCS_BUCKET = 'sad-docs';
 const MOTION_ROW = { initial: { opacity: 0, y: -6 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 6 } };
 
 // ---------- Regime configuration ----------
-// Database now stores regime codes directly: IM4 (import), EX1 (export), IM7 (warehousing)
 const REGIME_OPTIONS = ['IM4', 'EX1', 'IM7'];
-
-// Map code -> human label
 const REGIME_LABEL_MAP = {
   IM4: 'Import',
   EX1: 'Export',
   IM7: 'Warehousing',
 };
-
-// Map common word inputs -> code (helps NL search)
 const WORD_TO_CODE = {
   import: 'IM4',
   export: 'EX1',
@@ -97,7 +92,7 @@ export default function SADDeclaration() {
 
   // form
   const [sadNo, setSadNo] = useState('');
-  const [regime, setRegime] = useState(''); // will hold codes like IM4/EX1/IM7
+  const [regime, setRegime] = useState('');
   const [declaredWeight, setDeclaredWeight] = useState('');
   const [docs, setDocs] = useState([]);
 
@@ -126,7 +121,6 @@ export default function SADDeclaration() {
   const [statusFilter, setStatusFilter] = useState('');
   const [regimeFilter, setRegimeFilter] = useState('');
   const [sortBy, setSortBy] = useState('created_at');
-  // Ascending is default per your request (keeps newest-on-top via existing inversion logic)
   const [sortDir, setSortDir] = useState('asc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
@@ -190,6 +184,7 @@ export default function SADDeclaration() {
           total_recorded_weight: Number(r.total_recorded_weight ?? 0),
           ticket_count: 0,
           manual_update: r.manual_update ?? false,
+          completed_at: r.completed_at ?? null, // include completed_at if present
         };
       });
 
@@ -356,7 +351,6 @@ export default function SADDeclaration() {
       const docRecords = await uploadDocs(sadNo, docs);
       const trimmedSad = String(sadNo).trim();
 
-      // regime should already be a code (IM4/EX1/IM7). If user accidentally typed a word, convert it.
       let regimeCode = regime;
       if (!regimeCode && typeof regime === 'string') {
         const low = regime.trim().toLowerCase();
@@ -440,7 +434,8 @@ export default function SADDeclaration() {
             }
           } catch (e) { /* ignore */ }
         }
-        setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
+        // include completed_at if available in sad
+        setDetailsData({ sad: { ...sad }, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
       } else {
         setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
       }
@@ -487,6 +482,10 @@ export default function SADDeclaration() {
         if (WORD_TO_CODE[low]) regimeToSave = WORD_TO_CODE[low];
       }
 
+      const statusToSave = editModalData.status ?? null;
+      // set completed_at if status is Completed
+      const desiredCompletedAt = statusToSave === 'Completed' ? new Date().toISOString() : null;
+
       if (newSad !== originalSad) {
         const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
         if (conflict) {
@@ -500,31 +499,64 @@ export default function SADDeclaration() {
         const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
-        // now update the parent SAD row
-        const { error: parentErr } = await supabase.from('sad_declarations').update({
-          sad_no: newSad,
-          regime: regimeToSave ?? null,
-          declared_weight: declaredParsed,
-          status: editModalData.status ?? null,
-          updated_at: new Date().toISOString(),
-          manual_update: true,
-        }).eq('sad_no', originalSad);
-        if (parentErr) {
+        // now update the parent SAD row (attempt to set completed_at; fallback if DB doesn't have column)
+        try {
+          const updatePayload = {
+            sad_no: newSad,
+            regime: regimeToSave ?? null,
+            declared_weight: declaredParsed,
+            status: statusToSave ?? null,
+            updated_at: new Date().toISOString(),
+            manual_update: true,
+            completed_at: desiredCompletedAt, // may fail if column missing
+          };
+          let { error: parentErr } = await supabase.from('sad_declarations').update(updatePayload).eq('sad_no', originalSad);
+          if (parentErr && parentErr.message && /completed_at/i.test(parentErr.message)) {
+            // fallback update without completed_at
+            const { error: parentErr2 } = await supabase.from('sad_declarations').update({
+              sad_no: newSad,
+              regime: regimeToSave ?? null,
+              declared_weight: declaredParsed,
+              status: statusToSave ?? null,
+              updated_at: new Date().toISOString(),
+              manual_update: true,
+            }).eq('sad_no', originalSad);
+            if (parentErr2) throw parentErr2;
+          } else if (parentErr) {
+            throw parentErr;
+          }
+        } catch (e) {
           // attempt rollback children updates to originalSad (best-effort)
-          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
-          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
-          throw parentErr;
+          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (errRoll) { /* ignore */ }
+          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (errRoll) { /* ignore */ }
+          throw e;
         }
       } else {
         // same sad_no -> simple update
-        const { error } = await supabase.from('sad_declarations').update({
-          regime: regimeToSave ?? null,
-          declared_weight: declaredParsed,
-          status: editModalData.status ?? null,
-          updated_at: new Date().toISOString(),
-          manual_update: true,
-        }).eq('sad_no', originalSad);
-        if (error) throw error;
+        try {
+          const updatePayload = {
+            regime: regimeToSave ?? null,
+            declared_weight: declaredParsed,
+            status: statusToSave ?? null,
+            updated_at: new Date().toISOString(),
+            manual_update: true,
+            completed_at: desiredCompletedAt,
+          };
+          const { error } = await supabase.from('sad_declarations').update(updatePayload).eq('sad_no', originalSad);
+          if (error && error.message && /completed_at/i.test(error.message)) {
+            // fallback without completed_at
+            const { error: e2 } = await supabase.from('sad_declarations').update({
+              regime: regimeToSave ?? null,
+              declared_weight: declaredParsed,
+              status: statusToSave ?? null,
+              updated_at: new Date().toISOString(),
+              manual_update: true,
+            }).eq('sad_no', originalSad);
+            if (e2) throw e2;
+          } else if (error) throw error;
+        } catch (e) {
+          throw e;
+        }
       }
 
       // log change
@@ -534,8 +566,9 @@ export default function SADDeclaration() {
           sad_no: newSad,
           regime: regimeToSave,
           declared_weight: declaredParsed,
-          status: editModalData.status,
+          status: statusToSave,
           updated_at: new Date().toISOString(),
+          completed_at: desiredCompletedAt,
         };
         await supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]);
       } catch (e) { /* ignore */ }
@@ -550,12 +583,23 @@ export default function SADDeclaration() {
     }
   };
 
-  // update status quick action
+  // update status quick action — now attempts to set completed_at when Completed
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
-      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
-      if (error) throw error;
+      if (newStatus === 'Completed') payload.completed_at = new Date().toISOString();
+      else payload.completed_at = null;
+
+      // try to update with completed_at (if DB supports it). If DB complains, fallback to update without completed_at.
+      let { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
+      if (error && error.message && /completed_at/i.test(error.message)) {
+        // fallback without completed_at
+        const { error: fallbackErr } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString(), manual_update: true }).eq('sad_no', sad_no);
+        if (fallbackErr) throw fallbackErr;
+      } else if (error) {
+        throw error;
+      }
+
       toast({ title: 'Status updated', description: `${sad_no} status set to ${newStatus}`, status: 'success' });
       await pushActivity(`Status of ${sad_no} set to ${newStatus}`);
       fetchSADs();
@@ -579,7 +623,13 @@ export default function SADDeclaration() {
       const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
       if (error) throw error;
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+      // update total_recorded_weight and updated_at
+      try {
+        const { error: updErr } = await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+        if (updErr) throw updErr;
+      } catch (e) {
+        console.warn('Could not update total_recorded_weight', e);
+      }
       await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
@@ -615,6 +665,7 @@ export default function SADDeclaration() {
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
+        completed_at: s.completed_at ?? null,
         docs: (s.docs || []).map(d => d.name || d.path).join('; '),
       }];
       exportToCSV(rows, `sad_${s.sad_no}_export.csv`);
@@ -640,7 +691,6 @@ export default function SADDeclaration() {
       const num = q.match(/\b(\d{1,10})\b/);
       if (num) filter.sad_no = num[1];
 
-      // If user typed a regime code (IM4/EX1/IM7) or a word like "import", map to code
       if (!filter.sad_no && !filter.status) {
         const up = q.toUpperCase();
         if (REGIME_OPTIONS.includes(up)) {
@@ -648,7 +698,6 @@ export default function SADDeclaration() {
         } else if (WORD_TO_CODE[lower]) {
           filter.regime = WORD_TO_CODE[lower];
         } else {
-          // fallback: let fetchSADs use ilike — but db stores codes, so this probably won't match; still, set regimeFilter for UI filtering
           filter.regime = null;
         }
       }
@@ -862,6 +911,7 @@ export default function SADDeclaration() {
       status: s.status,
       created_at: s.created_at,
       updated_at: s.updated_at,
+      completed_at: s.completed_at ?? null,
     }));
     exportToCSV(rows, `sad_declarations_export_${new Date().toISOString().slice(0,10)}.csv`);
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
@@ -878,6 +928,7 @@ export default function SADDeclaration() {
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
+        completed_at: s.completed_at ?? null,
       }));
       if (!rows.length) { toast({ title: 'No data', description: 'Nothing to backup', status: 'info' }); return; }
       const csv = [
@@ -1144,6 +1195,10 @@ export default function SADDeclaration() {
                     <Text mb={2}>Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
                     <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
                     <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
+                    {/* New: show Completed At if present */}
+                    {detailsData.sad.completed_at ? (
+                      <Text mb={2}>Completed At: <strong>{new Date(detailsData.sad.completed_at).toLocaleString()}</strong></Text>
+                    ) : null}
                     <Text mb={4}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
 
                     <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
