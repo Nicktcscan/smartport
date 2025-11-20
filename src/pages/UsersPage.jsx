@@ -59,11 +59,11 @@ import { supabase } from '../supabaseClient';
  *
  * Notes:
  * - Admin actions that require the Supabase service_role key must be executed from
- *   a server-side endpoint. This version uses your Supabase Edge Function URL.
+ *   a server-side endpoint (we use a Supabase Edge Function here).
  *
  * Environment variables:
  * - REACT_APP_SUPABASE_FUNCTION_URL (optional) — overrides the function url
- * - REACT_APP_SUPABASE_ANON_KEY (optional but recommended) — anon key to call Supabase function
+ * - REACT_APP_SUPABASE_ANON_KEY (optional) — anon key to call Supabase function if you prefer
  */
 
 function useDebounced(value, delay = 300) {
@@ -87,6 +87,35 @@ export default function UsersPage() {
       ? String(process.env.REACT_APP_SUPABASE_ANON_KEY)
       : null;
   // --------------------------------------
+
+  // helper: attempt to retrieve a user access token from the client-side supabase instance.
+  // This token is preferred because the Edge Function typically expects an Authorization header (Bearer <token>)
+  // If you can't obtain a token, we will fall back to REACT_APP_SUPABASE_ANON_KEY if provided.
+  const getClientAccessToken = async () => {
+    try {
+      // supabase-js v2: auth.getSession()
+      if (supabase && supabase.auth && typeof supabase.auth.getSession === 'function') {
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
+        if (token) return token;
+      }
+      // supabase-js v1: auth.session()
+      if (supabase && supabase.auth && typeof supabase.auth.session === 'function') {
+        const s = supabase.auth.session();
+        const token = s?.access_token || s?.accessToken;
+        if (token) return token;
+      }
+      // supabase-js may expose user with access_token in some setups
+      if (supabase && supabase.auth && supabase.auth.user) {
+        // older shapes
+        const u = supabase.auth.user();
+        if (u && u.access_token) return u.access_token;
+      }
+    } catch (err) {
+      console.warn('Unable to read client access token from supabase client', err);
+    }
+    return null;
+  };
 
   const [users, setUsers] = useState([]);
   const [search, setSearch] = useState('');
@@ -299,23 +328,35 @@ export default function UsersPage() {
             // Build function URL (already configured at top)
             const apiUrl = SUPABASE_FUNCTION_URL;
 
-            // Prepare headers. Include anon key if provided.
+            // Prepare headers. Try to include the logged-in user's access token first (recommended).
             const headers = {
               'Content-Type': 'application/json',
               'Accept': 'application/json',
             };
-            if (SUPABASE_ANON_KEY) {
+
+            const clientToken = await getClientAccessToken();
+            if (clientToken) {
+              headers['Authorization'] = `Bearer ${clientToken}`;
+            } else if (SUPABASE_ANON_KEY) {
+              // fallback to anon key if developer provided it in env — less ideal but acceptable for some setups
               headers['Authorization'] = `Bearer ${SUPABASE_ANON_KEY}`;
+              console.warn('Using REACT_APP_SUPABASE_ANON_KEY as Authorization header fallback.');
             } else {
-              // warn developer via console — function may still accept unauthenticated requests depending on config
-              console.warn('No REACT_APP_SUPABASE_ANON_KEY configured — function may reject the request depending on its settings.');
+              // No token available — surface actionable message to developer/admin
+              toast({
+                title: 'Password update blocked',
+                description: 'No client access token or anon key available. Sign in or set REACT_APP_SUPABASE_ANON_KEY to call the function.',
+                status: 'error',
+                duration: 8000,
+                isClosable: true,
+              });
+              throw new Error('Missing authorization token for function call');
             }
 
             const resp = await fetch(apiUrl, {
               method: 'POST',
               headers,
               // For Supabase functions a CORS request is expected, do not send cookies by default
-              // credentials: 'omit' is default; leaving it out so browsers choose default
               body: JSON.stringify({ userId: form.id, password: form.password }),
             });
 
@@ -333,7 +374,15 @@ export default function UsersPage() {
                 parsed,
               });
 
-              if (resp.status === 405) {
+              if (resp.status === 401) {
+                // common cause: missing/invalid Authorization header or token expired
+                toast({
+                  title: 'Password update failed (401)',
+                  description: `Function rejected the request: missing/invalid authorization. Ensure user is signed in and token is valid or set REACT_APP_SUPABASE_ANON_KEY if appropriate.`,
+                  status: 'error',
+                  duration: 10000,
+                });
+              } else if (resp.status === 405) {
                 toast({
                   title: 'Password update failed (405)',
                   description: `Server rejected method when calling ${apiUrl}. Ensure the function accepts POST and OPTIONS.`,
@@ -359,8 +408,8 @@ export default function UsersPage() {
             toast({ title: 'Password updated', status: 'success' });
           } catch (pwErr) {
             console.error('password update error', pwErr);
-            // If we already showed a helpful toast above for 405/404, avoid duplicating; otherwise show fallback
-            if (!pwErr.message || (!pwErr.message.includes('405') && !pwErr.message.includes('404'))) {
+            // If we already showed a helpful toast above for 401/405/404, avoid duplicating; otherwise show fallback
+            if (!pwErr.message || (!pwErr.message.includes('401') && !pwErr.message.includes('405') && !pwErr.message.includes('404'))) {
               toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
             }
           }
