@@ -92,7 +92,7 @@ export default function SADDeclaration() {
 
   // form
   const [sadNo, setSadNo] = useState('');
-  const [regime, setRegime] = useState('');
+  const [regime, setRegime] = useState(''); // codes like IM4/EX1/IM7
   const [declaredWeight, setDeclaredWeight] = useState('');
   const [docs, setDocs] = useState([]);
 
@@ -184,7 +184,7 @@ export default function SADDeclaration() {
           total_recorded_weight: Number(r.total_recorded_weight ?? 0),
           ticket_count: 0,
           manual_update: r.manual_update ?? false,
-          completed_at: r.completed_at ?? null, // include completed_at if present
+          completed_at: r.completed_at ?? null, // include completed_at here
         };
       });
 
@@ -351,6 +351,7 @@ export default function SADDeclaration() {
       const docRecords = await uploadDocs(sadNo, docs);
       const trimmedSad = String(sadNo).trim();
 
+      // regime conversion if user typed a word
       let regimeCode = regime;
       if (!regimeCode && typeof regime === 'string') {
         const low = regime.trim().toLowerCase();
@@ -366,6 +367,7 @@ export default function SADDeclaration() {
         manual_update: false,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+        completed_at: null, // ensure created with null completed_at
       };
       if (currentUser && currentUser.id) payload.created_by = currentUser.id;
 
@@ -394,48 +396,69 @@ export default function SADDeclaration() {
     }
   };
 
-  // open SAD detail (existing)
+  // open SAD detail (existing) - updated to fetch the SAD row to include completed_at
   const openSadDetail = async (sad) => {
-    setSelectedSad(sad);
+    setSelectedSad(null);
     setIsModalOpen(true);
     setDetailLoading(true);
     try {
       const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+
+      // fetch latest SAD row to include completed_at
+      const { data: sadRow, error: sadErr } = await supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle();
+      if (sadErr) console.warn('could not fetch sad_row for openSadDetail', sadErr);
+
       const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (error) throw error;
-      setDetailTickets(data || []);
       const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)), ticket_count: (data || []).length }));
-      await pushActivity(`Viewed SAD ${sad.sad_no} details`);
+
+      const base = sadRow || sad || {};
+      const updatedSelected = {
+        ...base,
+        total_recorded_weight: computedTotal,
+        dischargeCompleted: (Number(base?.declared_weight || 0) > 0 && computedTotal >= Number(base?.declared_weight || 0)),
+        ticket_count: (data || []).length,
+      };
+      setSelectedSad(updatedSelected);
+      setDetailTickets(data || []);
+      await pushActivity(`Viewed SAD ${trimmed} details`);
     } catch (err) {
       console.error('openSadDetail', err);
       toast({ title: 'Failed to load tickets', description: err?.message || 'Unexpected', status: 'error' });
       setDetailTickets([]);
+      setSelectedSad(sad);
     } finally {
       setDetailLoading(false);
     }
   };
 
-  // open details modal
+  // open details modal - updated to fetch the SAD row (fresh) including completed_at
   const openDetailsModal = async (sad) => {
-    setDetailsData({ sad, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
+    setDetailsData({ sad: null, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
     setDetailsOpen(true);
     try {
       const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+
+      // fetch the latest SAD row
+      const { data: sadRow, error: sadErr } = await supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle();
+      if (sadErr) {
+        console.warn('openDetailsModal: could not fetch sad row', sadErr);
+      }
+
       const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (!error) {
         let createdByUsername = sad.created_by_username || null;
-        if (!createdByUsername && sad.created_by) {
+        if (!createdByUsername && sadRow && sadRow.created_by) {
           try {
-            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
+            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sadRow.created_by).maybeSingle();
             if (u) {
               createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
               createdByUsername = u.username || u.email || null;
             }
           } catch (e) { /* ignore */ }
         }
-        // include completed_at if available in sad
-        setDetailsData({ sad: { ...sad }, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
+
+        setDetailsData({ sad: sadRow || sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
       } else {
         setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
       }
@@ -459,7 +482,7 @@ export default function SADDeclaration() {
   };
   const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); };
 
-  // save edit modal (handles renaming and regime/code changes)
+  // save edit modal (handles renaming and regime/code changes) - ensure completed_at is set/cleared appropriately
   const saveEditModal = async () => {
     if (!editModalData || !editModalData.original_sad_no) return;
     const originalSad = editModalData.original_sad_no;
@@ -468,7 +491,8 @@ export default function SADDeclaration() {
     const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
 
     // optimistic UI update
-    setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString() } : s)));
+    const optimisticCompletedAt = editModalData.status === 'Completed' ? (before.completed_at || new Date().toISOString()) : null;
+    setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString(), completed_at: optimisticCompletedAt } : s)));
     setConfirmSaveOpen(false);
     closeEditModal();
 
@@ -482,9 +506,8 @@ export default function SADDeclaration() {
         if (WORD_TO_CODE[low]) regimeToSave = WORD_TO_CODE[low];
       }
 
-      const statusToSave = editModalData.status ?? null;
-      // set completed_at if status is Completed
-      const desiredCompletedAt = statusToSave === 'Completed' ? new Date().toISOString() : null;
+      // prepare completed_at logic
+      const completedAtValue = editModalData.status === 'Completed' ? new Date().toISOString() : null;
 
       if (newSad !== originalSad) {
         const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
@@ -499,64 +522,33 @@ export default function SADDeclaration() {
         const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
-        // now update the parent SAD row (attempt to set completed_at; fallback if DB doesn't have column)
-        try {
-          const updatePayload = {
-            sad_no: newSad,
-            regime: regimeToSave ?? null,
-            declared_weight: declaredParsed,
-            status: statusToSave ?? null,
-            updated_at: new Date().toISOString(),
-            manual_update: true,
-            completed_at: desiredCompletedAt, // may fail if column missing
-          };
-          let { error: parentErr } = await supabase.from('sad_declarations').update(updatePayload).eq('sad_no', originalSad);
-          if (parentErr && parentErr.message && /completed_at/i.test(parentErr.message)) {
-            // fallback update without completed_at
-            const { error: parentErr2 } = await supabase.from('sad_declarations').update({
-              sad_no: newSad,
-              regime: regimeToSave ?? null,
-              declared_weight: declaredParsed,
-              status: statusToSave ?? null,
-              updated_at: new Date().toISOString(),
-              manual_update: true,
-            }).eq('sad_no', originalSad);
-            if (parentErr2) throw parentErr2;
-          } else if (parentErr) {
-            throw parentErr;
-          }
-        } catch (e) {
+        // now update the parent SAD row
+        const { error: parentErr } = await supabase.from('sad_declarations').update({
+          sad_no: newSad,
+          regime: regimeToSave ?? null,
+          declared_weight: declaredParsed,
+          status: editModalData.status ?? null,
+          updated_at: new Date().toISOString(),
+          manual_update: true,
+          completed_at: completedAtValue,
+        }).eq('sad_no', originalSad);
+        if (parentErr) {
           // attempt rollback children updates to originalSad (best-effort)
-          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (errRoll) { /* ignore */ }
-          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (errRoll) { /* ignore */ }
-          throw e;
+          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
+          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
+          throw parentErr;
         }
       } else {
         // same sad_no -> simple update
-        try {
-          const updatePayload = {
-            regime: regimeToSave ?? null,
-            declared_weight: declaredParsed,
-            status: statusToSave ?? null,
-            updated_at: new Date().toISOString(),
-            manual_update: true,
-            completed_at: desiredCompletedAt,
-          };
-          const { error } = await supabase.from('sad_declarations').update(updatePayload).eq('sad_no', originalSad);
-          if (error && error.message && /completed_at/i.test(error.message)) {
-            // fallback without completed_at
-            const { error: e2 } = await supabase.from('sad_declarations').update({
-              regime: regimeToSave ?? null,
-              declared_weight: declaredParsed,
-              status: statusToSave ?? null,
-              updated_at: new Date().toISOString(),
-              manual_update: true,
-            }).eq('sad_no', originalSad);
-            if (e2) throw e2;
-          } else if (error) throw error;
-        } catch (e) {
-          throw e;
-        }
+        const { error } = await supabase.from('sad_declarations').update({
+          regime: regimeToSave ?? null,
+          declared_weight: declaredParsed,
+          status: editModalData.status ?? null,
+          updated_at: new Date().toISOString(),
+          manual_update: true,
+          completed_at: completedAtValue,
+        }).eq('sad_no', originalSad);
+        if (error) throw error;
       }
 
       // log change
@@ -566,9 +558,9 @@ export default function SADDeclaration() {
           sad_no: newSad,
           regime: regimeToSave,
           declared_weight: declaredParsed,
-          status: statusToSave,
+          status: editModalData.status,
           updated_at: new Date().toISOString(),
-          completed_at: desiredCompletedAt,
+          completed_at: editModalData.status === 'Completed' ? new Date().toISOString() : null,
         };
         await supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]);
       } catch (e) { /* ignore */ }
@@ -583,23 +575,18 @@ export default function SADDeclaration() {
     }
   };
 
-  // update status quick action — now attempts to set completed_at when Completed
+  // update status quick action - sets completed_at when marking Completed, clears otherwise
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
-      if (newStatus === 'Completed') payload.completed_at = new Date().toISOString();
-      else payload.completed_at = null;
-
-      // try to update with completed_at (if DB supports it). If DB complains, fallback to update without completed_at.
-      let { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
-      if (error && error.message && /completed_at/i.test(error.message)) {
-        // fallback without completed_at
-        const { error: fallbackErr } = await supabase.from('sad_declarations').update({ status: newStatus, updated_at: new Date().toISOString(), manual_update: true }).eq('sad_no', sad_no);
-        if (fallbackErr) throw fallbackErr;
-      } else if (error) {
-        throw error;
+      if (newStatus === 'Completed') {
+        payload.completed_at = new Date().toISOString();
+      } else {
+        payload.completed_at = null;
       }
 
+      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
+      if (error) throw error;
       toast({ title: 'Status updated', description: `${sad_no} status set to ${newStatus}`, status: 'success' });
       await pushActivity(`Status of ${sad_no} set to ${newStatus}`);
       fetchSADs();
@@ -623,13 +610,7 @@ export default function SADDeclaration() {
       const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
       if (error) throw error;
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      // update total_recorded_weight and updated_at
-      try {
-        const { error: updErr } = await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
-        if (updErr) throw updErr;
-      } catch (e) {
-        console.warn('Could not update total_recorded_weight', e);
-      }
+      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
       await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
@@ -665,7 +646,7 @@ export default function SADDeclaration() {
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
-        completed_at: s.completed_at ?? null,
+        completed_at: s.completed_at ?? '',
         docs: (s.docs || []).map(d => d.name || d.path).join('; '),
       }];
       exportToCSV(rows, `sad_${s.sad_no}_export.csv`);
@@ -775,7 +756,7 @@ export default function SADDeclaration() {
             <p><strong>Regime:</strong> ${regimeLabel}</p>
             <p><strong>Declared weight:</strong> ${declared.toLocaleString()} kg</p>
             <p><strong>Discharged weight:</strong> ${recorded.toLocaleString()} kg</p>
-            <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Created by: ${s.created_by ? (createdByMap[s.created_by] || '') : '—'}</p>
+            <p class="small">Status: ${s.status || '—'} | Created: ${s.created_at || '—'} | Completed: ${s.completed_at || '—'} | Created by: ${s.created_by ? (createdByMap[s.created_by] || '') : '—'}</p>
             <p class="small">Documents: ${(Array.isArray(s.docs) ? s.docs.map(d => d.name || d.path).join(', ') : '')}</p>
           </div>
 
@@ -911,7 +892,7 @@ export default function SADDeclaration() {
       status: s.status,
       created_at: s.created_at,
       updated_at: s.updated_at,
-      completed_at: s.completed_at ?? null,
+      completed_at: s.completed_at ?? '',
     }));
     exportToCSV(rows, `sad_declarations_export_${new Date().toISOString().slice(0,10)}.csv`);
     toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
@@ -928,7 +909,7 @@ export default function SADDeclaration() {
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
-        completed_at: s.completed_at ?? null,
+        completed_at: s.completed_at ?? '',
       }));
       if (!rows.length) { toast({ title: 'No data', description: 'Nothing to backup', status: 'info' }); return; }
       const csv = [
@@ -1195,10 +1176,7 @@ export default function SADDeclaration() {
                     <Text mb={2}>Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
                     <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
                     <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
-                    {/* New: show Completed At if present */}
-                    {detailsData.sad.completed_at ? (
-                      <Text mb={2}>Completed At: <strong>{new Date(detailsData.sad.completed_at).toLocaleString()}</strong></Text>
-                    ) : null}
+                    <Text mb={2}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleString() : 'Not recorded'}</strong></Text>
                     <Text mb={4}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
 
                     <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
@@ -1240,7 +1218,9 @@ export default function SADDeclaration() {
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={2}># Transactions: <strong>{Number(selectedSad.ticket_count || 0).toLocaleString()}</strong></Text>
-                <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
+                <Text mb={2}>Status: <strong>{selectedSad.status}</strong></Text>
+                <Text mb={2}>Created At: <strong>{selectedSad.created_at ? new Date(selectedSad.created_at).toLocaleString() : '—'}</strong></Text>
+                <Text mb={2}>Completed At: <strong>{selectedSad.completed_at ? new Date(selectedSad.completed_at).toLocaleString() : '-'}</strong></Text>
 
                 <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
                 {detailLoading ? <Text>Loading...</Text> : (
