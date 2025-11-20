@@ -65,6 +65,7 @@ import { supabase } from '../supabaseClient';
  * Fixes included:
  * - Build API url relative to current origin to avoid calling wrong host (405).
  * - Support optional NEXT_PUBLIC_API_BASE to override domain if needed.
+ * - Helpful debug logging and toasts when server responds 405/404.
  */
 
 function useDebounced(value, delay = 300) {
@@ -325,7 +326,14 @@ export default function UsersPage() {
               if (resp.status === 405) {
                 toast({
                   title: 'Password update failed (405)',
-                  description: `Server rejected method when calling ${apiUrl}. Ensure that endpoint exists and accepts POST and OPTIONS (for preflight).`,
+                  description: `Server rejected method when calling ${apiUrl}. Ensure that endpoint exists at pages/api/admin/updateUserPassword.js and accepts POST and OPTIONS (for preflight).`,
+                  status: 'error',
+                  duration: 10000,
+                });
+              } else if (resp.status === 404) {
+                toast({
+                  title: 'Password update failed (404)',
+                  description: `Endpoint not found: ${apiUrl}. In Next.js API routes must live at src/pages/api/admin/updateUserPassword.js (or pages/api/admin/updateUserPassword.js).`,
                   status: 'error',
                   duration: 10000,
                 });
@@ -341,8 +349,8 @@ export default function UsersPage() {
             toast({ title: 'Password updated', status: 'success' });
           } catch (pwErr) {
             console.error('password update error', pwErr);
-            // If we already showed a helpful toast above for 405, don't duplicate; otherwise show a fallback
-            if (!pwErr.message || !pwErr.message.includes('405')) {
+            // If we already showed a helpful toast above for 405/404, don't duplicate; otherwise show a fallback
+            if (!pwErr.message || (!pwErr.message.includes('405') && !pwErr.message.includes('404'))) {
               toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
             }
           }
