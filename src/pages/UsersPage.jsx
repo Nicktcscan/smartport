@@ -283,18 +283,18 @@ export default function UsersPage() {
             // call server-side API - ensure you have pages/api/admin/updateUserPassword.js implemented
             const resp = await fetch('/api/admin/updateUserPassword', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+              },
+              // credentials: 'same-origin', // enable if your API requires cookies/sessions
               body: JSON.stringify({ userId: form.id, password: form.password }),
             });
 
-            // Safely parse response body (avoid json() blow-ups on empty responses)
+            // Read text safely then parse JSON if present
+            const text = await resp.text();
             let parsed = null;
-            try {
-              const text = await resp.text();
-              if (text) parsed = JSON.parse(text);
-            } catch (parseErr) {
-              parsed = null;
-            }
+            try { parsed = text ? JSON.parse(text) : null; } catch (parseErr) { parsed = null; }
 
             if (!resp.ok) {
               const errMsg = (parsed && (parsed.error || parsed.message)) || `Password update failed (status ${resp.status})`;
@@ -304,7 +304,17 @@ export default function UsersPage() {
             toast({ title: 'Password updated', status: 'success' });
           } catch (pwErr) {
             console.error('password update error', pwErr);
-            toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
+            // Provide a clearer hint for 405
+            if (pwErr.message && pwErr.message.includes('405')) {
+              toast({
+                title: 'Password update failed (405)',
+                description: 'Server rejected method. Ensure /api/admin/updateUserPassword exists and accepts POST (and OPTIONS for preflight).',
+                status: 'error',
+                duration: 8000,
+              });
+            } else {
+              toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
+            }
           }
         }
 
@@ -360,6 +370,16 @@ export default function UsersPage() {
       }
     }, 4000);
   };
+
+  // cleanup pending delete timer on unmount
+  useEffect(() => {
+    return () => {
+      if (pendingDeleteRef.current) {
+        clearTimeout(pendingDeleteRef.current);
+        pendingDeleteRef.current = null;
+      }
+    };
+  }, []);
 
   // wrapper invoked after confirmation modal "Confirm"
   const handleConfirmDelete = async () => {

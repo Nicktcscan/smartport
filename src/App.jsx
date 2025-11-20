@@ -45,11 +45,32 @@ import Settings from './pages/Settings';
 // NEW: Appointment page (public route)
 import Appointment from './pages/appointment';
 
-const ProtectedRoute = ({ children, allowedRoles }) => {
+/**
+ * ProtectedRoute
+ * - children: react node
+ * - allowedRoles: array|string of allowed roles (e.g. ['admin','weighbridge'])
+ *
+ * Behavior:
+ * - If not authenticated -> redirect to /login
+ * - If authenticated but role not allowed -> redirect to a sensible landing based on role
+ */
+const ProtectedRoute = ({ children, allowedRoles = [] }) => {
   const { user } = useAuth();
+
   if (!user) return <Navigate to="/login" replace />;
-  if (!allowedRoles.includes(user.role)) {
-    switch (user.role) {
+
+  // normalize allowedRoles and user role
+  const allowed = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
+  const userRole = typeof user.role === 'string' ? user.role : (user.role && user.role[0]) || '';
+
+  // if allowed is empty, treat as no restriction (but avoid accidental openness)
+  if (allowed.length === 0) {
+    return children;
+  }
+
+  if (!allowed.includes(userRole)) {
+    // fallback redirection based on role
+    switch (userRole) {
       case 'admin':
         return <Navigate to="/admin" replace />;
       case 'customs':
@@ -66,6 +87,7 @@ const ProtectedRoute = ({ children, allowedRoles }) => {
         return <Navigate to="/login" replace />;
     }
   }
+
   return children;
 };
 
@@ -85,8 +107,8 @@ function App() {
     );
   }
 
-  // Helper to detect if path is a static asset (file extensions)
-  const isStaticAsset = location.pathname.match(/\.(js|css|png|jpg|jpeg|gif|ico|json|svg|txt|woff|woff2|ttf|eot|map)$/);
+  // Helper to detect if path is a static asset (file extensions) - case-insensitive
+  const isStaticAsset = !!location.pathname.match(/\.(js|css|png|jpg|jpeg|gif|ico|json|svg|txt|woff|woff2|ttf|eot|map)$/i);
 
   return (
     <PersistedStateProvider>
@@ -108,6 +130,7 @@ function App() {
             }
           />
 
+          {/* If user is not authenticated and path is not a static asset, redirect to login */}
           <Route
             path="*"
             element={isStaticAsset ? null : <Navigate to="/login" replace />}
@@ -255,7 +278,7 @@ function App() {
               }
             />
 
-              <Route
+            <Route
               path="/appointments"
               element={
                 <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
@@ -472,7 +495,7 @@ function App() {
               }
             />
 
-             <Route
+            <Route
               path="/agentappt"
               element={
                 <ProtectedRoute allowedRoles={['admin', 'agent']}>
@@ -485,7 +508,7 @@ function App() {
               }
             />
 
-                <Route
+            <Route
               path="/myappointments"
               element={
                 <ProtectedRoute allowedRoles={['admin', 'agent']}>
@@ -524,8 +547,11 @@ function App() {
               }
             />
 
-            {/* Fallback */}
+            {/* Fallback: if already authenticated, prevent visiting /login */}
             <Route path="/login" element={<Navigate to="/" replace />} />
+
+            {/* Catch-all -> redirect to root (keeps SPA behaviour) */}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </>
       )}
