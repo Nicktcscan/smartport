@@ -61,6 +61,10 @@ import { supabase } from '../supabaseClient';
  * - Admin actions that require the Supabase service_role key must be executed from
  *   a server-side endpoint. This client calls /api/admin/updateUserPassword
  *   for password updates.
+ *
+ * Fixes included:
+ * - Build API url relative to current origin to avoid calling wrong host (405).
+ * - Support optional NEXT_PUBLIC_API_BASE to override domain if needed.
  */
 
 function useDebounced(value, delay = 300) {
@@ -281,10 +285,16 @@ export default function UsersPage() {
         // If a new password is provided, call the server-side admin endpoint to update it
         if (form.password && form.password.length >= 6) {
           try {
-            // Build URL relative to current origin to avoid incorrect host/path issues
+            // Build API URL in a robust way:
+            // - If NEXT_PUBLIC_API_BASE is set (useful in deployments), use it.
+            // - Otherwise build relative to current window.location.origin so this calls the Next.js API on the same origin.
+            const envBase = typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_API_BASE
+              ? String(process.env.NEXT_PUBLIC_API_BASE).replace(/\/+$/,'')
+              : null;
+
             const apiUrl = (typeof window !== 'undefined')
-              ? new URL('/api/admin/updateUserPassword', window.location.origin).toString()
-              : '/api/admin/updateUserPassword';
+              ? (envBase ? `${envBase}/api/admin/updateUserPassword` : new URL('/api/admin/updateUserPassword', window.location.origin).toString())
+              : (envBase ? `${envBase}/api/admin/updateUserPassword` : '/api/admin/updateUserPassword');
 
             const resp = await fetch(apiUrl, {
               method: 'POST',
@@ -292,7 +302,8 @@ export default function UsersPage() {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
               },
-              credentials: 'same-origin', // keep same-origin cookies if needed for session auth
+              // use same-origin so if your API relies on cookies/sessions they are sent
+              credentials: 'same-origin',
               body: JSON.stringify({ userId: form.id, password: form.password }),
             });
 
@@ -302,7 +313,7 @@ export default function UsersPage() {
             try { parsed = text ? JSON.parse(text) : null; } catch (err) { parsed = null; }
 
             if (!resp.ok) {
-              // helpful debug logging
+              // helpful debug logging to browser console
               console.error('Password update failed.', {
                 url: apiUrl,
                 status: resp.status,
@@ -316,11 +327,11 @@ export default function UsersPage() {
                   title: 'Password update failed (405)',
                   description: `Server rejected method when calling ${apiUrl}. Ensure that endpoint exists and accepts POST and OPTIONS (for preflight).`,
                   status: 'error',
-                  duration: 8000,
+                  duration: 10000,
                 });
               } else {
                 const errMsg = (parsed && (parsed.error || parsed.message)) || `Password update failed (status ${resp.status})`;
-                toast({ title: 'Password update failed', description: errMsg, status: 'warning' });
+                toast({ title: 'Password update failed', description: errMsg, status: 'warning', duration: 7000 });
               }
 
               throw new Error(`Password update failed (status ${resp.status})`);
@@ -330,7 +341,7 @@ export default function UsersPage() {
             toast({ title: 'Password updated', status: 'success' });
           } catch (pwErr) {
             console.error('password update error', pwErr);
-            // If we already showed a helpful toast above for 405, don't duplicate; fall back to generic otherwise
+            // If we already showed a helpful toast above for 405, don't duplicate; otherwise show a fallback
             if (!pwErr.message || !pwErr.message.includes('405')) {
               toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
             }
