@@ -58,9 +58,9 @@ import { supabase } from '../supabaseClient';
  * UsersPage — enhanced user management with single-delete confirmation
  *
  * Notes:
- * - Some admin actions (delete user from Auth, update password via admin API) require
- *   a Supabase client instantiated with the service_role key on server-side or an RPC.
- *   The UI calls supabase.auth.admin.* where previously used — ensure your runtime supports it.
+ * - Admin actions that require the Supabase service_role key must be executed from
+ *   a server-side endpoint. This client now calls /api/admin/updateUserPassword
+ *   for password updates (server-side route should use the service role key).
  */
 
 function useDebounced(value, delay = 300) {
@@ -234,6 +234,7 @@ export default function UsersPage() {
 
     try {
       if (form.id === null) {
+        // create user via client signup (this requires auth settings to allow it)
         const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
           email: form.email,
           password: form.password,
@@ -268,6 +269,7 @@ export default function UsersPage() {
         toast({ title: 'User created', description: `${profileRow.full_name} added. Confirmation email may be required.`, status: 'success' });
         resetModal();
       } else {
+        // update profile row in custom users table
         const payload = { full_name: form.full_name, email: form.email, role: form.role };
         const { data: updated, error: updateErr } = await supabase.from('users').update(payload).eq('id', form.id).select().single();
         if (updateErr) {
@@ -276,16 +278,27 @@ export default function UsersPage() {
           return;
         }
 
+        // If a new password is provided, call the server-side admin endpoint to update it
         if (form.password && form.password.length >= 6) {
-          if (supabase.auth?.admin?.updateUserById) {
-            const { error: pwErr } = await supabase.auth.admin.updateUserById(form.id, { password: form.password });
-            if (pwErr) {
-              toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
-            } else {
-              toast({ title: 'Password updated', status: 'success' });
+          try {
+            // call server-side API - ensure you have pages/api/admin/updateUserPassword.js implemented
+            const resp = await fetch('/api/admin/updateUserPassword', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ userId: form.id, password: form.password }),
+            });
+
+            const body = await resp.json();
+
+            if (!resp.ok) {
+              // show helpful message but allow the profile update to succeed
+              throw new Error(body?.error || body?.message || 'Password update failed');
             }
-          } else {
-            toast({ title: 'Password update skipped', description: 'Admin password update not available in this client.', status: 'info' });
+
+            toast({ title: 'Password updated', status: 'success' });
+          } catch (pwErr) {
+            console.error('password update error', pwErr);
+            toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
           }
         }
 
@@ -326,8 +339,11 @@ export default function UsersPage() {
 
         // delete from auth via admin API if available (requires service role)
         if (supabase.auth?.admin?.deleteUserById) {
-          const { error: authErr } = await supabase.auth.admin.deleteUserById(userId);
-          if (authErr) console.warn('Auth delete failed', authErr);
+          try {
+            await supabase.auth.admin.deleteUserById(userId);
+          } catch (authErr) {
+            console.warn('Auth delete failed', authErr);
+          }
         }
         toast({ title: 'User removal completed', status: 'success', duration: 3000 });
       } catch (err) {
@@ -421,10 +437,6 @@ export default function UsersPage() {
       toast({ title: 'Update failed', description: err.message || String(err), status: 'error' });
     }
   };
-
-  // change password (admin)
-  // Removed unused handleResetPassword function to avoid "assigned a value but never used" lint/compile warning.
-  // If you need password reset UI later, reintroduce the function and wire it into the row actions.
 
   // CSV export for current filteredSorted set
   const downloadCSV = (rows = []) => {
