@@ -59,8 +59,8 @@ import { supabase } from '../supabaseClient';
  *
  * Notes:
  * - Admin actions that require the Supabase service_role key must be executed from
- *   a server-side endpoint. This client now calls /api/admin/updateUserPassword
- *   for password updates (server-side route should use the service role key).
+ *   a server-side endpoint. This client calls /api/admin/updateUserPassword
+ *   for password updates.
  */
 
 function useDebounced(value, delay = 300) {
@@ -288,11 +288,21 @@ export default function UsersPage() {
               body: JSON.stringify({ userId: form.id, password: form.password }),
             });
 
-            const body = await resp.json();
+            // Safely parse response body (avoid json() blow-ups on empty responses)
+            let parsed = null;
+            try {
+              const text = await resp.text();
+              if (text) {
+                parsed = JSON.parse(text);
+              }
+            } catch (parseErr) {
+              // ignore parse error, we'll use generic message below
+              parsed = null;
+            }
 
             if (!resp.ok) {
-              // show helpful message but allow the profile update to succeed
-              throw new Error(body?.error || body?.message || 'Password update failed');
+              const errMsg = (parsed && (parsed.error || parsed.message)) || `Password update failed (status ${resp.status})`;
+              throw new Error(errMsg);
             }
 
             toast({ title: 'Password updated', status: 'success' });
