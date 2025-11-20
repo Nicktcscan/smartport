@@ -1316,8 +1316,8 @@ export default function AppointmentPage() {
           </FormControl>
 
           <FormControl isRequired>
-            <FormLabel>Driver License No</FormLabel>
-            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver License No" />
+            <FormLabel>Driver Phone Number</FormLabel>
+            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
           </FormControl>
         </SimpleGrid>
 
