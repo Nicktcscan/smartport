@@ -1,3 +1,4 @@
+// src/pages/UsersPage.jsx
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box,
@@ -280,39 +281,57 @@ export default function UsersPage() {
         // If a new password is provided, call the server-side admin endpoint to update it
         if (form.password && form.password.length >= 6) {
           try {
-            // call server-side API - ensure you have pages/api/admin/updateUserPassword.js implemented
-            const resp = await fetch('/api/admin/updateUserPassword', {
+            // Build URL relative to current origin to avoid incorrect host/path issues
+            const apiUrl = (typeof window !== 'undefined')
+              ? new URL('/api/admin/updateUserPassword', window.location.origin).toString()
+              : '/api/admin/updateUserPassword';
+
+            const resp = await fetch(apiUrl, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
               },
-              // credentials: 'same-origin', // enable if your API requires cookies/sessions
+              credentials: 'same-origin', // keep same-origin cookies if needed for session auth
               body: JSON.stringify({ userId: form.id, password: form.password }),
             });
 
-            // Read text safely then parse JSON if present
+            // read text then parse JSON safely
             const text = await resp.text();
             let parsed = null;
-            try { parsed = text ? JSON.parse(text) : null; } catch (parseErr) { parsed = null; }
+            try { parsed = text ? JSON.parse(text) : null; } catch (err) { parsed = null; }
 
             if (!resp.ok) {
-              const errMsg = (parsed && (parsed.error || parsed.message)) || `Password update failed (status ${resp.status})`;
-              throw new Error(errMsg);
+              // helpful debug logging
+              console.error('Password update failed.', {
+                url: apiUrl,
+                status: resp.status,
+                statusText: resp.statusText,
+                responseText: text,
+                parsed,
+              });
+
+              if (resp.status === 405) {
+                toast({
+                  title: 'Password update failed (405)',
+                  description: `Server rejected method when calling ${apiUrl}. Ensure that endpoint exists and accepts POST and OPTIONS (for preflight).`,
+                  status: 'error',
+                  duration: 8000,
+                });
+              } else {
+                const errMsg = (parsed && (parsed.error || parsed.message)) || `Password update failed (status ${resp.status})`;
+                toast({ title: 'Password update failed', description: errMsg, status: 'warning' });
+              }
+
+              throw new Error(`Password update failed (status ${resp.status})`);
             }
 
+            // success
             toast({ title: 'Password updated', status: 'success' });
           } catch (pwErr) {
             console.error('password update error', pwErr);
-            // Provide a clearer hint for 405
-            if (pwErr.message && pwErr.message.includes('405')) {
-              toast({
-                title: 'Password update failed (405)',
-                description: 'Server rejected method. Ensure /api/admin/updateUserPassword exists and accepts POST (and OPTIONS for preflight).',
-                status: 'error',
-                duration: 8000,
-              });
-            } else {
+            // If we already showed a helpful toast above for 405, don't duplicate; fall back to generic otherwise
+            if (!pwErr.message || !pwErr.message.includes('405')) {
               toast({ title: 'Password update failed', description: pwErr.message || String(pwErr), status: 'warning' });
             }
           }
