@@ -155,7 +155,7 @@ export default function AppointmentsPage() {
   const [selectAllOnPage, setSelectAllOnPage] = useState(false);
 
   // inline status updating state map { [id]: boolean }
-  const [statusUpdating, setStatusUpdating] = useState({});
+  const [, setStatusUpdating] = useState({});
 
   // drawer (drill-down)
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -165,8 +165,8 @@ export default function AppointmentsPage() {
   const [activityLogs, setActivityLogs] = useState([]);
   const [newComment, setNewComment] = useState('');
 
-  // alerts map: { [id]: [ 'pickup_overdue', 'duplicate_booking', ... ] }
-  const [alertsMap, setAlertsMap] = useState({});
+  // alerts map: kept for background logic even though column removed
+  const [, setAlertsMap] = useState({});
 
   // sparkline data (7 days)
   const [sparkAppointments, setSparkAppointments] = useState([]);
@@ -317,10 +317,41 @@ export default function AppointmentsPage() {
 
       const data = resp.data || [];
       const count = Number(resp.count || 0);
-      setAppointments(data);
+
+      // Fetch driver's phone numbers from driverslicense table for any appointments that have driver_license_no
+      try {
+        const licenseNos = Array.from(new Set(data.map(a => (a.driver_license_no ? String(a.driver_license_no).trim() : null)).filter(Boolean)));
+        let phoneMap = {};
+        if (licenseNos.length) {
+          const { data: dlrows, error: dlerr } = await supabase
+            .from('driverslicense')
+            .select('license_no,phone')
+            .in('license_no', licenseNos)
+            .limit(5000);
+          if (!dlerr && Array.isArray(dlrows)) {
+            dlrows.forEach(r => {
+              if (r && r.license_no) phoneMap[String(r.license_no).trim()] = r.phone || '';
+            });
+          } else if (dlerr) {
+            console.warn('driverslicense fetch error', dlerr);
+          }
+        }
+        // attach driver_phone on each appointment
+        const enriched = data.map(a => {
+          const lic = a.driver_license_no ? String(a.driver_license_no).trim() : null;
+          const phone = lic ? (phoneMap[lic] ?? null) : null;
+          return { ...a, driver_phone: phone || a.driver_phone || '—' };
+        });
+        setAppointments(enriched);
+      } catch (e) {
+        console.warn('fetch driver phones failed', e);
+        // fallback to raw data
+        setAppointments(data);
+      }
+
       setTotalPages(Math.max(1, Math.ceil(count / size)));
 
-      // compute alerts
+      // compute alerts (kept for background uses)
       const alerts = {};
       const apptNumbers = data.map(a => a.appointment_number).filter(Boolean);
       const dupMap = {};
@@ -714,7 +745,7 @@ export default function AppointmentsPage() {
       agent_name: a.agent_name,
       pickup_date: a.pickup_date,
       truck_number: a.truck_number,
-      total_t1s: Array.isArray(a.t1_records) ? a.t1_records.length : a.total_t1s,
+      driver_phone: a.driver_phone || '—',
       status: a.status,
       created_at: a.created_at,
     }));
@@ -749,7 +780,7 @@ export default function AppointmentsPage() {
   // export filtered CSV
   const handleExportFilteredCSV = async () => {
     try {
-      let q = supabase.from('appointments').select('id,appointment_number,weighbridge_number,agent_tin,agent_name,warehouse_location,pickup_date,consolidated,truck_number,driver_name,total_t1s,total_documented_weight,status,created_at,updated_at').order('created_at', { ascending: false }).limit(5000);
+      let q = supabase.from('appointments').select('id,appointment_number,weighbridge_number,agent_tin,agent_name,warehouse_location,pickup_date,consolidated,truck_number,driver_name,driver_license_no,total_t1s,total_documented_weight,status,created_at,updated_at').order('created_at', { ascending: false }).limit(5000);
       if (searchQ && searchQ.trim()) {
         const escaped = searchQ.trim().replace(/"/g, '\\"');
         const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%`;
@@ -764,7 +795,20 @@ export default function AppointmentsPage() {
         toast({ title: 'No rows to export', status: 'info' });
         return;
       }
-      exportToCSV(data, `appointments_export_${new Date().toISOString().slice(0,10)}.csv`);
+      // try to enrich with driver phones similarly to page fetch
+      const licenseNos = Array.from(new Set(data.map(a => (a.driver_license_no ? String(a.driver_license_no).trim() : null)).filter(Boolean)));
+      let phoneMap = {};
+      if (licenseNos.length) {
+        const { data: dlrows, error: dlerr } = await supabase.from('driverslicense').select('license_no,phone').in('license_no', licenseNos).limit(5000);
+        if (!dlerr && Array.isArray(dlrows)) {
+          dlrows.forEach(r => { if (r && r.license_no) phoneMap[String(r.license_no).trim()] = r.phone || ''; });
+        }
+      }
+      const enriched = data.map(a => {
+        const lic = a.driver_license_no ? String(a.driver_license_no).trim() : null;
+        return { ...a, driver_phone: lic ? (phoneMap[lic] ?? a.driver_phone ?? '') : (a.driver_phone ?? '') };
+      });
+      exportToCSV(enriched, `appointments_export_${new Date().toISOString().slice(0,10)}.csv`);
       toast({ title: 'Export started', status: 'success' });
     } catch (err) {
       console.error('exportFiltered', err);
@@ -785,6 +829,7 @@ export default function AppointmentsPage() {
         agent_name: appt.agent_name,
         pickup_date: appt.pickup_date,
         truck_number: appt.truck_number,
+        driver_phone: appt.driver_phone || '—',
         total_t1s: appt.total_t1s,
         status: appt.status,
         created_at: appt.created_at,
@@ -808,15 +853,6 @@ export default function AppointmentsPage() {
   const derivedCount = appointments.length;
 
   // helper for alert badge tooltip text
-  const alertTextForKey = (k) => {
-    switch (k) {
-      case 'pickup_overdue': return 'Pickup date passed but status is still Posted';
-      case 'duplicate_booking': return 'Duplicate booking number detected';
-      case 'driver_license_expiring': return 'Driver license expires within 30 days';
-      case 'no_t1_records': return 'No T1 records linked to this appointment';
-      default: return k;
-    }
-  };
 
   return (
     <Container maxW="8xl" py={6}>
@@ -907,9 +943,8 @@ export default function AppointmentsPage() {
                 <Th>Agent</Th>
                 <Th>Pickup</Th>
                 <Th>Truck</Th>
-                <Th isNumeric>T1s</Th>
+                <Th>Driver's Phone</Th>
                 <Th>Status</Th>
-                <Th>Alerts</Th>
                 <Th>Actions</Th>
               </Tr>
             </Thead>
@@ -922,8 +957,7 @@ export default function AppointmentsPage() {
                   const sadList = Array.from(sadSet);
                   const sadDisplay = sadList.length ? sadList.slice(0, 3).join(', ') : (a.appointment_number || '—');
                   const sadTooltip = sadList.length ? sadList.join(', ') : (a.appointment_number || '');
-                  const t1count = t1s.length || a.total_t1s || 0;
-                  const rowAlerts = alertsMap[a.id] || [];
+                  const driverPhone = a.driver_phone || '—';
                   return (
                     <MotionTr key={a.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }}>
                       <Td px={2}>
@@ -953,36 +987,11 @@ export default function AppointmentsPage() {
                       </Td>
                       <Td>{a.pickup_date ? new Date(a.pickup_date).toLocaleDateString() : '—'}</Td>
                       <Td>{a.truck_number || '—'}</Td>
-                      <Td isNumeric>{t1count}</Td>
+
+                      <Td>{driverPhone}</Td>
 
                       <Td>
-                        {user && user.role === 'admin' ? (
-                          <Select
-                            size="sm"
-                            value={a.status || 'Posted'}
-                            onChange={(e) => handleChangeStatus(a.id, e.target.value)}
-                            isDisabled={!!statusUpdating[a.id]}
-                            maxW="160px"
-                          >
-                            <option value="Posted">Posted</option>
-                            <option value="Completed">Completed</option>
-                          </Select>
-                        ) : (
-                          <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status}</Badge>
-                        )}
-                      </Td>
-
-                      <Td>
-                        {rowAlerts.length ? (
-                          <Tooltip label={rowAlerts.map(k => alertTextForKey(k)).join('\n')}>
-                            <HStack spacing={2}>
-                              <Badge colorScheme="red">{rowAlerts.length}</Badge>
-                              <Text fontSize="xs" color="gray.600">{rowAlerts.map(k => k.replace('_',' ')).join(', ')}</Text>
-                            </HStack>
-                          </Tooltip>
-                        ) : (
-                          <Text fontSize="xs" color="green.600">OK</Text>
-                        )}
+                        <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status || '—'}</Badge>
                       </Td>
 
                       <Td>
@@ -1037,6 +1046,7 @@ export default function AppointmentsPage() {
                   <Text><strong>Pickup:</strong> {activeAppt?.pickup_date ? new Date(activeAppt.pickup_date).toLocaleString() : '—'}</Text>
                   <Text><strong>Truck:</strong> {activeAppt?.truck_number || '—'}</Text>
                   <Text><strong>Driver:</strong> {activeAppt?.driver_name || '—'}</Text>
+                  <Text><strong>Driver's phone:</strong> {activeAppt?.driver_phone || '—'}</Text>
                 </Box>
 
                 <Box>
@@ -1054,7 +1064,7 @@ export default function AppointmentsPage() {
                       <>
                         {activityLogs.filter(l => l.action === 'status_change').map((l, i) => (
                           <Box key={i}>
-                            <Text fontSize="sm">{l.action} — {l.created_at ? new Date(l.created_at).toLocaleString() : '—'}</Text>
+                            <Text fontSize="sm">{l.action} — {l.created_at ? new Date(l.created_at).toLocaleDateString() : '—'}</Text>
                             <Text fontSize="xs" color="gray.500">{l.changed_by ? `by ${l.changed_by}` : ''} {l.message ? ` — ${l.message}` : ''}</Text>
                           </Box>
                         ))}
