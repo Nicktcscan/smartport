@@ -325,12 +325,12 @@ export default function AppointmentsPage() {
         if (licenseNos.length) {
           const { data: dlrows, error: dlerr } = await supabase
             .from('driverslicense')
-            .select('license_no,phone')
-            .in('license_no', licenseNos)
+            .select('driver_license_no,phone')
+            .in('driver_license_no', licenseNos)
             .limit(5000);
           if (!dlerr && Array.isArray(dlrows)) {
             dlrows.forEach(r => {
-              if (r && r.license_no) phoneMap[String(r.license_no).trim()] = r.phone || '';
+              if (r && r.driver_license_no) phoneMap[String(r.driver_license_no).trim()] = r.phone || '';
             });
           } else if (dlerr) {
             console.warn('driverslicense fetch error', dlerr);
@@ -799,9 +799,9 @@ export default function AppointmentsPage() {
       const licenseNos = Array.from(new Set(data.map(a => (a.driver_license_no ? String(a.driver_license_no).trim() : null)).filter(Boolean)));
       let phoneMap = {};
       if (licenseNos.length) {
-        const { data: dlrows, error: dlerr } = await supabase.from('driverslicense').select('license_no,phone').in('license_no', licenseNos).limit(5000);
+        const { data: dlrows, error: dlerr } = await supabase.from('driverslicense').select('driver_license_no,phone').in('driver_license_no', licenseNos).limit(5000);
         if (!dlerr && Array.isArray(dlrows)) {
-          dlrows.forEach(r => { if (r && r.license_no) phoneMap[String(r.license_no).trim()] = r.phone || ''; });
+          dlrows.forEach(r => { if (r && r.driver_license_no) phoneMap[String(r.driver_license_no).trim()] = r.phone || ''; });
         }
       }
       const enriched = data.map(a => {
@@ -1054,7 +1054,7 @@ export default function AppointmentsPage() {
                   <VStack align="start" spacing={2} mt={2}>
                     <Box>
                       <Text fontSize="sm"><strong>Created</strong></Text>
-                      <Text fontSize="xs" color="gray.500">{activeAppt?.created_at ? new Date(activeAppt.created_at).toLocaleString() : '—'}</Text>
+                      <Text fontSize="xs" color="gray.500">{activeAppt?.created_at ? new Date(activeAppt.created_at).toLocaleDateString() : '—'}</Text>
                     </Box>
                     <Box>
                       <Text fontSize="sm"><strong>Current status</strong></Text>
