@@ -1,3 +1,4 @@
+/* eslint-disable no-unused-vars */
 /* eslint-disable react/jsx-no-undef */
 // src/pages/Appointments.jsx
 import { useEffect, useState, useRef } from 'react';
@@ -129,6 +130,13 @@ async function runInBatches(items = [], batchSize = 20, fn) {
   return results;
 }
 
+// Normalize status values so UI always shows 'Posted' instead of 'Imported'
+const normalizeStatus = (s) => {
+  if (!s && s !== '') return s;
+  if (String(s).trim().toLowerCase() === 'imported') return 'Posted';
+  return s;
+};
+
 export default function AppointmentsPage() {
   const toast = useToast();
   const { user } = useAuth() || {};
@@ -166,7 +174,7 @@ export default function AppointmentsPage() {
   const [newComment, setNewComment] = useState('');
 
   // alerts map: kept for background logic even though column removed
-  const [, setAlertsMap] = useState({});
+  const [alertsMap, setAlertsMap] = useState({});
 
   // sparkline data (7 days)
   const [sparkAppointments, setSparkAppointments] = useState([]);
@@ -210,11 +218,11 @@ export default function AppointmentsPage() {
         .eq('status', 'Completed');
       setTotalCompleted(Number(compResp?.count || 0));
 
-      // posted
+      // posted (treat Imported as Posted in counts)
       const postedResp = await supabase
         .from('appointments')
         .select('id', { count: 'exact', head: true })
-        .eq('status', 'Posted');
+        .in('status', ['Posted', 'Imported']);
       setTotalPosted(Number(postedResp?.count || 0));
 
       // unique SADs from t1_records
@@ -235,7 +243,7 @@ export default function AppointmentsPage() {
         setUniqueSADs(0);
       }
 
-      // KPIs - last 7 days: appointments created per day, completed per day, posted ratio (completed/created or posted ratio)
+      // KPIs - last 7 days: appointments created per day, completed per day, posted ratio
       try {
         const days = 7;
         const today = new Date();
@@ -265,8 +273,9 @@ export default function AppointmentsPage() {
             if (idx >= 0) {
               createdCounts[idx] += 1;
             }
-            if (idx >= 0 && a.status === 'Completed') completedCounts[idx] += 1;
-            if (idx >= 0 && a.status === 'Posted') postedCounts[idx] += 1;
+            const norm = normalizeStatus(a.status);
+            if (idx >= 0 && norm === 'Completed') completedCounts[idx] += 1;
+            if (idx >= 0 && norm === 'Posted') postedCounts[idx] += 1;
           }
         }
 
@@ -307,7 +316,15 @@ export default function AppointmentsPage() {
         baseQuery = baseQuery.or(orFilter);
       }
 
-      if (status) baseQuery = baseQuery.eq('status', status);
+      // status filter: treat "Posted" as including "Imported"
+      if (status) {
+        if (status === 'Posted') {
+          baseQuery = baseQuery.in('status', ['Posted', 'Imported']);
+        } else {
+          baseQuery = baseQuery.eq('status', status);
+        }
+      }
+
       if (pickup) baseQuery = baseQuery.eq('pickup_date', pickup);
 
       baseQuery = baseQuery.order('created_at', { ascending: false }).range(from, to);
@@ -320,10 +337,12 @@ export default function AppointmentsPage() {
 
       // NOTE: Per your request, the "Driver's Phone" column will display the
       // appointments.driver_license_no value. We do NOT query the driverslicense table here.
+      // Also normalize any 'Imported' statuses to 'Posted' for UI consistency.
       const enriched = (data || []).map(a => ({
         ...a,
         // show the driver_license_no under the "Driver's Phone" heading
         driver_phone: a.driver_license_no || '—',
+        status: normalizeStatus(a.status),
       }));
       setAppointments(enriched);
       setTotalPages(Math.max(1, Math.ceil(count / size)));
@@ -352,7 +371,9 @@ export default function AppointmentsPage() {
         if (a.pickup_date) {
           const pickupIso = formatDateISO(a.pickup_date);
           const todayIso = formatDateISO(new Date());
-          if (pickupIso && todayIso && pickupIso < todayIso && (a.status || '').toLowerCase() === 'posted') {
+          // use normalized status when checking
+          const norm = normalizeStatus(a.status);
+          if (pickupIso && todayIso && pickupIso < todayIso && (norm || '').toLowerCase() === 'posted') {
             alerts[id].push('pickup_overdue');
           }
         }
@@ -568,11 +589,13 @@ export default function AppointmentsPage() {
       toast({ title: 'Permission denied', description: 'Only admins can change appointment status', status: 'error' });
       return;
     }
+    // Normalize incoming statuses (if someone passes 'Imported', convert to 'Posted')
+    const normalizedNew = normalizeStatus(newStatus);
     setStatusUpdating(prev => ({ ...prev, [apptId]: true }));
     const before = (appointments.find(a => a.id === apptId)) || null;
-    setAppointments(prev => prev.map(a => (a.id === apptId ? { ...a, status: newStatus } : a)));
+    setAppointments(prev => prev.map(a => (a.id === apptId ? { ...a, status: normalizedNew } : a)));
     try {
-      const { error } = await supabase.from('appointments').update({ status: newStatus, updated_at: new Date().toISOString() }).eq('id', apptId);
+      const { error } = await supabase.from('appointments').update({ status: normalizedNew, updated_at: new Date().toISOString() }).eq('id', apptId);
       if (error) throw error;
       try {
         await supabase.from('appointment_logs').insert([{
@@ -580,11 +603,11 @@ export default function AppointmentsPage() {
           changed_by: user?.id || null,
           action: 'status_change',
           before: before ? JSON.stringify({ status: before.status }) : null,
-          after: JSON.stringify({ status: newStatus }),
+          after: JSON.stringify({ status: normalizedNew }),
           created_at: new Date().toISOString(),
         }]);
       } catch (e) { console.warn('log write failed', e); }
-      toast({ title: 'Status updated', description: `Appointment status set to ${newStatus}`, status: 'success' });
+      toast({ title: 'Status updated', description: `Appointment status set to ${normalizedNew}`, status: 'success' });
       fetchStats();
       fetchAppointments({ page, size: pageSize, q: searchQ });
     } catch (err) {
@@ -724,7 +747,8 @@ export default function AppointmentsPage() {
       truck_number: a.truck_number,
       // show driver_license_no under the "Driver's Phone" heading
       driver_phone: a.driver_license_no || '—',
-      status: a.status,
+      // ensure normalized status
+      status: normalizeStatus(a.status),
       created_at: a.created_at,
     }));
     if (!rows.length) { toast({ title: 'No rows available to export', status: 'info' }); return; }
@@ -764,7 +788,10 @@ export default function AppointmentsPage() {
         const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%`;
         q = q.or(orFilter);
       }
-      if (statusFilter) q = q.eq('status', statusFilter);
+      if (statusFilter) {
+        if (statusFilter === 'Posted') q = q.in('status', ['Posted', 'Imported']);
+        else q = q.eq('status', statusFilter);
+      }
       if (pickupDateFilter) q = q.eq('pickup_date', pickupDateFilter);
 
       const { data, error } = await q;
@@ -774,7 +801,7 @@ export default function AppointmentsPage() {
         return;
       }
       // Do not query driverslicense; just expose driver_license_no under Driver's Phone heading
-      const enriched = data.map(a => ({ ...a, driver_phone: a.driver_license_no || '—' }));
+      const enriched = data.map(a => ({ ...a, driver_phone: a.driver_license_no || '—', status: normalizeStatus(a.status) }));
       exportToCSV(enriched, `appointments_export_${new Date().toISOString().slice(0,10)}.csv`);
       toast({ title: 'Export started', status: 'success' });
     } catch (err) {
@@ -799,7 +826,7 @@ export default function AppointmentsPage() {
         // driver_license_no shown under Driver's Phone heading
         driver_phone: appt.driver_license_no || '—',
         total_t1s: appt.total_t1s,
-        status: appt.status,
+        status: normalizeStatus(appt.status),
         created_at: appt.created_at,
       };
       exportToCSV([payload], `appointment_${appt.appointment_number || Date.now()}.csv`);
@@ -820,7 +847,16 @@ export default function AppointmentsPage() {
   // derived counts displayed in table header (client-side)
   const derivedCount = appointments.length;
 
-  // helper for alert badge tooltip text (removed unused)
+  // helper for alert badge tooltip text
+  const alertTextForKey = (k) => {
+    switch (k) {
+      case 'pickup_overdue': return 'Pickup date passed but status is still Posted';
+      case 'duplicate_booking': return 'Duplicate booking number detected';
+      case 'driver_license_expiring': return 'Driver license expires within 30 days';
+      case 'no_t1_records': return 'No T1 records linked to this appointment';
+      default: return k;
+    }
+  };
 
   return (
     <Container maxW="8xl" py={6}>
@@ -845,7 +881,7 @@ export default function AppointmentsPage() {
         <Stat p={4} borderRadius="md" boxShadow="sm" bg="linear-gradient(90deg,#f97316,#f59e0b)" color="white">
           <StatLabel>Total Posted</StatLabel>
           <StatNumber>{loadingStats ? <Spinner size="sm" color="white" /> : totalPosted}</StatNumber>
-          <StatHelpText>Appointments with status Posted</StatHelpText>
+          <StatHelpText>Appointments with status Posted (includes Imported)</StatHelpText>
           <Box mt={2}><Sparkline data={sparkPostedRatio} /></Box>
         </Stat>
 
@@ -927,6 +963,9 @@ export default function AppointmentsPage() {
                   const sadTooltip = sadList.length ? sadList.join(', ') : (a.appointment_number || '');
                   // driver_phone intentionally stores driver_license_no per your request
                   const driverPhone = a.driver_license_no || '—';
+                  const rowAlerts = alertsMap[a.id] || [];
+                  // use normalized status from enriched object (or normalize again to be safe)
+                  const normStatus = normalizeStatus(a.status);
                   return (
                     <MotionTr key={a.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }}>
                       <Td px={2}>
@@ -960,7 +999,7 @@ export default function AppointmentsPage() {
                       <Td>{driverPhone}</Td>
 
                       <Td>
-                        <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status || '—'}</Badge>
+                        <Badge colorScheme={normStatus === 'Completed' ? 'green' : 'blue'}>{normStatus || '—'}</Badge>
                       </Td>
 
                       <Td>
@@ -970,7 +1009,7 @@ export default function AppointmentsPage() {
                             <MenuList>
                               <MenuItem icon={<FaEye />} onClick={() => openView(a)}>View</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleAppointment(a)}>Export</MenuItem>
-                              <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)} isDisabled={Boolean(statusUpdating[a.id])}>Mark Completed</MenuItem>
+                              <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)}>Mark Completed</MenuItem>
                               <MenuItem icon={<FaListAlt />} onClick={() => openDrawer(a)}>View T1s</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => { if (a.pdf_url) window.open(a.pdf_url, '_blank'); else toast({ title: 'No PDF', status: 'info' }); }}>Download PDF</MenuItem>
                               <MenuDivider />
@@ -1001,7 +1040,7 @@ export default function AppointmentsPage() {
                 <Text fontSize="sm" color="gray.500">{activeAppt?.weighbridge_number}</Text>
               </Box>
               <Box ml="auto">
-                <Badge colorScheme={activeAppt?.status === 'Completed' ? 'green' : 'blue'}>{activeAppt?.status}</Badge>
+                <Badge colorScheme={normalizeStatus(activeAppt?.status) === 'Completed' ? 'green' : 'blue'}>{normalizeStatus(activeAppt?.status)}</Badge>
               </Box>
             </Flex>
           </DrawerHeader>
@@ -1023,17 +1062,17 @@ export default function AppointmentsPage() {
                   <VStack align="start" spacing={2} mt={2}>
                     <Box>
                       <Text fontSize="sm"><strong>Created</strong></Text>
-                      <Text fontSize="xs" color="gray.500">{activeAppt?.created_at ? new Date(activeAppt.created_at).toLocaleDateString() : '—'}</Text>
+                      <Text fontSize="xs" color="gray.500">{activeAppt?.created_at ? new Date(activeAppt.created_at).toLocaleString() : '—'}</Text>
                     </Box>
                     <Box>
                       <Text fontSize="sm"><strong>Current status</strong></Text>
-                      <Text fontSize="xs" color="gray.500">{activeAppt?.status}</Text>
+                      <Text fontSize="xs" color="gray.500">{normalizeStatus(activeAppt?.status)}</Text>
                     </Box>
                     {activityLogs && activityLogs.length ? (
                       <>
                         {activityLogs.filter(l => l.action === 'status_change').map((l, i) => (
                           <Box key={i}>
-                            <Text fontSize="sm">{l.action} — {l.created_at ? new Date(l.created_at).toLocaleDateString() : '—'}</Text>
+                            <Text fontSize="sm">{l.action} — {l.created_at ? new Date(l.created_at).toLocaleString() : '—'}</Text>
                             <Text fontSize="xs" color="gray.500">{l.changed_by ? `by ${l.changed_by}` : ''} {l.message ? ` — ${l.message}` : ''}</Text>
                           </Box>
                         ))}
