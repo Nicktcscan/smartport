@@ -228,11 +228,29 @@ export default function UsersPage() {
   const pageItems = filteredSorted.slice((page - 1) * pageSize, page * pageSize);
 
   // helpers
+  // company email validation helper
+  const isCompanyEmail = (email) => {
+    if (!email || typeof email !== 'string') return false;
+    const e = email.trim().toLowerCase();
+    // require format: name.surname@nicktcscangambia.gm
+    // one dot between name and surname, letters only (you can relax this if needed)
+    const companyRegex = /^[a-z]+\.{1}[a-z]+@nicktcscangambia\.gm$/i;
+    return companyRegex.test(e);
+  };
+
   const validate = () => {
     const errs = {};
     if (!form.full_name || !form.full_name.trim()) errs.full_name = 'Full name is required';
-    if (!form.email || !form.email.trim()) errs.email = 'Email is required';
-    else if (!/\S+@\S+\.\S+/.test(form.email)) errs.email = 'Invalid email';
+
+    // normalize email for validation (do NOT mutate original here)
+    const emailNorm = (form.email || '').trim().toLowerCase();
+
+    if (!emailNorm) {
+      errs.email = 'Email is required';
+    } else if (!isCompanyEmail(emailNorm)) {
+      errs.email = 'Email must be in the format name.surname@nicktcscangambia.gm';
+    }
+
     if (!form.role) errs.role = 'Role is required';
     if (form.id === null && (!form.password || form.password.length < 6)) errs.password = 'Password is required (min 6 chars)';
     if (form.password && form.password.length > 0 && form.password.length < 6) errs.password = 'Password must be at least 6 characters';
@@ -277,14 +295,18 @@ export default function UsersPage() {
     setIsSubmitting(true);
 
     try {
+      // normalize email once (trim + lower)
+      const normalizedEmail = (form.email || '').trim().toLowerCase();
+
       if (form.id === null) {
         // create user via client signup (this requires auth settings to allow it)
         const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-          email: form.email,
+          email: normalizedEmail,
           password: form.password,
         });
 
         if (signUpError) {
+          // show a clearer message
           toast({ title: 'Signup failed', description: signUpError.message || String(signUpError), status: 'error' });
           setIsSubmitting(false);
           return;
@@ -298,7 +320,7 @@ export default function UsersPage() {
         const { data: profileRow, error: insertError } = await supabase.from('users').insert([{
           id: newId,
           full_name: form.full_name,
-          email: form.email,
+          email: normalizedEmail, // store normalized email
           role: form.role,
           username,
         }]).select().single();
@@ -314,7 +336,7 @@ export default function UsersPage() {
         resetModal();
       } else {
         // update profile row in custom users table
-        const payload = { full_name: form.full_name, email: form.email, role: form.role };
+        const payload = { full_name: form.full_name, email: normalizedEmail, role: form.role };
         const { data: updated, error: updateErr } = await supabase.from('users').update(payload).eq('id', form.id).select().single();
         if (updateErr) {
           toast({ title: 'Update failed', description: updateErr.message || String(updateErr), status: 'error' });
