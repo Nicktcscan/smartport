@@ -155,7 +155,7 @@ export default function AppointmentsPage() {
   const [selectAllOnPage, setSelectAllOnPage] = useState(false);
 
   // inline status updating state map { [id]: boolean }
-  const [, setStatusUpdating] = useState({});
+  const [statusUpdating, setStatusUpdating] = useState({});
 
   // drawer (drill-down)
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -318,37 +318,14 @@ export default function AppointmentsPage() {
       const data = resp.data || [];
       const count = Number(resp.count || 0);
 
-      // Fetch driver's phone numbers from driverslicense table for any appointments that have driver_license_no
-      try {
-        const licenseNos = Array.from(new Set(data.map(a => (a.driver_license_no ? String(a.driver_license_no).trim() : null)).filter(Boolean)));
-        let phoneMap = {};
-        if (licenseNos.length) {
-          const { data: dlrows, error: dlerr } = await supabase
-            .from('driverslicense')
-            .select('driver_license_no,phone')
-            .in('driver_license_no', licenseNos)
-            .limit(5000);
-          if (!dlerr && Array.isArray(dlrows)) {
-            dlrows.forEach(r => {
-              if (r && r.driver_license_no) phoneMap[String(r.driver_license_no).trim()] = r.phone || '';
-            });
-          } else if (dlerr) {
-            console.warn('driverslicense fetch error', dlerr);
-          }
-        }
-        // attach driver_phone on each appointment
-        const enriched = data.map(a => {
-          const lic = a.driver_license_no ? String(a.driver_license_no).trim() : null;
-          const phone = lic ? (phoneMap[lic] ?? null) : null;
-          return { ...a, driver_phone: phone || a.driver_phone || '—' };
-        });
-        setAppointments(enriched);
-      } catch (e) {
-        console.warn('fetch driver phones failed', e);
-        // fallback to raw data
-        setAppointments(data);
-      }
-
+      // NOTE: Per your request, the "Driver's Phone" column will display the
+      // appointments.driver_license_no value. We do NOT query the driverslicense table here.
+      const enriched = (data || []).map(a => ({
+        ...a,
+        // show the driver_license_no under the "Driver's Phone" heading
+        driver_phone: a.driver_license_no || '—',
+      }));
+      setAppointments(enriched);
       setTotalPages(Math.max(1, Math.ceil(count / size)));
 
       // compute alerts (kept for background uses)
@@ -745,7 +722,8 @@ export default function AppointmentsPage() {
       agent_name: a.agent_name,
       pickup_date: a.pickup_date,
       truck_number: a.truck_number,
-      driver_phone: a.driver_phone || '—',
+      // show driver_license_no under the "Driver's Phone" heading
+      driver_phone: a.driver_license_no || '—',
       status: a.status,
       created_at: a.created_at,
     }));
@@ -795,19 +773,8 @@ export default function AppointmentsPage() {
         toast({ title: 'No rows to export', status: 'info' });
         return;
       }
-      // try to enrich with driver phones similarly to page fetch
-      const licenseNos = Array.from(new Set(data.map(a => (a.driver_license_no ? String(a.driver_license_no).trim() : null)).filter(Boolean)));
-      let phoneMap = {};
-      if (licenseNos.length) {
-        const { data: dlrows, error: dlerr } = await supabase.from('driverslicense').select('driver_license_no,phone').in('driver_license_no', licenseNos).limit(5000);
-        if (!dlerr && Array.isArray(dlrows)) {
-          dlrows.forEach(r => { if (r && r.driver_license_no) phoneMap[String(r.driver_license_no).trim()] = r.phone || ''; });
-        }
-      }
-      const enriched = data.map(a => {
-        const lic = a.driver_license_no ? String(a.driver_license_no).trim() : null;
-        return { ...a, driver_phone: lic ? (phoneMap[lic] ?? a.driver_phone ?? '') : (a.driver_phone ?? '') };
-      });
+      // Do not query driverslicense; just expose driver_license_no under Driver's Phone heading
+      const enriched = data.map(a => ({ ...a, driver_phone: a.driver_license_no || '—' }));
       exportToCSV(enriched, `appointments_export_${new Date().toISOString().slice(0,10)}.csv`);
       toast({ title: 'Export started', status: 'success' });
     } catch (err) {
@@ -829,7 +796,8 @@ export default function AppointmentsPage() {
         agent_name: appt.agent_name,
         pickup_date: appt.pickup_date,
         truck_number: appt.truck_number,
-        driver_phone: appt.driver_phone || '—',
+        // driver_license_no shown under Driver's Phone heading
+        driver_phone: appt.driver_license_no || '—',
         total_t1s: appt.total_t1s,
         status: appt.status,
         created_at: appt.created_at,
@@ -852,7 +820,7 @@ export default function AppointmentsPage() {
   // derived counts displayed in table header (client-side)
   const derivedCount = appointments.length;
 
-  // helper for alert badge tooltip text
+  // helper for alert badge tooltip text (removed unused)
 
   return (
     <Container maxW="8xl" py={6}>
@@ -957,7 +925,8 @@ export default function AppointmentsPage() {
                   const sadList = Array.from(sadSet);
                   const sadDisplay = sadList.length ? sadList.slice(0, 3).join(', ') : (a.appointment_number || '—');
                   const sadTooltip = sadList.length ? sadList.join(', ') : (a.appointment_number || '');
-                  const driverPhone = a.driver_phone || '—';
+                  // driver_phone intentionally stores driver_license_no per your request
+                  const driverPhone = a.driver_license_no || '—';
                   return (
                     <MotionTr key={a.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 6 }}>
                       <Td px={2}>
@@ -1001,7 +970,7 @@ export default function AppointmentsPage() {
                             <MenuList>
                               <MenuItem icon={<FaEye />} onClick={() => openView(a)}>View</MenuItem>
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleAppointment(a)}>Export</MenuItem>
-                              <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)}>Mark Completed</MenuItem>
+                              <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)} isDisabled={Boolean(statusUpdating[a.id])}>Mark Completed</MenuItem>
                               <MenuItem icon={<FaListAlt />} onClick={() => openDrawer(a)}>View T1s</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => { if (a.pdf_url) window.open(a.pdf_url, '_blank'); else toast({ title: 'No PDF', status: 'info' }); }}>Download PDF</MenuItem>
                               <MenuDivider />
@@ -1046,7 +1015,7 @@ export default function AppointmentsPage() {
                   <Text><strong>Pickup:</strong> {activeAppt?.pickup_date ? new Date(activeAppt.pickup_date).toLocaleString() : '—'}</Text>
                   <Text><strong>Truck:</strong> {activeAppt?.truck_number || '—'}</Text>
                   <Text><strong>Driver:</strong> {activeAppt?.driver_name || '—'}</Text>
-                  <Text><strong>Driver's phone:</strong> {activeAppt?.driver_phone || '—'}</Text>
+                  <Text><strong>Driver's phone:</strong> {activeAppt?.driver_license_no || '—'}</Text>
                 </Box>
 
                 <Box>
