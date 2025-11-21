@@ -182,6 +182,14 @@ export default function AppointmentsPage() {
     return dt.toISOString().slice(0, 10);
   };
 
+  // Normalize status for display/logic: treat 'Imported' as 'Posted'
+  const normalizeStatus = (s) => {
+    if (!s) return s;
+    const trimmed = String(s).trim();
+    if (trimmed.toLowerCase() === 'imported') return 'Posted';
+    return trimmed;
+  };
+
   /* ---------- helper: verify SAD ownership ---------- */
   const verifyUserOwnsSads = async (sadNos = []) => {
     // Returns { ok: boolean, missing: string[] }
@@ -243,8 +251,8 @@ export default function AppointmentsPage() {
       const compResp = await compQ;
       setTotalCompleted(Number(compResp?.count || 0));
 
-      // posted (exclude Imported entirely)
-      let postedQ = supabase.from('appointments').select('id', { count: 'exact', head: true }).eq('status', 'Posted');
+      // posted (treat Imported as Posted -> include both)
+      let postedQ = supabase.from('appointments').select('id', { count: 'exact', head: true }).in('status', ['Posted', 'Imported']);
       if (restrictToUser && user?.id) postedQ = postedQ.eq('created_by', user.id);
       const postedResp = await postedQ;
       setTotalPosted(Number(postedResp?.count || 0));
@@ -327,8 +335,9 @@ export default function AppointmentsPage() {
             if (idx >= 0) {
               createdCounts[idx] += 1;
             }
-            if (idx >= 0 && a.status === 'Completed') completedCounts[idx] += 1;
-            if (idx >= 0 && a.status === 'Posted') postedCounts[idx] += 1;
+            const s = normalizeStatus(a.status);
+            if (idx >= 0 && s === 'Completed') completedCounts[idx] += 1;
+            if (idx >= 0 && s === 'Posted') postedCounts[idx] += 1;
           }
         }
 
@@ -362,7 +371,7 @@ export default function AppointmentsPage() {
    *
    * Important fixes:
    *  - When restricting to user (non-admin), ids discovered from t1_records are filtered to only appointment IDs created_by the user.
-   *  - Default status options exclude 'Imported' completely (we only use POSTED and COMPLETED).
+   *  - Default status options exclude 'Imported' visually; internally Imported is treated as Posted (counts & filter include it).
    */
   const fetchAppointments = async ({ page: p = pageRef.current, size = pageSizeRef.current, q = searchQRef.current, status = statusFilter, pickup = pickupDateFilter } = {}) => {
     setLoadingList(true);
@@ -430,17 +439,22 @@ export default function AppointmentsPage() {
           const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%,driver_name.ilike.%${escaped}%`;
           let directQ = supabase.from('appointments').select('id', { count: 'exact', head: true }).or(orFilter);
           if (restrictToUser && user?.id) directQ = directQ.eq('created_by', user.id);
-          if (status) directQ = directQ.eq('status', status);
+          if (status) {
+            if (status === 'Posted') directQ = directQ.in('status', ['Posted', 'Imported']);
+            else directQ = directQ.eq('status', status);
+          }
           if (pickup) directQ = directQ.eq('pickup_date', pickup);
           const resp = await directQ;
           if (!resp.error) {
-            // when using head:true + count: 'exact' the resp.data is null; resp.count contains the count
             directCount = Number(resp.count || 0);
           }
           // fetch ids (we need actual ids list)
           let idRowsQ = supabase.from('appointments').select('id').or(orFilter).order('created_at', { ascending: false }).limit(2000);
           if (restrictToUser && user?.id) idRowsQ = idRowsQ.eq('created_by', user.id);
-          if (status) idRowsQ = idRowsQ.eq('status', status);
+          if (status) {
+            if (status === 'Posted') idRowsQ = idRowsQ.in('status', ['Posted', 'Imported']);
+            else idRowsQ = idRowsQ.eq('status', status);
+          }
           if (pickup) idRowsQ = idRowsQ.eq('pickup_date', pickup);
           const idRowsResp = await idRowsQ;
           if (!idRowsResp.error && Array.isArray(idRowsResp.data)) {
@@ -457,17 +471,22 @@ export default function AppointmentsPage() {
       if (!qTrim) {
         let baseQuery = supabase.from('appointments').select('*, t1_records(id, sad_no)', { count: 'exact' });
         if (restrictToUser) baseQuery = baseQuery.eq('created_by', user.id);
-        if (status) baseQuery = baseQuery.eq('status', status);
+        if (status) {
+          if (status === 'Posted') baseQuery = baseQuery.in('status', ['Posted', 'Imported']);
+          else baseQuery = baseQuery.eq('status', status);
+        }
         if (pickup) baseQuery = baseQuery.eq('pickup_date', pickup);
         baseQuery = baseQuery.order('created_at', { ascending: false }).range(from, to);
         const resp = await baseQuery;
         if (resp.error) throw resp.error;
-        const data = resp.data || [];
+        const dataRaw = resp.data || [];
+        // normalize statuses locally so UI treats 'Imported' as 'Posted'
+        const data = dataRaw.map(r => ({ ...r, status: normalizeStatus(r.status) }));
         const count = Number(resp.count || 0);
         setAppointments(data);
         setTotalPages(Math.max(1, Math.ceil(count / size)));
 
-        // alerts calc (same as before)
+        // alerts calc (same as before, but treat Imported as Posted when checking)
         const alerts = {};
         const apptNumbers = data.map(a => a.appointment_number).filter(Boolean);
         const dupMap = {};
@@ -488,7 +507,7 @@ export default function AppointmentsPage() {
           if (a.pickup_date) {
             const pickupIso = formatDateISO(a.pickup_date);
             const todayIso = formatDateISO(new Date());
-            if (pickupIso && todayIso && pickupIso < todayIso && (a.status || '').toLowerCase() === 'posted') {
+            if (pickupIso && todayIso && pickupIso < todayIso && (normalizeStatus(a.status) || '').toLowerCase() === 'posted') {
               alerts[id].push('pickup_overdue');
             }
           }
@@ -537,10 +556,11 @@ export default function AppointmentsPage() {
       if (restrictToUser) fetchQ = fetchQ.eq('created_by', user.id);
       const fetchResp = await fetchQ;
       if (fetchResp.error) throw fetchResp.error;
-      const fetchedRows = fetchResp.data || [];
+      const fetchedRowsRaw = fetchResp.data || [];
 
       // Because .in doesn't guarantee order, sort fetchedRows using index in idsForPage
-      const ordered = idsForPage.map(id => fetchedRows.find(r => r.id === id)).filter(Boolean);
+      const ordered = idsForPage.map(id => fetchedRowsRaw.find(r => r.id === id)).filter(Boolean)
+        .map(r => ({ ...r, status: normalizeStatus(r.status) })); // normalize
 
       setAppointments(ordered);
       setTotalPages(Math.max(1, Math.ceil(totalCount / size)));
@@ -566,7 +586,7 @@ export default function AppointmentsPage() {
         if (a.pickup_date) {
           const pickupIso = formatDateISO(a.pickup_date);
           const todayIso = formatDateISO(new Date());
-          if (pickupIso && todayIso && pickupIso < todayIso && (a.status || '').toLowerCase() === 'posted') {
+          if (pickupIso && todayIso && pickupIso < todayIso && (normalizeStatus(a.status) || '').toLowerCase() === 'posted') {
             alerts[id].push('pickup_overdue');
           }
         }
@@ -758,7 +778,7 @@ export default function AppointmentsPage() {
   // helper: show friendly closed message and return true if closed
   const isAppointmentClosed = (appt) => {
     if (!appt) return false;
-    return String(appt.status || '').trim() === 'Completed';
+    return normalizeStatus(appt.status) === 'Completed';
   };
   const closedMessage = () => {
     toast({
@@ -801,7 +821,7 @@ export default function AppointmentsPage() {
           appointment_id: apptId,
           changed_by: user?.id || null,
           action: 'status_change',
-          before: before ? JSON.stringify({ status: before.status }) : null,
+          before: before ? JSON.stringify({ status: normalizeStatus(before.status) }) : null,
           after: JSON.stringify({ status: newStatus }),
           created_at: new Date().toISOString(),
         }]);
@@ -866,7 +886,7 @@ export default function AppointmentsPage() {
         total_documented_weight: appt.total_documented_weight,
         regime: appt.regime,
         pdf_url: appt.pdf_url,
-        status: 'Posted',
+        status: 'Posted', // cloned appt becomes Posted (not Imported)
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         created_by: user?.id || null, // clone belongs to the current user (important)
@@ -993,7 +1013,7 @@ export default function AppointmentsPage() {
       pickup_date: a.pickup_date,
       truck_number: a.truck_number,
       total_t1s: Array.isArray(a.t1_records) ? a.t1_records.length : a.total_t1s,
-      status: a.status,
+      status: normalizeStatus(a.status),
       created_at: a.created_at,
     }));
     if (!rows.length) { toast({ title: 'No rows available to export', status: 'info' }); return; }
@@ -1042,7 +1062,10 @@ export default function AppointmentsPage() {
         const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%`;
         q = q.or(orFilter);
       }
-      if (statusFilter) q = q.eq('status', statusFilter);
+      if (statusFilter) {
+        if (statusFilter === 'Posted') q = q.in('status', ['Posted', 'Imported']);
+        else q = q.eq('status', statusFilter);
+      }
       if (pickupDateFilter) q = q.eq('pickup_date', pickupDateFilter);
 
       const { data, error } = await q;
@@ -1051,7 +1074,9 @@ export default function AppointmentsPage() {
         toast({ title: 'No rows to export', status: 'info' });
         return;
       }
-      exportToCSV(data, `appointments_export_${new Date().toISOString().slice(0,10)}.csv`);
+      // normalize statuses for CSV
+      const normalized = data.map(r => ({ ...r, status: normalizeStatus(r.status) }));
+      exportToCSV(normalized, `appointments_export_${new Date().toISOString().slice(0,10)}.csv`);
       toast({ title: 'Export started', status: 'success' });
     } catch (err) {
       console.error('exportFiltered', err);
@@ -1071,7 +1096,7 @@ export default function AppointmentsPage() {
         pickup_date: appt.pickup_date,
         truck_number: appt.truck_number,
         total_t1s: appt.total_t1s,
-        status: appt.status,
+        status: normalizeStatus(appt.status),
         created_at: appt.created_at,
       };
       exportToCSV([payload], `appointment_${appt.appointment_number || Date.now()}.csv`);
@@ -1308,7 +1333,7 @@ export default function AppointmentsPage() {
                       <Td>{driverPhone}</Td>
 
                       <Td>
-                        <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status || '—'}</Badge>
+                        <Badge colorScheme={normalizeStatus(a.status) === 'Completed' ? 'green' : 'blue'}>{normalizeStatus(a.status) || '—'}</Badge>
                       </Td>
 
                       <Td>
@@ -1349,7 +1374,7 @@ export default function AppointmentsPage() {
                 <Text fontSize="sm" color="gray.500">{activeAppt?.weighbridge_number}</Text>
               </Box>
               <Box ml="auto">
-                <Badge colorScheme={activeAppt?.status === 'Completed' ? 'green' : 'blue'}>{activeAppt?.status}</Badge>
+                <Badge colorScheme={activeAppt && normalizeStatus(activeAppt.status) === 'Completed' ? 'green' : 'blue'}>{activeAppt ? normalizeStatus(activeAppt.status) : ''}</Badge>
               </Box>
             </Flex>
           </DrawerHeader>
@@ -1374,7 +1399,7 @@ export default function AppointmentsPage() {
                     </Box>
                     <Box>
                       <Text fontSize="sm"><strong>Current status</strong></Text>
-                      <Text fontSize="xs" color="gray.500">{activeAppt?.status}</Text>
+                      <Text fontSize="xs" color="gray.500">{activeAppt ? normalizeStatus(activeAppt.status) : '—'}</Text>
                     </Box>
                     {activityLogs && activityLogs.length ? (
                       <>
