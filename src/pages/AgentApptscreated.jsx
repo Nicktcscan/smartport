@@ -1258,9 +1258,8 @@ export default function AppointmentsPage() {
                 <Th>Agent</Th>
                 <Th>Pickup</Th>
                 <Th>Truck</Th>
-                <Th isNumeric>T1s</Th>
+                <Th>Driver's Phone</Th>
                 <Th>Status</Th>
-                <Th>Alerts</Th>
                 <Th>Actions</Th>
               </Tr>
             </Thead>
@@ -1272,7 +1271,8 @@ export default function AppointmentsPage() {
                   const sadList = Array.from(sadSet);
                   const sadDisplay = sadList.length ? sadList.slice(0, 3).join(', ') : (a.appointment_number || '—');
                   const sadTooltip = sadList.length ? sadList.join(', ') : (a.appointment_number || '');
-                  const t1count = t1s.length || a.total_t1s || 0;
+                  // driver_phone is displayed from driver_license_no per request
+                  const driverPhone = a.driver_license_no || '—';
                   const rowAlerts = alertsMap[a.id] || [];
                   const closed = isAppointmentClosed(a);
                   return (
@@ -1304,36 +1304,11 @@ export default function AppointmentsPage() {
                       </Td>
                       <Td>{a.pickup_date ? new Date(a.pickup_date).toLocaleDateString() : '—'}</Td>
                       <Td>{a.truck_number || '—'}</Td>
-                      <Td isNumeric>{t1count}</Td>
+
+                      <Td>{driverPhone}</Td>
 
                       <Td>
-                        {user && user.role === 'admin' ? (
-                          <Select
-                            size="sm"
-                            value={a.status || 'Posted'}
-                            onChange={(e) => handleChangeStatus(a.id, e.target.value)}
-                            isDisabled={!!statusUpdating[a.id]}
-                            maxW="160px"
-                          >
-                            <option value="Posted">Posted</option>
-                            <option value="Completed">Completed</option>
-                          </Select>
-                        ) : (
-                          <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status}</Badge>
-                        )}
-                      </Td>
-
-                      <Td>
-                        {rowAlerts.length ? (
-                          <Tooltip label={rowAlerts.map(k => alertTextForKey(k)).join('\n')}>
-                            <HStack spacing={2}>
-                              <Badge colorScheme="red">{rowAlerts.length}</Badge>
-                              <Text fontSize="xs" color="gray.600">{rowAlerts.map(k => k.replace('_',' ')).join(', ')}</Text>
-                            </HStack>
-                          </Tooltip>
-                        ) : (
-                          <Text fontSize="xs" color="green.600">OK</Text>
-                        )}
+                        <Badge colorScheme={a.status === 'Completed' ? 'green' : 'blue'}>{a.status || '—'}</Badge>
                       </Td>
 
                       <Td>
@@ -1395,7 +1370,7 @@ export default function AppointmentsPage() {
                   <VStack align="start" spacing={2} mt={2}>
                     <Box>
                       <Text fontSize="sm"><strong>Created</strong></Text>
-                      <Text fontSize="xs" color="gray.500">{activeAppt?.created_at ? new Date(activeAppt.created_at).toLocaleString() : '—'}</Text>
+                      <Text fontSize="xs" color="gray.500">{activeAppt?.created_at ? new Date(activeAppt.created_at).toLocaleDateString() : '—'}</Text>
                     </Box>
                     <Box>
                       <Text fontSize="sm"><strong>Current status</strong></Text>
