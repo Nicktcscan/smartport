@@ -643,7 +643,9 @@ export default function AppointmentPage() {
   };
 
   async function generateUniqueNumbers(pickupDateValue) {
-    const maxAttempts = 10;
+    // Attempt to generate unique appointment and weighbridge numbers.
+    // Robust: loops and checks DB counts to reduce collisions.
+    const maxAttempts = 12;
     const d = new Date(pickupDateValue);
     const YY = String(d.getFullYear()).slice(-2);
     const MM = String(d.getMonth() + 1).padStart(2, '0');
@@ -651,6 +653,7 @@ export default function AppointmentPage() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
+        // Count existing appointments for the pickup date to derive sequence
         const { count } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -658,12 +661,16 @@ export default function AppointmentPage() {
 
         const existing = Number(count || 0);
         const seq = existing + 1 + attempt;
-        const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
+        const paddedSeq4 = String(seq).padStart(4, '0');
+        const paddedSeq5 = String(seq).padStart(5, '0');
+
+        const appointmentNumberBase = `${YY}${MM}${DD}${paddedSeq4}`;
         const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
-        const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
-        const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
+        const weighbridgeBase = `WB${YY}${MM}${paddedSeq5}`;
+        const weighbridgeNumber = (attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`).toUpperCase().trim();
 
+        // Check uniqueness directly
         const { count: wbCount } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -677,6 +684,8 @@ export default function AppointmentPage() {
         if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
           return { appointmentNumber, weighbridgeNumber };
         }
+
+        // otherwise loop and try new random suffix on next attempt
       } catch (e) {
         console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
@@ -687,6 +696,7 @@ export default function AppointmentPage() {
       }
     }
 
+    // Final fallback (very unlikely)
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
@@ -695,6 +705,7 @@ export default function AppointmentPage() {
   }
 
   async function generateNumbersUsingSupabase(pickupDateValue) {
+    // For now this delegates to generateUniqueNumbers (keeps API consistent)
     return await generateUniqueNumbers(pickupDateValue);
   }
 
@@ -702,7 +713,7 @@ export default function AppointmentPage() {
     if (!supabase) throw new Error('Supabase client not available.');
 
     let attempts = 0;
-    const maxInsertAttempts = 6;
+    const maxInsertAttempts = 8;
     let lastErr = null;
     const useProvidedNumbers = Boolean(payload.appointmentNumber && payload.weighbridgeNumber);
 
@@ -711,58 +722,63 @@ export default function AppointmentPage() {
       let appointmentNumber;
       let weighbridgeNumber;
 
-      if (useProvidedNumbers && attempts === 1) {
-        appointmentNumber = payload.appointmentNumber;
-        weighbridgeNumber = payload.weighbridgeNumber;
-      } else {
-        const nums = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
-        appointmentNumber = nums.appointmentNumber;
-        weighbridgeNumber = nums.weighbridgeNumber;
-      }
-
-      const appointmentInsert = {
-        appointment_number: appointmentNumber,
-        weighbridge_number: weighbridgeNumber,
-        agent_tin: payload.agentTin,
-        agent_name: payload.agentName,
-        warehouse_location: payload.warehouse,
-        pickup_date: payload.pickupDate,
-        consolidated: payload.consolidated || 'N',
-        truck_number: payload.truckNumber,
-        driver_name: payload.driverName,
-        driver_license_no: payload.driverLicense,
-        total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
-        total_documented_weight: payload.totalDocumentedWeight || null,
-        regime: payload.regime || null,
-        barcode: null,
-        pdf_url: null,
-        created_by: payload.createdBy || null, // <--- capture creator here
-      };
-
       try {
+        if (useProvidedNumbers && attempts === 1) {
+          appointmentNumber = String(payload.appointmentNumber).trim();
+          weighbridgeNumber = String(payload.weighbridgeNumber).trim().toUpperCase();
+        } else {
+          const nums = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
+          appointmentNumber = nums.appointmentNumber;
+          weighbridgeNumber = nums.weighbridgeNumber;
+        }
+
+        const appointmentInsert = {
+          appointment_number: appointmentNumber,
+          weighbridge_number: weighbridgeNumber,
+          agent_tin: payload.agentTin,
+          agent_name: payload.agentName,
+          warehouse_location: payload.warehouse,
+          pickup_date: payload.pickupDate,
+          consolidated: payload.consolidated || 'N',
+          truck_number: payload.truckNumber,
+          driver_name: payload.driverName,
+          driver_license_no: payload.driverLicense,
+          total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
+          total_documented_weight: payload.totalDocumentedWeight || null,
+          regime: payload.regime || null,
+          barcode: null,
+          pdf_url: null,
+          created_by: payload.createdBy || null, // <--- capture creator here
+        };
+
+        // Insert and request the created row back (single)
         const { data: inserted, error: insertErr } = await supabase
           .from('appointments')
           .insert([appointmentInsert])
-          .select()
-          .maybeSingle();
+          .select('*')
+          .single();
 
         if (insertErr) {
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
+          // common unique constraint / conflict detection:
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
             console.warn('Insert conflict on unique column, retrying generation...', insertErr);
-            await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
+            // small wait then continue so a new number is generated on next attempt
+            await new Promise(r => setTimeout(r, 140 + Math.random() * 260));
             continue;
           }
+          // other error -> throw
           throw insertErr;
         }
 
-        if (!inserted) {
-          throw new Error('Failed to insert appointment.');
+        if (!inserted || !inserted.id) {
+          throw new Error('Failed to insert appointment (no row returned).');
         }
 
         const appointmentId = inserted.id;
 
+        // Build t1 rows and insert them referencing the appointment id
         const t1Rows = (payload.t1s || []).map((r) => ({
           appointment_id: appointmentId,
           sad_no: r.sadNo,
@@ -773,41 +789,61 @@ export default function AppointmentPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
+            // rollback created appointment if t1 insert fails
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
         }
 
+        // Fetch the appointment with t1 records for full details (single)
         const { data: fullAppointment, error: fetchErr } = await supabase
           .from('appointments')
           .select('*, t1_records(*)')
           .eq('id', appointmentId)
-          .maybeSingle();
+          .single();
 
         if (fetchErr || !fullAppointment) {
+          // If fetch failed, still return the minimal constructed object using 'inserted'.
+          console.warn('fetch after insert failed; returning inserted row.', fetchErr);
+          // persist the created numbers to localStorage for global recognition
+          if (typeof window !== 'undefined') {
+            try {
+              localStorage.setItem('lastWeighbridgeNumber', inserted.weighbridge_number || weighbridgeNumber || '');
+              localStorage.setItem('lastAppointmentNumber', inserted.appointment_number || appointmentNumber || '');
+            } catch (e) {}
+          }
           return {
             appointment: {
               id: appointmentId,
-              appointmentNumber,
-              weighbridgeNumber,
-              warehouse: appointmentInsert.warehouse_location,
-              warehouseLabel: payload.warehouseLabel || appointmentInsert.warehouse_location,
-              pickupDate: appointmentInsert.pickup_date,
-              agentName: appointmentInsert.agent_name,
-              agentTin: appointmentInsert.agent_tin,
-              consolidated: appointmentInsert.consolidated,
-              truckNumber: appointmentInsert.truck_number,
-              driverName: appointmentInsert.driver_name,
-              driverLicense: appointmentInsert.driver_license_no,
-              regime: appointmentInsert.regime,
-              totalDocumentedWeight: appointmentInsert.total_documented_weight,
+              appointmentNumber: inserted.appointment_number || appointmentNumber,
+              weighbridgeNumber: inserted.weighbridge_number || weighbridgeNumber,
+              warehouse: inserted.warehouse_location,
+              warehouseLabel: payload.warehouseLabel || inserted.warehouse_location,
+              pickupDate: inserted.pickup_date,
+              agentName: inserted.agent_name,
+              agentTin: inserted.agent_tin,
+              consolidated: inserted.consolidated,
+              truckNumber: inserted.truck_number,
+              driverName: inserted.driver_name,
+              driverLicense: inserted.driver_license_no,
+              regime: inserted.regime,
+              totalDocumentedWeight: inserted.total_documented_weight,
               t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
               createdAt: inserted.created_at,
-              created_by: appointmentInsert.created_by || null,
+              created_by: inserted.created_by || null,
             }
           };
         }
 
+        // Persist created numbers to localStorage to help global recognition across the app
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem('lastWeighbridgeNumber', fullAppointment.weighbridge_number || weighbridgeNumber || '');
+            localStorage.setItem('lastAppointmentNumber', fullAppointment.appointment_number || appointmentNumber || '');
+          } catch (e) {}
+        }
+
+        // Return the fully assembled appointment object using canonical DB fields
         return {
           appointment: {
             id: fullAppointment.id,
@@ -831,12 +867,13 @@ export default function AppointmentPage() {
         };
       } catch (finalErr) {
         lastErr = finalErr;
+        // If we've exhausted attempts, throw; otherwise try again (with slight delay)
         if (attempts >= maxInsertAttempts) {
           console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
           throw finalErr;
         }
         console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
-        await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
+        await new Promise(r => setTimeout(r, 140 + Math.random() * 260));
         continue;
       }
     }
@@ -971,6 +1008,14 @@ export default function AppointmentPage() {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
+      // Make sure the actual created numbers are visible/persisted for global recognition
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem('lastWeighbridgeNumber', dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '');
+          localStorage.setItem('lastAppointmentNumber', dbAppointment.appointmentNumber || dbAppointment.appointment_number || '');
+        } catch (e) {}
+      }
+
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
@@ -996,7 +1041,12 @@ export default function AppointmentPage() {
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
       }
 
-      toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
+      // show the actual stored numbers to the user (good for debugging/collisions)
+      toast({
+        title: 'Appointment created',
+        description: `Appointment saved — Weighbridge: ${dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number}`,
+        status: 'success',
+      });
 
       await triggerConfetti(160);
 
