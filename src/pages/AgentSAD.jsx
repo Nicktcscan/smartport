@@ -510,7 +510,7 @@ export default function SADDeclaration() {
   const confirmMarkCompleted = async () => {
     const target = completeTarget; setCompleteOpen(false); setCompleteTarget(null);
     if (!target) return;
-    try { setLoading(true); await updateSadStatus(target, 'Completed'); } catch (e) {} finally { setLoading(false); }
+    try { setLoading(true); await updateSadStatus(target, 'Completed'); } catch (e) { console.error('confirmMarkCompleted', e); } finally { setLoading(false); }
   };
 
   const recalcTotalForSad = async (sad_no) => {
