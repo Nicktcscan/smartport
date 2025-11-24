@@ -1,5 +1,4 @@
-
-  // src/pages/SADDeclaration.jsx
+// src/pages/SADDeclaration.jsx
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box, Button, Container, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
@@ -10,11 +9,12 @@ import {
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
 } from '@chakra-ui/react';
 import {
-  FaPlus, FaFileExport, FaEllipsisV, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt, FaEdit,
+  FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaFilePdf, FaCheck, FaEye, FaFileAlt, FaDownload,
 } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
 import logoUrl from '../assets/logo.png';
+import { useAuth } from '../context/AuthContext';
 
 const SAD_STATUS = ['In Progress', 'On Hold', 'Completed', 'Archived'];
 const SAD_DOCS_BUCKET = 'sad-docs';
@@ -90,10 +90,12 @@ async function runInBatches(items = [], batchSize = 20, fn) {
 
 export default function SADDeclaration() {
   const toast = useToast();
+  const { user } = useAuth() || {};
+  const isFinance = user?.role === 'finance';
 
   // form
   const [sadNo, setSadNo] = useState('');
-  const [regime, setRegime] = useState('');
+  const [regime, setRegime] = useState(''); // codes like IM4/EX1/IM7
   const [declaredWeight, setDeclaredWeight] = useState('');
   const [docs, setDocs] = useState([]);
 
@@ -126,6 +128,12 @@ export default function SADDeclaration() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
+  // edit / confirmations (kept for non-finance UI; we will not render them for finance)
+  const [editModalOpen, setEditModalOpen] = useState(false);
+  const [editModalData, setEditModalData] = useState(null);
+  const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
+  const confirmSaveCancelRef = useRef();
+
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState(null);
   const archiveCancelRef = useRef();
@@ -135,12 +143,6 @@ export default function SADDeclaration() {
   const completeCancelRef = useRef();
 
   const [activity, setActivity] = useState([]);
-
-  // Edit modal (only for non-finance users)
-  const [editModalOpen, setEditModalOpen] = useState(false);
-  const [editModalData, setEditModalData] = useState(null);
-  const [confirmSaveOpen, setConfirmSaveOpen] = useState(false);
-  const confirmSaveCancelRef = useRef();
 
   // realtime
   const subRef = useRef(null);
@@ -153,19 +155,6 @@ export default function SADDeclaration() {
   const createdByMapRef = useRef({});
   const createdByMap = createdByMapRef.current;
 
-  // current logged-in user (agent)
-  const [currentUser, setCurrentUser] = useState(null);
-
-  // derived: isFinance - used by UI to hide edit/create features for finance role
-  const isFinance = useMemo(() => {
-    if (!currentUser) return false;
-    // prefer explicit role in user metadata or top-level role flags
-    const roleFromMeta = currentUser.user_metadata && (currentUser.user_metadata.role || currentUser.user_metadata?.role);
-    const topRole = currentUser.role || roleFromMeta;
-    if (typeof topRole === 'string') return topRole.toLowerCase() === 'finance';
-    return false;
-  }, [currentUser]);
-
   // ensure created_at sorting keeps newest first if sortBy is created_at
   useEffect(() => {
     if (sortBy === 'created_at' && sortDir !== 'asc') {
@@ -174,52 +163,16 @@ export default function SADDeclaration() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortBy]);
 
-  // ----- fetch current user on mount -----
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        let u = null;
-        if (supabase.auth && supabase.auth.getUser) {
-          const resp = await supabase.auth.getUser();
-          u = resp?.data?.user ?? null;
-        } else if (supabase.auth && supabase.auth.user) {
-          u = supabase.auth.user();
-        }
-        if (mounted) {
-          setCurrentUser(u);
-          if (u && u.id) {
-            const uname = (u.user_metadata && (u.user_metadata.full_name || u.user_metadata.fullName)) || u.email || u.id;
-            createdByMapRef.current = { ...createdByMapRef.current, [u.id]: uname };
-          }
-        }
-      } catch (e) {
-        console.warn('Could not load current user', e);
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  // ----- fetchSADs: only SADs created by currentUser -----
+  // ----- fetchSADs -----
   const fetchSADs = async (filter = null) => {
     setLoading(true);
     try {
-      // Enforce per-agent visibility: if no current user, don't return global list
-      if (!currentUser || !currentUser.id) {
-        setSads([]);
-        setLoading(false);
-        return;
-      }
-
-      // base query: only SADs created by this agent
-      let q = supabase.from('sad_declarations').select('*').order('created_at', { ascending: false }).eq('created_by', currentUser.id);
-
+      let q = supabase.from('sad_declarations').select('*').order('created_at', { ascending: false });
       if (filter) {
         if (filter.status) q = q.eq('status', filter.status);
         if (filter.sad_no) q = q.eq('sad_no', filter.sad_no);
         if (filter.regime) q = q.eq('regime', filter.regime);
       }
-
       const { data, error } = await q;
       if (error) throw error;
 
@@ -236,7 +189,7 @@ export default function SADDeclaration() {
         };
       });
 
-      // get counts per sad (tickets across DB)
+      // get counts per sad
       const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
       if (sadNos.length) {
         const countResults = await runInBatches(sadNos, 25, async (sadKey) => {
@@ -270,7 +223,7 @@ export default function SADDeclaration() {
         }
       }
 
-      // resolve created_by usernames (mostly will be currentUser)
+      // resolve created_by usernames
       const creatorIds = Array.from(new Set(normalized.map((r) => r.created_by).filter(Boolean)));
       if (creatorIds.length) {
         const unresolved = creatorIds.filter((id) => !createdByMap[id]);
@@ -279,8 +232,9 @@ export default function SADDeclaration() {
             const { data: usersData } = await supabase.from('users').select('id, username, email').in('id', unresolved);
             if (usersData && usersData.length) {
               for (const u of usersData) {
-                createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || 'Unknown' };
+                createdByMap[u.id] = u.username || u.email || 'Unknown';
               }
+              createdByMapRef.current = { ...createdByMap };
             }
           } catch (e) { /* ignore */ }
         }
@@ -290,20 +244,19 @@ export default function SADDeclaration() {
         const declared = Number(s.declared_weight || 0);
         const recorded = Number(s.total_recorded_weight || 0);
         const dischargeCompleted = declared > 0 && recorded >= declared;
-        return { ...s, dischargeCompleted, created_by_username: createdByMapRef.current[s.created_by] || null };
+        return { ...s, dischargeCompleted, created_by_username: createdByMap[s.created_by] || null };
       });
 
       setSads(enhanced);
     } catch (err) {
       console.error('fetchSADs', err);
       toast({ title: 'Failed to load SADs', description: err?.message || 'Unexpected', status: 'error' });
-      setSads([]);
     } finally {
       setLoading(false);
     }
   };
 
-  // lifecycle: load activity + fetchSADs only after currentUser known + setup realtime
+  // lifecycle: load + realtime
   useEffect(() => {
     try {
       const raw = localStorage.getItem('sad_activity');
@@ -312,22 +265,13 @@ export default function SADDeclaration() {
         if (Array.isArray(parsed)) setActivity(parsed);
       }
     } catch (e) { /* ignore */ }
-    // don't call fetchSADs here — wait until currentUser is resolved
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
-  // when currentUser becomes available, fetch and subscribe
-  useEffect(() => {
-    if (!currentUser || !currentUser.id) return;
-
-    // initial fetch for this agent
     fetchSADs();
 
-    // realtime subscriptions: re-run fetchSADs when sads or tickets change for this agent
     try {
       if (supabase.channel) {
-        const ch = supabase.channel(`public:sad_declarations:${currentUser.id}`)
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations', filter: `created_by=eq.${currentUser.id}` }, () => fetchSADs())
+        const ch = supabase.channel('public:sad_declarations')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, () => fetchSADs())
           .subscribe();
         subRef.current = ch;
       } else {
@@ -338,13 +282,10 @@ export default function SADDeclaration() {
 
     try {
       if (supabase.channel) {
-        const tch = supabase.channel(`public:tickets:sad:${currentUser.id}`)
+        const tch = supabase.channel('public:tickets')
           .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => fetchSADs())
           .subscribe();
         ticketsSubRef.current = tch;
-      } else {
-        const t = supabase.from('tickets').on('*', () => { fetchSADs(); }).subscribe();
-        ticketsSubRef.current = t;
       }
     } catch (e) { /* ignore */ }
 
@@ -352,8 +293,8 @@ export default function SADDeclaration() {
       try { if (subRef.current && supabase.removeChannel) supabase.removeChannel(subRef.current).catch(() => {}); } catch (e) {}
       try { if (ticketsSubRef.current && supabase.removeChannel) supabase.removeChannel(ticketsSubRef.current).catch(() => {}); } catch (e) {}
     };
-// eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     try { localStorage.setItem('sad_activity', JSON.stringify(activity)); } catch (e) { /* ignore */ }
@@ -400,6 +341,10 @@ export default function SADDeclaration() {
 
   // create SAD - now storing regime as code (IM4/EX1/IM7)
   const handleCreateSAD = async (e) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot register new SADs.', status: 'warning' });
+      return;
+    }
     if (e && e.preventDefault) e.preventDefault();
     if (!sadNo || !declaredWeight) {
       toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
@@ -407,7 +352,7 @@ export default function SADDeclaration() {
     }
     setLoading(true);
     try {
-      const currentUserObj = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
+      const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
       const docRecords = await uploadDocs(sadNo, docs);
       const trimmedSad = String(sadNo).trim();
 
@@ -427,14 +372,14 @@ export default function SADDeclaration() {
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
-      if (currentUserObj && currentUserObj.id) payload.created_by = currentUserObj.id;
+      if (currentUser && currentUser.id) payload.created_by = currentUser.id;
 
       const { error } = await supabase.from('sad_declarations').insert([payload]);
       if (error) throw error;
 
-      if (currentUserObj && currentUserObj.id) {
-        const uname = (currentUserObj.user_metadata && currentUserObj.user_metadata.full_name) || currentUserObj.email || '';
-        if (uname) createdByMapRef.current = { ...createdByMapRef.current, [currentUserObj.id]: uname };
+      if (currentUser && currentUser.id) {
+        const uname = (currentUser.user_metadata && currentUser.user_metadata.full_name) || currentUser.email || '';
+        if (uname) createdByMapRef.current = { ...createdByMapRef.current, [currentUser.id]: uname };
       }
 
       if (typeof window !== 'undefined' && window.confetti) {
@@ -505,8 +450,122 @@ export default function SADDeclaration() {
     }
   };
 
+  // edit modal open
+  const openEditModal = (sad) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot edit SADs.', status: 'warning' });
+      return;
+    }
+    setEditModalData({
+      original_sad_no: sad.sad_no,
+      sad_no: sad.sad_no,
+      regime: sad.regime ?? '',
+      declared_weight: String(sad.declared_weight ?? ''),
+      status: sad.status ?? 'In Progress',
+    });
+    setEditModalOpen(true);
+  };
+  const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); };
+
+  // save edit modal (handles renaming and regime/code changes)
+  const saveEditModal = async () => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot edit SADs.', status: 'warning' });
+      setConfirmSaveOpen(false);
+      closeEditModal();
+      return;
+    }
+
+    if (!editModalData || !editModalData.original_sad_no) return;
+    const originalSad = editModalData.original_sad_no;
+    const newSad = String(editModalData.sad_no ?? '').trim();
+    const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
+    const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
+
+    // optimistic UI update
+    setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString() } : s)));
+    setConfirmSaveOpen(false);
+    closeEditModal();
+
+    try {
+      if (!newSad) throw new Error('SAD Number cannot be empty');
+
+      // ensure regime is a code; if user entered a word, convert
+      let regimeToSave = editModalData.regime;
+      if (regimeToSave && typeof regimeToSave === 'string') {
+        const low = regimeToSave.trim().toLowerCase();
+        if (WORD_TO_CODE[low]) regimeToSave = WORD_TO_CODE[low];
+      }
+
+      if (newSad !== originalSad) {
+        const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
+        if (conflict) {
+          throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
+        }
+
+        // update child tables first: tickets, reports_generated
+        const { error: tErr } = await supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad);
+        if (tErr) console.warn('tickets update returned error', tErr);
+
+        const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
+        if (rErr) console.warn('reports_generated update returned error', rErr);
+
+        // now update the parent SAD row
+        const { error: parentErr } = await supabase.from('sad_declarations').update({
+          sad_no: newSad,
+          regime: regimeToSave ?? null,
+          declared_weight: declaredParsed,
+          status: editModalData.status ?? null,
+          updated_at: new Date().toISOString(),
+          manual_update: true,
+        }).eq('sad_no', originalSad);
+        if (parentErr) {
+          // attempt rollback children updates to originalSad (best-effort)
+          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
+          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
+          throw parentErr;
+        }
+      } else {
+        // same sad_no -> simple update
+        const { error } = await supabase.from('sad_declarations').update({
+          regime: regimeToSave ?? null,
+          declared_weight: declaredParsed,
+          status: editModalData.status ?? null,
+          updated_at: new Date().toISOString(),
+          manual_update: true,
+        }).eq('sad_no', originalSad);
+        if (error) throw error;
+      }
+
+      // log change
+      try {
+        const after = {
+          ...before,
+          sad_no: newSad,
+          regime: regimeToSave,
+          declared_weight: declaredParsed,
+          status: editModalData.status,
+          updated_at: new Date().toISOString(),
+        };
+        await supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]);
+      } catch (e) { /* ignore */ }
+
+      await pushActivity(`Edited SAD ${originalSad} → ${newSad}`, { before, after: { sad_no: newSad } });
+      toast({ title: 'Saved', description: `SAD ${originalSad} updated${newSad !== originalSad ? ` → ${newSad}` : ''}`, status: 'success' });
+      fetchSADs();
+    } catch (err) {
+      console.error('saveEditModal', err);
+      toast({ title: 'Save failed', description: err?.message || 'Could not save changes', status: 'error' });
+      fetchSADs(); // refresh to ensure UI consistency
+    }
+  };
+
   // update status quick action
   const updateSadStatus = async (sad_no, newStatus) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot change SAD status.', status: 'warning' });
+      return;
+    }
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
       const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
@@ -521,14 +580,25 @@ export default function SADDeclaration() {
     }
   };
 
-  const requestMarkCompleted = (sad_no) => { setCompleteTarget(sad_no); setCompleteOpen(true); };
+  const requestMarkCompleted = (sad_no) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot mark SADs completed.', status: 'warning' });
+      return;
+    }
+    setCompleteTarget(sad_no); setCompleteOpen(true);
+  };
   const confirmMarkCompleted = async () => {
+    if (isFinance) { setCompleteOpen(false); setCompleteTarget(null); toast({ title: 'Permission denied', status: 'warning' }); return; }
     const target = completeTarget; setCompleteOpen(false); setCompleteTarget(null);
     if (!target) return;
     try { setLoading(true); await updateSadStatus(target, 'Completed'); } catch (e) {} finally { setLoading(false); }
   };
 
   const recalcTotalForSad = async (sad_no) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot recalculate totals.', status: 'warning' });
+      return;
+    }
     try {
       const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
       const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
@@ -545,6 +615,11 @@ export default function SADDeclaration() {
   };
 
   const archiveSadConfirmed = async (sad_no) => {
+    if (isFinance) {
+      toast({ title: 'Permission denied', description: 'Finance users cannot archive SADs.', status: 'warning' });
+      setArchiveOpen(false); setArchiveTarget(null);
+      return;
+    }
     try {
       const { error } = await supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
       if (error) throw error;
@@ -578,53 +653,6 @@ export default function SADDeclaration() {
     } catch (err) {
       console.error('exportSingleSAD', err);
       toast({ title: 'Export failed', description: err?.message || 'Unexpected', status: 'error' });
-    }
-  };
-
-  // Edit modal handlers (only for non-finance)
-  const openEditModal = (s) => {
-    if (!s) return;
-    setEditModalData({
-      original_sad_no: s.sad_no,
-      sad_no: s.sad_no,
-      regime: s.regime || '',
-      declared_weight: s.declared_weight || '',
-      status: s.status || 'In Progress',
-    });
-    setEditModalOpen(true);
-  };
-  const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); setConfirmSaveOpen(false); };
-
-  const saveEditModal = async () => {
-    if (!editModalData) return;
-    try {
-      const payload = {
-        sad_no: editModalData.sad_no,
-        regime: editModalData.regime || null,
-        declared_weight: Number(parseNumberString(editModalData.declared_weight) || 0),
-        status: editModalData.status,
-        manual_update: true,
-        updated_at: new Date().toISOString(),
-      };
-      // If SAD was renamed, update children tickets best-effort
-      if (editModalData.original_sad_no && editModalData.original_sad_no !== editModalData.sad_no) {
-        // update tickets sad_no
-        await supabase.from('tickets').update({ sad_no: editModalData.sad_no }).eq('sad_no', editModalData.original_sad_no);
-        // update declaration by original
-        await supabase.from('sad_declarations').update(payload).eq('sad_no', editModalData.original_sad_no);
-      } else {
-        const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', editModalData.sad_no);
-        if (error) throw error;
-      }
-      await pushActivity(`Edited SAD ${editModalData.sad_no}`);
-      toast({ title: 'Saved', description: `SAD ${editModalData.sad_no} updated`, status: 'success' });
-      closeEditModal();
-      fetchSADs();
-    } catch (err) {
-      console.error('saveEditModal', err);
-      toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error' });
-    } finally {
-      setConfirmSaveOpen(false);
     }
   };
 
