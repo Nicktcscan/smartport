@@ -1,7 +1,7 @@
-// src/pages/SADDeclaration.jsx
+// src/pages/AgentSAD.jsx
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
-  Box, Button, Container, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
+  Box, Button, Heading, Input, SimpleGrid, FormControl, FormLabel, Select,
   Text, Table, Thead, Tbody, Tr, Th, Td, VStack, HStack, useToast, Modal, ModalOverlay,
   ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton, IconButton, Flex,
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText,
@@ -172,6 +172,7 @@ export default function SADDeclaration() {
         if (mounted) {
           setCurrentUser(u);
           if (u && u.id) {
+            // prefer metadata full_name, else email, else id
             const uname = (u.user_metadata && (u.user_metadata.full_name || u.user_metadata.fullName)) || u.email || u.id;
             createdByMapRef.current = { ...createdByMapRef.current, [u.id]: uname };
           }
@@ -182,6 +183,66 @@ export default function SADDeclaration() {
     })();
     return () => { mounted = false; };
   }, []);
+
+  // utility to resolve creator ids -> display names
+  async function resolveCreatorNames(unresolvedIds = []) {
+    const toResolve = unresolvedIds.filter(Boolean);
+    if (!toResolve.length) return;
+    const stillUnresolved = new Set(toResolve);
+    try {
+      // 1) try profiles table (if you keep user profiles there)
+      try {
+        const { data: profilesData } = await supabase.from('profiles').select('id, full_name, email').in('id', Array.from(stillUnresolved));
+        if (profilesData && profilesData.length) {
+          for (const p of profilesData) {
+            if (p && p.id) {
+              createdByMapRef.current = { ...createdByMapRef.current, [p.id]: p.full_name || p.email || p.id };
+              stillUnresolved.delete(p.id);
+            }
+          }
+        }
+      } catch (e) {
+        // ignore - not all setups have profiles table
+      }
+
+      // 2) try custom users table (if present)
+      if (stillUnresolved.size) {
+        try {
+          const { data: usersData } = await supabase.from('users').select('id, username, email').in('id', Array.from(stillUnresolved));
+          if (usersData && usersData.length) {
+            for (const u of usersData) {
+              if (u && u.id) {
+                createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || u.id };
+                stillUnresolved.delete(u.id);
+              }
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      }
+
+      // 3) as last fallback, try Supabase auth users via RPC if available (best effort)
+      // Note: not all projects allow direct reading of auth.users via from('auth.users'); skip if access denied.
+      if (stillUnresolved.size) {
+        try {
+          const { data: authUsers } = await supabase.from('auth.users').select('id, email').in('id', Array.from(stillUnresolved));
+          if (authUsers && authUsers.length) {
+            for (const u of authUsers) {
+              if (u && u.id) {
+                createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.email || u.id };
+                stillUnresolved.delete(u.id);
+              }
+            }
+          }
+        } catch (e) {
+          // ignore possible permission errors
+        }
+      }
+    } catch (e) {
+      // ignore resolving errors
+    }
+  }
 
   // ----- fetchSADs: only SADs created by currentUser -----
   const fetchSADs = async (filter = null) => {
@@ -258,15 +319,7 @@ export default function SADDeclaration() {
       if (creatorIds.length) {
         const unresolved = creatorIds.filter((id) => !createdByMap[id]);
         if (unresolved.length) {
-          try {
-            const { data: usersData } = await supabase.from('users').select('id, username, email').in('id', unresolved);
-            if (usersData && usersData.length) {
-              for (const u of usersData) {
-                createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || 'Unknown' };
-              }
-            }
-            // also ensure we keep already-known map
-          } catch (e) { /* ignore */ }
+          await resolveCreatorNames(unresolved);
         }
       }
 
@@ -472,11 +525,8 @@ export default function SADDeclaration() {
         let createdByUsername = sad.created_by_username || null;
         if (!createdByUsername && sad.created_by) {
           try {
-            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
-            if (u) {
-              createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
-              createdByUsername = u.username || u.email || null;
-            }
+            await resolveCreatorNames([sad.created_by]);
+            createdByUsername = createdByMapRef.current[sad.created_by] || null;
           } catch (e) { /* ignore */ }
         }
         setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
@@ -490,7 +540,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // update status quick action
+  // update status quick action (ONLY updates status — DOES NOT TOUCH declared_weight or regime)
   const updateSadStatus = async (sad_no, newStatus) => {
     try {
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
@@ -866,7 +916,7 @@ export default function SADDeclaration() {
   const RowMotion = motion(Tr);
 
   return (
-    <Container maxW="8xl" py={6} className="sad-container">
+    <Box w="100vw" px={{ base: 3, md: 6 }} py={6} className="sad-container" overflowX="hidden">
       <style>{pageCss}</style>
 
       <Heading mb={4}>SAD Declaration Panel</Heading>
@@ -1015,22 +1065,12 @@ export default function SADDeclaration() {
               <AnimatePresence>
                 {pagedSads.map((s) => {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
-
-                  // discrepancy color rules required:
-                  // red when discharged > declared (discrepancy > 0)
-                  // blue when discharged < declared (discrepancy < 0)
-                  // green when equal (discrepancy === 0)
-                  let discColor = 'green.600';
-                  if (discrepancy > 0) discColor = 'red.600';
-                  else if (discrepancy < 0) discColor = 'blue.600';
-                  else discColor = 'green.600';
-
-                  const statusDotColor = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
+                  const color = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
                   const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
 
                   return (
-                    <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
+                    <RowMotion key={s.id ?? s.sad_no} {...MOTION_ROW} style={{ background: 'transparent' }}>
                       <Td data-label="SAD"><Text fontWeight="bold">{s.sad_no}</Text></Td>
                       <Td data-label="Regime"><Text>{regimeDisplay}</Text></Td>
                       <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
@@ -1039,13 +1079,13 @@ export default function SADDeclaration() {
                       <Td data-label="Status">
                         <VStack align="start" spacing={1}>
                           <HStack>
-                            <Box width="10px" height="10px" borderRadius="full" bg={statusDotColor} />
-                            <Text color={statusDotColor} fontWeight="medium">{s.status}</Text>
+                            <Box width="10px" height="10px" borderRadius="full" bg={color} />
+                            <Text color={color} fontWeight="medium">{s.status}</Text>
                           </HStack>
                         </VStack>
                       </Td>
                       <Td data-label="Discrepancy">
-                        <Text color={discColor}>
+                        <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
                           {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
                         </Text>
                       </Td>
@@ -1057,6 +1097,7 @@ export default function SADDeclaration() {
                               <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
                               <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
                               <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
+                              {/* Only allow marking completed — no edit of declared amount or regime */}
                               {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
                               <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
                               <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
@@ -1088,26 +1129,7 @@ export default function SADDeclaration() {
                 {detailsData.sad ? (
                   <>
                     <Text mb={2}>Declared weight: <strong>{Number(detailsData.sad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                    <Text mb={2}>
-                      Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong>
-                    </Text>
-
-                    {/* show colored discrepancy */}
-                    {(() => {
-                      const recorded = Number(detailsData.sad.total_recorded_weight || 0);
-                      const declared = Number(detailsData.sad.declared_weight || 0);
-                      const diff = recorded - declared;
-                      let color = 'green.600';
-                      if (diff > 0) color = 'red.600';
-                      else if (diff < 0) color = 'blue.600';
-                      else color = 'green.600';
-                      return (
-                        <Text mb={3} color={color}>
-                          Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
-                        </Text>
-                      );
-                    })()}
-
+                    <Text mb={2}>Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
                     <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
                     <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
                     <Text mb={4}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
@@ -1150,23 +1172,6 @@ export default function SADDeclaration() {
               <>
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()}</strong></Text>
-
-                {/* discrepancy colored */}
-                {(() => {
-                  const recorded = Number(selectedSad.total_recorded_weight || 0);
-                  const declared = Number(selectedSad.declared_weight || 0);
-                  const diff = recorded - declared;
-                  let color = 'green.600';
-                  if (diff > 0) color = 'red.600';
-                  else if (diff < 0) color = 'blue.600';
-                  else color = 'green.600';
-                  return (
-                    <Text mb={3} color={color}>
-                      Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
-                    </Text>
-                  );
-                })()}
-
                 <Text mb={2}># Transactions: <strong>{Number(selectedSad.ticket_count || 0).toLocaleString()}</strong></Text>
                 <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
 
@@ -1307,6 +1312,6 @@ export default function SADDeclaration() {
           </ModalFooter>
         </ModalContent>
       </Modal>
-    </Container>
+    </Box>
   );
 }
