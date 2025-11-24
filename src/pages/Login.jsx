@@ -16,6 +16,7 @@ import {
   useColorModeValue,
   Text,
   Link,
+  Spinner,
 } from "@chakra-ui/react";
 import { useAuth } from "../context/AuthContext";
 import { ViewIcon, ViewOffIcon, SunIcon, MoonIcon } from "@chakra-ui/icons";
@@ -31,6 +32,7 @@ function Login() {
   const [errors, setErrors] = useState({});
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const toast = useToast();
   const { login } = useAuth();
   const { colorMode, toggleColorMode } = useColorMode();
@@ -48,57 +50,119 @@ function Login() {
 
   const validate = () => {
     const newErrors = {};
-    if (!form.email) newErrors.email = "Email is required";
+    if (!form.email || !String(form.email).trim()) newErrors.email = "Email is required";
     if (!form.password) newErrors.password = "Password is required";
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
+  };
+
+  const isLikelyCorsOrNetworkError = (err) => {
+    if (!err) return false;
+    const msg = String(err?.message || err).toLowerCase();
+    return (
+      msg.includes("failed to fetch") ||
+      msg.includes("networkerror") ||
+      msg.includes("cors") ||
+      msg.includes("preflight") ||
+      msg.includes("access-control-allow-origin")
+    );
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validate()) return;
 
+    setIsSubmitting(true);
     try {
+      // Use Supabase client (signInWithPassword) — this avoids direct manual fetch to /auth/v1/token
       const { data, error } = await supabase.auth.signInWithPassword({
-        email: form.email.trim(),
+        email: String(form.email).trim(),
         password: form.password,
       });
 
+      // Handle Supabase SDK errors
       if (error) {
+        // If it looks like a network/CORS issue give a clearer actionable message
+        if (isLikelyCorsOrNetworkError(error)) {
+          toast({
+            title: "Network / CORS error",
+            description:
+              "Login request failed due to a network or CORS issue. Make sure your frontend origin is whitelisted in Supabase (Project → Settings → API → Allowed URLs).",
+            status: "error",
+            duration: 9000,
+            isClosable: true,
+          });
+        } else {
+          toast({
+            title: error.message || "Login failed",
+            status: "error",
+            duration: 4000,
+            isClosable: true,
+          });
+        }
+        return;
+      }
+
+      // SDK sometimes returns null user for various flows (e.g., MFA or magic link).
+      const user = data?.user ?? null;
+
+      if (!user) {
+        // If no user but no error, show generic guidance
         toast({
-          title: error.message || "Login failed",
-          status: "error",
-          duration: 4000,
+          title: "Login incomplete",
+          description:
+            "Authentication did not return a user object. Check your credentials or auth settings (e.g., magic link / OTP flows).",
+          status: "warning",
+          duration: 6000,
           isClosable: true,
         });
         return;
       }
 
-      // User is logged in successfully
+      // success
       toast({
         title: "Login successful",
         status: "success",
-        duration: 3000,
+        duration: 2500,
         isClosable: true,
       });
 
-      // Call your auth context login handler with user object
-      login(data.user);
+      // call auth context login handler
+      try {
+        login(user);
+      } catch (ctxErr) {
+        console.warn("Auth context login handler threw:", ctxErr);
+      }
 
-      // Store email if rememberMe checked, else remove
+      // remember email if requested
       if (rememberMe) {
-        localStorage.setItem("rememberedEmail", form.email);
+        localStorage.setItem("rememberedEmail", String(form.email).trim());
       } else {
         localStorage.removeItem("rememberedEmail");
       }
-    } catch (error) {
-      console.error("Unexpected login error:", error);
-      toast({
-        title: "Unexpected error, please try again.",
-        status: "error",
-        duration: 3000,
-        isClosable: true,
-      });
+    } catch (err) {
+      // Unexpected errors (fetch failures, CORS)
+      console.error("Unexpected login error:", err);
+      if (isLikelyCorsOrNetworkError(err)) {
+        toast({
+          title: "Network / CORS issue",
+          description:
+            "Browser blocked the request (CORS). Whitelist your frontend origin in Supabase Dashboard → Project Settings → API → Allowed URLs, then retry. If you run a proxy/backend, ensure it forwards CORS headers.",
+          status: "error",
+          duration: 10000,
+          isClosable: true,
+        });
+      } else {
+        toast({
+          title: "Unexpected error",
+          description: "An unexpected error occurred. Check console and try again.",
+          status: "error",
+          duration: 5000,
+          isClosable: true,
+        });
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -262,6 +326,9 @@ function Login() {
             _active={{ bg: "teal.700" }}
             type="submit"
             transition="all 0.3s"
+            isLoading={isSubmitting}
+            loadingText="Logging in..."
+            leftIcon={isSubmitting ? <Spinner size="sm" /> : undefined}
           >
             Log in
           </Button>
@@ -269,8 +336,7 @@ function Login() {
           {/* Public appointment link (no login required) */}
           <Box textAlign="center" mt={2}>
             <Text fontSize="sm" color={useColorModeValue("gray.600", "gray.300")}>
-              Need to create an appointment?
-              {" "}
+              Need to create an appointment?{" "}
               <Link
                 as={RouterLink}
                 to="/appointment"
