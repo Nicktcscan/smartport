@@ -228,14 +228,13 @@ export default function UsersPage() {
   const pageItems = filteredSorted.slice((page - 1) * pageSize, page * pageSize);
 
   // helpers
-  // company email validation helper
-  const isCompanyEmail = (email) => {
+  // general email validation helper (accepts any normal email)
+  const isValidEmail = (email) => {
     if (!email || typeof email !== 'string') return false;
-    const e = email.trim().toLowerCase();
-    // require format: name.surname@nicktcscangambia.gm
-    // one dot between name and surname, letters only (you can relax this if needed)
-    const companyRegex = /^[a-z]+\.{1}[a-z]+@nicktcscangambia\.gm$/i;
-    return companyRegex.test(e);
+    const e = email.trim();
+    // basic but practical email pattern
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(e);
   };
 
   const validate = () => {
@@ -247,8 +246,8 @@ export default function UsersPage() {
 
     if (!emailNorm) {
       errs.email = 'Email is required';
-    } else if (!isCompanyEmail(emailNorm)) {
-      errs.email = 'Email must be in the format name.surname@nicktcscangambia.gm';
+    } else if (!isValidEmail(emailNorm)) {
+      errs.email = 'Invalid email address';
     }
 
     if (!form.role) errs.role = 'Role is required';
