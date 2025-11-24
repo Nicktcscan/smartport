@@ -1015,7 +1015,17 @@ export default function SADDeclaration() {
               <AnimatePresence>
                 {pagedSads.map((s) => {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
-                  const color = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
+
+                  // discrepancy color rules required:
+                  // red when discharged > declared (discrepancy > 0)
+                  // blue when discharged < declared (discrepancy < 0)
+                  // green when equal (discrepancy === 0)
+                  let discColor = 'green.600';
+                  if (discrepancy > 0) discColor = 'red.600';
+                  else if (discrepancy < 0) discColor = 'blue.600';
+                  else discColor = 'green.600';
+
+                  const statusDotColor = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
                   const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
 
@@ -1029,13 +1039,13 @@ export default function SADDeclaration() {
                       <Td data-label="Status">
                         <VStack align="start" spacing={1}>
                           <HStack>
-                            <Box width="10px" height="10px" borderRadius="full" bg={color} />
-                            <Text color={color} fontWeight="medium">{s.status}</Text>
+                            <Box width="10px" height="10px" borderRadius="full" bg={statusDotColor} />
+                            <Text color={statusDotColor} fontWeight="medium">{s.status}</Text>
                           </HStack>
                         </VStack>
                       </Td>
                       <Td data-label="Discrepancy">
-                        <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
+                        <Text color={discColor}>
                           {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
                         </Text>
                       </Td>
@@ -1078,7 +1088,26 @@ export default function SADDeclaration() {
                 {detailsData.sad ? (
                   <>
                     <Text mb={2}>Declared weight: <strong>{Number(detailsData.sad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                    <Text mb={2}>Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
+                    <Text mb={2}>
+                      Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong>
+                    </Text>
+
+                    {/* show colored discrepancy */}
+                    {(() => {
+                      const recorded = Number(detailsData.sad.total_recorded_weight || 0);
+                      const declared = Number(detailsData.sad.declared_weight || 0);
+                      const diff = recorded - declared;
+                      let color = 'green.600';
+                      if (diff > 0) color = 'red.600';
+                      else if (diff < 0) color = 'blue.600';
+                      else color = 'green.600';
+                      return (
+                        <Text mb={3} color={color}>
+                          Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
+                        </Text>
+                      );
+                    })()}
+
                     <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
                     <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
                     <Text mb={4}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
@@ -1121,6 +1150,23 @@ export default function SADDeclaration() {
               <>
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
                 <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()}</strong></Text>
+
+                {/* discrepancy colored */}
+                {(() => {
+                  const recorded = Number(selectedSad.total_recorded_weight || 0);
+                  const declared = Number(selectedSad.declared_weight || 0);
+                  const diff = recorded - declared;
+                  let color = 'green.600';
+                  if (diff > 0) color = 'red.600';
+                  else if (diff < 0) color = 'blue.600';
+                  else color = 'green.600';
+                  return (
+                    <Text mb={3} color={color}>
+                      Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
+                    </Text>
+                  );
+                })()}
+
                 <Text mb={2}># Transactions: <strong>{Number(selectedSad.ticket_count || 0).toLocaleString()}</strong></Text>
                 <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
 

@@ -1216,11 +1216,26 @@ export default function SADDeclaration() {
             {selectedSad && (
               <>
                 <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
+                <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()}</strong></Text>
+
+                {/* discrepancy colored */}
+                {(() => {
+                  const recorded = Number(selectedSad.total_recorded_weight || 0);
+                  const declared = Number(selectedSad.declared_weight || 0);
+                  const diff = recorded - declared;
+                  let color = 'green.600';
+                  if (diff > 0) color = 'red.600';
+                  else if (diff < 0) color = 'blue.600';
+                  else color = 'green.600';
+                  return (
+                    <Text mb={3} color={color}>
+                      Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
+                    </Text>
+                  );
+                })()}
+
                 <Text mb={2}># Transactions: <strong>{Number(selectedSad.ticket_count || 0).toLocaleString()}</strong></Text>
-                <Text mb={2}>Status: <strong>{selectedSad.status}</strong></Text>
-                <Text mb={2}>Created At: <strong>{selectedSad.created_at ? new Date(selectedSad.created_at).toLocaleString() : '—'}</strong></Text>
-                <Text mb={2}>Completed At: <strong>{selectedSad.completed_at ? new Date(selectedSad.completed_at).toLocaleString() : '-'}</strong></Text>
+                <Text mb={4}>Status: <strong>{selectedSad.status}</strong></Text>
 
                 <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
                 {detailLoading ? <Text>Loading...</Text> : (
