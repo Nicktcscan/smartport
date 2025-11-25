@@ -113,7 +113,7 @@ async function ensureJsBarcodeLoaded() {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js';
     s.onload = () => resolve();
-    s.onerror = () => reject(new Error('Failed to load JsBarcode'));
+    s.onerror = (e) => reject(new Error('Failed to load JsBarcode'));
     document.head.appendChild(s);
   });
 }
@@ -715,7 +715,7 @@ export default function AppointmentPage() {
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-      weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
     };
   }
 
@@ -919,47 +919,41 @@ export default function AppointmentPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper (stores in 'appointments' bucket) ----------
+  // ---------- PDF upload helper (writes to bucket 'appointments') ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
     if (!blob) return null;
-    const bucketName = 'appointments'; // <- your new bucket
-    const filename = `${appointmentNumber || `appt-${Date.now()}`}.pdf`;
-    const path = `tickets/${filename}`;
-
     try {
+      const filename = `${appointmentNumber || `appt-${Date.now()}`}.pdf`;
+      const path = `tickets/${filename}`; // inside bucket 'appointments' we store in tickets/
       // convert blob to File (browser)
       const file = new File([blob], filename, { type: 'application/pdf' });
-      // upload
-      const { error: uploadError } = await supabase.storage.from(bucketName).upload(path, file, { upsert: true });
+
+      // upload to bucket named 'appointments'
+      const { error: uploadError } = await supabase.storage.from('appointments').upload(path, file, { upsert: true });
       if (uploadError) {
         console.warn('uploadPdfToStorage upload error', uploadError);
-        // continue to fallback
+        return null;
       }
 
-      // try public url
+      // try to get a public URL
       try {
-        const { data: urlData } = supabase.storage.from(bucketName).getPublicUrl(path);
-        const publicUrl = (urlData && (urlData.publicUrl || urlData.publicURL)) ?? null;
+        const { data: urlData } = supabase.storage.from('appointments').getPublicUrl(path);
+        const publicUrl = urlData?.publicUrl || urlData?.public_url || null;
         if (publicUrl) return publicUrl;
       } catch (e) {
-        // ignore
+        console.warn('getPublicUrl failed', e);
       }
 
-      // if no public URL, create signed URL for 7 days
+      // fallback: try to create a signed URL (7 days) if public not available
       try {
-        const expiresIn = 60 * 60 * 24 * 7; // 7 days
-        const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, expiresIn);
-        if (signedErr) {
-          console.warn('createSignedUrl error', signedErr);
-        } else {
-          const signedUrl = signedData?.signedUrl || signedData?.signedURL || null;
-          if (signedUrl) return signedUrl;
+        const { data: signedData, error: signedErr } = await supabase.storage.from('appointments').createSignedUrl(path, 60 * 60 * 24 * 7);
+        if (!signedErr && signedData && signedData.signedUrl) {
+          return signedData.signedUrl;
         }
       } catch (e) {
         console.warn('createSignedUrl failed', e);
       }
 
-      // final fallback: return null if no url available
       return null;
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
@@ -1057,37 +1051,27 @@ export default function AppointmentPage() {
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
       });
 
-      // generate PDF & upload & download
+      // generate PDF & download & upload
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
 
-        // Upload to 'appointments' bucket BEFORE prompting download so it's stored even if download is interrupted
+        // Download client-side
+        downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
+
+        // Try upload to Supabase storage and update appointment.pdf_url
         try {
           const publicUrl = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
             try {
               await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
-            } catch (updErr) {
-              console.warn('Could not update appointment pdf_url', updErr);
+            } catch (e) {
+              console.warn('storing pdf_url in db failed', e);
             }
           }
-          if (publicUrl) {
-            toast({ title: 'Ticket saved', description: 'PDF uploaded to storage', status: 'success', duration: 3000 });
-          } else {
-            toast({ title: 'Ticket saved (no public url)', description: 'PDF uploaded but no public URL available', status: 'info', duration: 3000 });
-          }
         } catch (e) {
-          console.warn('PDF storage/upload failed', e);
-          toast({ title: 'Upload failed', description: 'PDF could not be uploaded to storage', status: 'warning' });
-        }
-
-        // Download client-side for user
-        try {
-          downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
-        } catch (dlErr) {
-          console.warn('client download failed', dlErr);
+          console.warn('PDF storage/update failed', e);
         }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);

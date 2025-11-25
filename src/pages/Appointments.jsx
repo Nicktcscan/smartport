@@ -308,7 +308,7 @@ export default function AppointmentsPage() {
       const from = (p - 1) * size;
       const to = p * size - 1;
 
-      let baseQuery = supabase.from('appointments').select('*, t1_records(id, sad_no)', { count: 'exact' });
+      let baseQuery = supabase.from('appointments').select('id,appointment_number,weighbridge_number,agent_name,agent_tin,pickup_date,truck_number,driver_name,driver_license_no,status,created_at,updated_at,pdf_url,t1_records(id, sad_no)', { count: 'exact' });
 
       if (q && q.trim()) {
         const escaped = q.trim().replace(/"/g, '\\"');
@@ -782,7 +782,7 @@ export default function AppointmentsPage() {
   // export filtered CSV
   const handleExportFilteredCSV = async () => {
     try {
-      let q = supabase.from('appointments').select('id,appointment_number,weighbridge_number,agent_tin,agent_name,warehouse_location,pickup_date,consolidated,truck_number,driver_name,driver_license_no,total_t1s,total_documented_weight,status,created_at,updated_at').order('created_at', { ascending: false }).limit(5000);
+      let q = supabase.from('appointments').select('id,appointment_number,weighbridge_number,agent_tin,agent_name,warehouse_location,pickup_date,consolidated,truck_number,driver_name,driver_license_no,total_t1s,total_documented_weight,status,created_at,updated_at,pdf_url').order('created_at', { ascending: false }).limit(5000);
       if (searchQ && searchQ.trim()) {
         const escaped = searchQ.trim().replace(/"/g, '\\"');
         const orFilter = `appointment_number.ilike.%${escaped}%,weighbridge_number.ilike.%${escaped}%,agent_name.ilike.%${escaped}%,truck_number.ilike.%${escaped}%`;
@@ -855,6 +855,77 @@ export default function AppointmentsPage() {
       case 'driver_license_expiring': return 'Driver license expires within 30 days';
       case 'no_t1_records': return 'No T1 records linked to this appointment';
       default: return k;
+    }
+  };
+
+  /**
+   * Reprint / regenerate PDF for an appointment
+   * - If appt.pdf_url exists, just open it
+   * - Otherwise, call backend endpoint to generate the PDF and stream/download it.
+   * - This action is allowed even for Completed appointments (view/print)
+   */
+  const reprintAppointment = async (appt) => {
+    if (!appt || !appt.id) {
+      toast({ title: 'No appointment selected', status: 'info' });
+      return;
+    }
+
+    // Viewing/printing allowed even if Completed — we do not block reads
+    if (appt.pdf_url) {
+      window.open(appt.pdf_url, '_blank');
+      return;
+    }
+
+    setDrawerLoading(true);
+    try {
+      const res = await fetch(`/api/appointments/${appt.id}/pdf`, { method: 'POST' });
+
+      if (!res.ok) {
+        let msg = `${res.status} ${res.statusText}`;
+        try { msg = await res.text(); } catch (e) {}
+        throw new Error(msg);
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const json = await res.json();
+        if (json.url) {
+          window.open(json.url, '_blank');
+          try {
+            await supabase.from('appointments').update({ pdf_url: json.url }).eq('id', appt.id);
+            setActiveAppt(prev => prev ? { ...prev, pdf_url: json.url } : prev);
+            setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: json.url } : p));
+          } catch (e) { /* ignore persisting errors */ }
+          toast({ title: 'PDF ready', status: 'success' });
+          return;
+        }
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `WeighbridgeTicket-${appt.appointment_number || appt.id}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      const pubUrl = res.headers.get('x-generated-pdf-url');
+      if (pubUrl) {
+        try {
+          await supabase.from('appointments').update({ pdf_url: pubUrl }).eq('id', appt.id);
+          setActiveAppt(prev => prev ? { ...prev, pdf_url: pubUrl } : prev);
+          setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: pubUrl } : p));
+        } catch (e) { /* ignore */ }
+      }
+
+      toast({ title: 'PDF generated', status: 'success' });
+    } catch (e) {
+      console.error('reprintAppointment failed', e);
+      toast({ title: 'Generate PDF failed', description: e?.message || String(e), status: 'error' });
+    } finally {
+      setDrawerLoading(false);
     }
   };
 
