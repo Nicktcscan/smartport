@@ -1,6 +1,6 @@
 /* eslint-disable no-unused-vars */
 /* eslint-disable react/jsx-no-undef */
-// src/pages/Appointments.jsx
+// src/pages/AgentApptscreated.jsx
 import { useEffect, useState, useRef } from 'react';
 import {
   Box,
@@ -229,6 +229,263 @@ export default function AppointmentsPage() {
     } catch (e) {
       console.warn('verifyUserOwnsSadsForAppointment unexpected', e);
       return { ok: false, missing: [] };
+    }
+  };
+
+  // ---------- NEW: helpers to resolve & open PDFs from storage 'appointments' bucket ----------
+  // Attempts to return a usable URL for the appointment PDF (public or signed).
+  const resolveAppointmentPdfUrl = async (appt) => {
+    if (!appt) return null;
+
+    // if row already has pdf_url, return it
+    if (appt.pdf_url) return appt.pdf_url;
+
+    const bucketName = 'appointments';
+    const storage = supabase.storage.from(bucketName);
+
+    // candidate common filenames
+    const candidates = [
+      `tickets/WeighbridgeTicket-${appt.appointment_number}.pdf`,
+      `WeighbridgeTicket-${appt.appointment_number}.pdf`,
+      `tickets/${appt.appointment_number}.pdf`,
+      `${appt.appointment_number}.pdf`,
+      `tickets/${appt.weighbridge_number}.pdf`,
+      `WeighbridgeTicket-${appt.id}.pdf`,
+      `${appt.id}.pdf`,
+    ].filter(Boolean);
+
+    // Try getPublicUrl or signed URL for candidates
+    for (const path of candidates) {
+      try {
+        // try public url
+        const { data: pubData } = storage.getPublicUrl(path);
+        const publicUrl = pubData?.publicUrl || null;
+        if (publicUrl && !publicUrl.includes('null')) {
+          return publicUrl;
+        }
+      } catch (e) {
+        // ignore
+      }
+      try {
+        // try signed url (expires in 1 hour)
+        const { data: signedData, error: sErr } = await storage.createSignedUrl(path, 60 * 60);
+        if (!sErr && signedData && signedData.signedUrl) {
+          return signedData.signedUrl;
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // If no candidate matched, list root paths and search filenames that include appointment_number or id
+    try {
+      const listPaths = ['', 'tickets'];
+      for (const base of listPaths) {
+        try {
+          const { data: files, error: listErr } = await storage.list(base, { limit: 1000 });
+          if (!listErr && Array.isArray(files)) {
+            const found = files.find(f => {
+              const name = String(f.name || '').toLowerCase();
+              const ap = String(appt.appointment_number || '').toLowerCase();
+              const idstr = String(appt.id || '').toLowerCase();
+              return (ap && name.includes(ap)) || (idstr && name.includes(idstr)) || name.includes(String(appt.weighbridge_number || '').toLowerCase());
+            });
+            if (found) {
+              const path = base ? `${base}/${found.name}` : `${found.name}`;
+              try {
+                const { data: signedData, error: sErr } = await storage.createSignedUrl(path, 60 * 60);
+                if (!sErr && signedData && signedData.signedUrl) return signedData.signedUrl;
+              } catch (e) {
+                // fallback to public
+                try {
+                  const { data: pubData } = storage.getPublicUrl(path);
+                  const publicUrl = pubData?.publicUrl || null;
+                  if (publicUrl && !publicUrl.includes('null')) {
+                    return publicUrl;
+                  }
+                } catch (_) {}
+              }
+            }
+          }
+        } catch (e) {
+          // continue to next base
+        }
+      }
+    } catch (e) {
+      // fallback
+    }
+
+    // not found
+    return null;
+  };
+
+  // Open appointment PDF (resolves via db field or storage). If not found, returns false.
+  const openAppointmentPdf = async (appt) => {
+    if (!appt) {
+      toast({ title: 'No appointment selected', status: 'info' });
+      return false;
+    }
+
+    // quick path: if pdf_url exists on row, open it
+    if (appt.pdf_url) {
+      try {
+        window.open(appt.pdf_url, '_blank');
+        return true;
+      } catch (e) {
+        // continue to resolve
+      }
+    }
+
+    // try to resolve via storage
+    try {
+      const url = await resolveAppointmentPdfUrl(appt);
+      if (url) {
+        // persist to DB if not present
+        if (!appt.pdf_url) {
+          try {
+            await supabase.from('appointments').update({ pdf_url: url }).eq('id', appt.id);
+            setAppointments(prev => prev.map(p => (p.id === appt.id ? { ...p, pdf_url: url } : p)));
+            setActiveAppt(prev => (prev && prev.id === appt.id ? { ...prev, pdf_url: url } : prev));
+          } catch (e) {
+            // ignore persist errors
+          }
+        }
+        window.open(url, '_blank');
+        return true;
+      }
+    } catch (e) {
+      console.warn('openAppointmentPdf: resolve failed', e);
+    }
+
+    toast({ title: 'PDF not found', description: 'No stored PDF found in storage. You can generate one.', status: 'info' });
+    return false;
+  };
+
+  /**
+   * Reprint / regenerate PDF for an appointment (calls your backend endpoint).
+   * - If the appointment already has pdf_url — open it.
+   * - Otherwise call POST /api/appointments/:id/pdf (server-side generation).
+   * - If the endpoint returns a JSON url or header with a URL, persist it to appointments.pdf_url.
+   * - If it returns a blob, attempt to upload the blob into storage ('appointments' bucket) and persist the public/signed url.
+   */
+  const reprintAppointment = async (appt) => {
+    if (!appt || !appt.id) {
+      toast({ title: 'No appointment selected', status: 'info' });
+      return;
+    }
+
+    // If already has a URL, open it
+    if (appt.pdf_url) {
+      window.open(appt.pdf_url, '_blank');
+      return;
+    }
+
+    setDrawerLoading(true);
+    try {
+      const res = await fetch(`/api/appointments/${appt.id}/pdf`, { method: 'POST' });
+
+      if (!res.ok) {
+        let msg = `${res.status} ${res.statusText}`;
+        try { msg = await res.text(); } catch (e) {}
+        throw new Error(msg);
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+
+      // If JSON with a url returned
+      if (contentType.includes('application/json')) {
+        const json = await res.json();
+        if (json.url) {
+          const url = json.url;
+          try {
+            await supabase.from('appointments').update({ pdf_url: url }).eq('id', appt.id);
+            setActiveAppt(prev => prev ? { ...prev, pdf_url: url } : prev);
+            setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: url } : p));
+          } catch (e) { /* ignore persist errors */ }
+          window.open(url, '_blank');
+          toast({ title: 'PDF ready', status: 'success' });
+          return;
+        }
+      }
+
+      // Otherwise treat as binary blob
+      const blob = await res.blob();
+      // trigger download for agent as fallback
+      try {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `WeighbridgeTicket-${appt.appointment_number || appt.id}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        // ignore
+      }
+
+      // If server provided a URL header, use it and persist
+      const pubUrl = res.headers.get('x-generated-pdf-url');
+      if (pubUrl) {
+        try {
+          await supabase.from('appointments').update({ pdf_url: pubUrl }).eq('id', appt.id);
+          setActiveAppt(prev => prev ? { ...prev, pdf_url: pubUrl } : prev);
+          setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: pubUrl } : p));
+        } catch (e) { /* ignore */ }
+        toast({ title: 'PDF generated', status: 'success' });
+        return;
+      }
+
+      // Otherwise, try uploading blob to Supabase storage bucket 'appointments'
+      try {
+        const filename = `WeighbridgeTicket-${appt.appointment_number || appt.id}.pdf`;
+        const path = `tickets/${filename}`;
+        // create File from blob (browser)
+        const file = new File([blob], filename, { type: 'application/pdf' });
+        const bucket = 'appointments';
+        const { error: uploadError } = await supabase.storage.from(bucket).upload(path, file, { upsert: true });
+        if (uploadError) {
+          console.warn('upload to storage failed', uploadError);
+        } else {
+          // try to get public url first
+          let finalUrl = null;
+          try {
+            const { data: pubData } = supabase.storage.from(bucket).getPublicUrl(path);
+            finalUrl = pubData?.publicUrl || null;
+            if (!finalUrl || finalUrl.includes('null')) {
+              // fallback to signed url (1 hour)
+              const { data: signedData, error: sErr } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
+              if (!sErr && signedData?.signedUrl) finalUrl = signedData.signedUrl;
+            }
+          } catch (e) {
+            // try signed url
+            try {
+              const { data: signedData } = await supabase.storage.from(bucket).createSignedUrl(path, 60 * 60);
+              finalUrl = signedData?.signedUrl || null;
+            } catch (ee) { /* ignore */ }
+          }
+
+          if (finalUrl) {
+            try {
+              await supabase.from('appointments').update({ pdf_url: finalUrl }).eq('id', appt.id);
+              setActiveAppt(prev => prev ? { ...prev, pdf_url: finalUrl } : prev);
+              setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: finalUrl } : p));
+            } catch (e) { /* ignore */ }
+            window.open(finalUrl, '_blank');
+            toast({ title: 'PDF generated & saved', status: 'success' });
+            return;
+          }
+        }
+      } catch (e) {
+        console.warn('upload blob to storage failed', e);
+      }
+
+      toast({ title: 'PDF generated', status: 'success' });
+    } catch (e) {
+      console.error('reprintAppointment failed', e);
+      toast({ title: 'Generate PDF failed', description: e?.message || String(e), status: 'error' });
+    } finally {
+      setDrawerLoading(false);
     }
   };
 
@@ -1125,78 +1382,7 @@ export default function AppointmentsPage() {
     }
   };
 
-  /**
-   * Reprint / regenerate PDF for an appointment
-   * - If appt.pdf_url exists, just open it
-   * - Otherwise, call backend endpoint to generate the PDF and stream/download it.
-   * - This action is allowed even for Completed appointments (view/print)
-   */
-  const reprintAppointment = async (appt) => {
-    if (!appt || !appt.id) {
-      toast({ title: 'No appointment selected', status: 'info' });
-      return;
-    }
-
-    // Viewing/printing allowed even if Completed — we do not block reads
-    if (appt.pdf_url) {
-      window.open(appt.pdf_url, '_blank');
-      return;
-    }
-
-    setDrawerLoading(true);
-    try {
-      const res = await fetch(`/api/appointments/${appt.id}/pdf`, { method: 'POST' });
-
-      if (!res.ok) {
-        let msg = `${res.status} ${res.statusText}`;
-        try { msg = await res.text(); } catch (e) {}
-        throw new Error(msg);
-      }
-
-      const contentType = res.headers.get('content-type') || '';
-      if (contentType.includes('application/json')) {
-        const json = await res.json();
-        if (json.url) {
-          window.open(json.url, '_blank');
-          try {
-            await supabase.from('appointments').update({ pdf_url: json.url }).eq('id', appt.id);
-            setActiveAppt(prev => prev ? { ...prev, pdf_url: json.url } : prev);
-            setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: json.url } : p));
-          } catch (e) { /* ignore persisting errors */ }
-          toast({ title: 'PDF ready', status: 'success' });
-          return;
-        }
-      }
-
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `WeighbridgeTicket-${appt.appointment_number || appt.id}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-
-      const pubUrl = res.headers.get('x-generated-pdf-url');
-      if (pubUrl) {
-        try {
-          await supabase.from('appointments').update({ pdf_url: pubUrl }).eq('id', appt.id);
-          setActiveAppt(prev => prev ? { ...prev, pdf_url: pubUrl } : prev);
-          setAppointments(prev => prev.map(p => p.id === appt.id ? { ...p, pdf_url: pubUrl } : p));
-        } catch (e) { /* ignore */ }
-      }
-
-      toast({ title: 'PDF generated', status: 'success' });
-    } catch (e) {
-      console.error('reprintAppointment failed', e);
-      toast({ title: 'Generate PDF failed', description: e?.message || String(e), status: 'error' });
-    } finally {
-      setDrawerLoading(false);
-    }
-  };
-
-  // render starts here (UI)
+  // ---------- render starts here (UI) ----------
   return (
     <Container maxW="8xl" py={6}>
       <Heading mb={4}>Manage Appointments</Heading>
@@ -1345,7 +1531,10 @@ export default function AppointmentsPage() {
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleAppointment(a)}>Export</MenuItem>
                               <MenuItem icon={<FaCheck />} onClick={() => { if (closed) { closedMessage(); } else markAsCompleted(a); }} isDisabled={closed}>Mark Completed</MenuItem>
                               <MenuItem icon={<FaListAlt />} onClick={() => openDrawer(a)}>View T1s</MenuItem>
-                              <MenuItem icon={<FaFilePdf />} onClick={() => { if (a.pdf_url) window.open(a.pdf_url, '_blank'); else toast({ title: 'No PDF', status: 'info' }); }}>Download PDF</MenuItem>
+                              <MenuItem icon={<FaFilePdf />} onClick={async () => {
+                                const ok = await openAppointmentPdf(a);
+                                if (!ok) toast({ title: 'No PDF', status: 'info' });
+                              }}>Download PDF</MenuItem>
                               <MenuItem icon={<FaPrint />} onClick={() => reprintAppointment(a)}>Reprint / Regenerate PDF</MenuItem>
                               <MenuDivider />
                               <MenuItem icon={<FaClone />} onClick={() => { if (closed) { closedMessage(); } else cloneAppointment(a); }} isDisabled={closed}>Clone</MenuItem>
@@ -1385,7 +1574,7 @@ export default function AppointmentsPage() {
                 <Box>
                   <Heading size="sm">Overview</Heading>
                   <Text><strong>Agent:</strong> {activeAppt?.agent_name} ({activeAppt?.agent_tin})</Text>
-                  <Text><strong>Pickup:</strong> {activeAppt?.pickup_date ? new Date(activeAppt.pickup_date).toLocaleString() : '—'}</Text>
+                  <Text><strong>Pickup:</strong> {activeAppt?.pickup_date ? new Date(activeAppt.pickup_date).toLocaleDateString() : '—'}</Text>
                   <Text><strong>Truck:</strong> {activeAppt?.truck_number || '—'}</Text>
                   <Text><strong>Driver:</strong> {activeAppt?.driver_name || '—'}</Text>
                 </Box>
@@ -1444,6 +1633,11 @@ export default function AppointmentsPage() {
                     <Box display="flex" gap={2}>
                       <Text color="gray.500">No PDF attached</Text>
                       <Button leftIcon={<FaPrint />} size="sm" onClick={() => reprintAppointment(activeAppt)}>Generate PDF</Button>
+                      <Button leftIcon={<FaFilePdf />} size="sm" onClick={async () => {
+                        // try to resolve and open if possible even if pdf_url not in row
+                        const ok = await openAppointmentPdf(activeAppt);
+                        if (!ok) toast({ title: 'No PDF available', status: 'info' });
+                      }}>Open From Storage</Button>
                     </Box>
                   )}
                 </Box>
