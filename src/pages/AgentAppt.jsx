@@ -113,7 +113,7 @@ async function ensureJsBarcodeLoaded() {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js';
     s.onload = () => resolve();
-    s.onerror = (e) => reject(new Error('Failed to load JsBarcode'));
+    s.onerror = () => reject(new Error('Failed to load JsBarcode'));
     document.head.appendChild(s);
   });
 }
@@ -919,26 +919,67 @@ export default function AppointmentPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper (store in bucket 'appointments' root) ----------
+  // ---------- PDF upload helper (UPDATED to use appointments bucket) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
-    if (!blob) return null;
+    if (!blob) return { publicUrl: null, path: null };
+
+    // PICK THE BUCKET NAME USER REQUESTED
+    const bucketName = 'appointments'; // <--- user provided bucket
+
+    // filename & path
     const filename = `WeighbridgeTicket-${appointmentNumber || `appt-${Date.now()}`}.pdf`;
+    const path = `tickets/${filename}`;
+
     try {
-      // convert blob to File (browser)
-      const file = new File([blob], filename, { type: 'application/pdf' });
-      // Upload to bucket named 'appointments' at root (no tickets/ subfolder)
-      const { error: uploadError } = await supabase.storage.from('appointments').upload(filename, file, { upsert: true });
+      // Convert blob to File (browser)
+      let fileForUpload;
+      try {
+        fileForUpload = new File([blob], filename, { type: 'application/pdf' });
+      } catch (e) {
+        // fallback if File constructor fails in some environments: convert to Uint8Array
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        fileForUpload = uint8;
+      }
+
+      // upload (upsert true ensures retries don't fail on duplicate path)
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from(bucketName)
+        .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
+
       if (uploadError) {
         console.warn('uploadPdfToStorage upload error', uploadError);
-        return null;
+        // still attempt to return a path if data exists
+        if (!uploadData) return { publicUrl: null, path: null };
       }
-      // get public url
-      const { data: urlData } = supabase.storage.from('appointments').getPublicUrl(filename);
-      const publicUrl = urlData?.publicUrl || null;
-      return publicUrl;
+
+      // Try to get a public URL first
+      const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
+      const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
+
+      if (publicUrl) {
+        return { publicUrl, path };
+      }
+
+      // Fallback: create a signed URL (1 hour) if bucket is private
+      try {
+        const signedSeconds = 60 * 60; // 1 hour
+        const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
+        if (!signedErr && signedData?.signedUrl) {
+          return { publicUrl: signedData.signedUrl, path };
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      // final fallback: construct project URL (less recommended) — try to return something
+      try {
+      } catch (e) { /* ignore */ }
+
+      return { publicUrl: null, path };
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
-      return null;
+      return { publicUrl: null, path: null };
     }
   }
 
@@ -1039,13 +1080,18 @@ export default function AppointmentPage() {
         const blob = await asPdf.toBlob();
 
         // Download client-side
-        downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
+        const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
+        downloadBlob(blob, filename);
 
-        // Try upload to Supabase storage (bucket 'appointments') and update appointment.pdf_url
+        // Try upload to Supabase storage (appointments bucket) and update appointment.pdf_url
         try {
-          const publicUrl = await uploadPdfToStorage(blob, printable.appointmentNumber);
+          const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
+            // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+          } else if (path && dbAppointment.id) {
+            // store path as fallback if you want — here we attempt to update pdf_url with the storage path
+            await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
           console.warn('PDF storage/update failed', e);

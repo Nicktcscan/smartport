@@ -56,6 +56,7 @@ import {
   FaFilePdf,
   FaListAlt,
   FaCheck,
+  FaDownload,
 } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
@@ -210,23 +211,54 @@ export default function AppointmentsPage() {
     if (pdfVal && /^https?:\/\//i.test(pdfVal)) return pdfVal;
 
     const bucket = 'appointments'; // your bucket
-    // helper to try a path: first try getPublicUrl (synchronous), then try createSignedUrl
-    const tryPath = async (path) => {
+
+    // Build candidate paths (same candidates used for download fallback)
+    const buildCandidates = () => {
+      const candidates = [];
+      if (pdfVal && !/^https?:\/\//i.test(pdfVal)) {
+        candidates.push(pdfVal);
+        candidates.push(pdfVal.replace(/^\/+/, ''));
+        if (!pdfVal.includes('/')) {
+          candidates.push(`tickets/${pdfVal}`);
+          candidates.push(`tickets/${pdfVal.replace(/^\/+/, '')}`);
+        }
+      }
+      if (fallbackName) {
+        const fn = String(fallbackName).trim();
+        if (fn) {
+          const filename = `${fn}.pdf`;
+          candidates.push(filename);
+          candidates.push(`tickets/${filename}`);
+          candidates.push(`${fn}/${filename}`);
+        }
+      }
+      // unique
+      const seen = new Set();
+      return candidates.filter(c => {
+        if (!c) return false;
+        const cc = String(c);
+        if (seen.has(cc)) return false;
+        seen.add(cc);
+        return true;
+      });
+    };
+
+    // try to get public url or signed url for a candidate path
+    const tryPathForUrl = async (path) => {
       if (!path) return null;
       const normalized = path.replace(/^\/+/, '');
 
-      // 1) try public url
+      // 1) try public url (getPublicUrl returns synchronously but keep it tidy)
       try {
-        const getResp = supabase.storage.from(bucket).getPublicUrl(normalized);
-        const publicUrl = getResp?.data?.publicUrl || getResp?.data?.publicURL || null;
+        const pubResp = supabase.storage.from(bucket).getPublicUrl(normalized);
+        const publicUrl = pubResp?.data?.publicUrl || pubResp?.data?.public_url || null;
         if (publicUrl) return publicUrl;
       } catch (e) {
         // ignore
       }
 
-      // 2) try signed url (short lived)
+      // 2) try signed url (1 hour)
       try {
-        // 1 hour expiry (adjust if you want)
         const expiresIn = 60 * 60;
         const { data: signedData, error: signedErr } = await supabase.storage.from(bucket).createSignedUrl(normalized, expiresIn);
         if (!signedErr && signedData && (signedData.signedUrl || signedData.signedURL)) {
@@ -238,43 +270,10 @@ export default function AppointmentsPage() {
       return null;
     };
 
-    // build candidate paths
-    const candidates = [];
-
-    if (pdfVal && !/^https?:\/\//i.test(pdfVal)) {
-      // try given path as-is and trimmed
-      candidates.push(pdfVal);
-      candidates.push(pdfVal.replace(/^\/+/, ''));
-      // if it's just a filename, also try tickets/
-      if (!pdfVal.includes('/')) {
-        candidates.push(`tickets/${pdfVal}`);
-        candidates.push(`tickets/${pdfVal.replace(/^\/+/, '')}`);
-      }
-    }
-
-    if (fallbackName) {
-      const fn = String(fallbackName).trim();
-      if (fn) {
-        const filename = `${fn}.pdf`;
-        candidates.push(filename);
-        candidates.push(`tickets/${filename}`);
-        candidates.push(`${fn}/${filename}`);
-      }
-    }
-
-    // remove duplicates while preserving order
-    const seen = new Set();
-    const uniqCandidates = candidates.filter((c) => {
-      if (!c) return false;
-      const cc = String(c);
-      if (seen.has(cc)) return false;
-      seen.add(cc);
-      return true;
-    });
-
-    for (const c of uniqCandidates) {
+    const candidates = buildCandidates();
+    for (const c of candidates) {
       try {
-        const url = await tryPath(c);
+        const url = await tryPathForUrl(c);
         if (url) return url;
       } catch (e) {
         // ignore and continue
@@ -284,18 +283,141 @@ export default function AppointmentsPage() {
     return null;
   }
 
+  // Download blob helper (client-side)
+  function triggerDownloadFromBlob(blob, filename) {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'file.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // revoke after short delay so browser can use it
+    setTimeout(() => URL.revokeObjectURL(url), 1000 * 8);
+  }
+
+  // Try to download a blob from storage using candidate paths (fallback when signed/public URL not available)
+  async function fetchBlobFromStorageCandidates(pdfVal, fallbackName) {
+    const bucket = 'appointments';
+    const buildCandidates = () => {
+      const candidates = [];
+      if (pdfVal && !/^https?:\/\//i.test(pdfVal)) {
+        candidates.push(pdfVal);
+        candidates.push(pdfVal.replace(/^\/+/, ''));
+        if (!pdfVal.includes('/')) {
+          candidates.push(`tickets/${pdfVal}`);
+          candidates.push(`tickets/${pdfVal.replace(/^\/+/, '')}`);
+        }
+      }
+      if (fallbackName) {
+        const fn = String(fallbackName).trim();
+        if (fn) {
+          const filename = `${fn}.pdf`;
+          candidates.push(filename);
+          candidates.push(`tickets/${filename}`);
+          candidates.push(`${fn}/${filename}`);
+        }
+      }
+      const seen = new Set();
+      return candidates.filter(c => {
+        if (!c) return false;
+        const cc = String(c);
+        if (seen.has(cc)) return false;
+        seen.add(cc);
+        return true;
+      });
+    };
+
+    const candidates = buildCandidates();
+    for (const c of candidates) {
+      try {
+        const normalized = c.replace(/^\/+/, '');
+        const { data, error } = await supabase.storage.from(bucket).download(normalized);
+        if (!error && data) {
+          // data is a Blob
+          return { blob: data, filename: normalized.split('/').pop() || `${fallbackName || 'ticket'}.pdf`, path: normalized };
+        }
+      } catch (e) {
+        // ignore and continue
+      }
+    }
+    return null;
+  }
+
+  // Helper: fetch URL and return blob (used to force-download an http(s) URL when needed)
+  async function fetchUrlAsBlob(url) {
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('Failed to fetch file');
+      const blob = await r.blob();
+      return blob;
+    } catch (e) {
+      console.warn('fetchUrlAsBlob failed', e);
+      return null;
+    }
+  }
+
   // Open or download appointment PDF, resolving storage paths as needed.
-  const openAppointmentPdf = async (appt) => {
+  // mode: 'open' (default) -> open in new tab; 'download' -> force download
+  const openAppointmentPdf = async (appt, mode = 'open') => {
     if (!appt) { toast({ title: 'No appointment selected', status: 'info' }); return; }
     const pdfVal = appt.pdf_url;
     const fallbackName = appt.appointment_number || appt.appointmentNumber || appt.weighbridge_number || appt.id;
+    const filenameGuess = `${fallbackName || 'ticket'}.pdf`;
     try {
+      // 1) If pdfVal already full URL
+      if (pdfVal && /^https?:\/\//i.test(pdfVal)) {
+        if (mode === 'open') {
+          window.open(pdfVal, '_blank');
+          return;
+        }
+        // download mode: try to fetch then download blob (to preserve download attribute)
+        const blob = await fetchUrlAsBlob(pdfVal);
+        if (blob) {
+          triggerDownloadFromBlob(blob, filenameGuess);
+          return;
+        }
+        // fallback to opening the url if fetch fails
+        window.open(pdfVal, '_blank');
+        return;
+      }
+
+      // 2) try to resolve public or signed URL
       const resolved = await resolvePdfUrl(pdfVal, fallbackName);
       if (resolved) {
+        if (mode === 'open') {
+          window.open(resolved, '_blank');
+          return;
+        }
+        // download mode: try to fetch resolved URL and download
+        const blob = await fetchUrlAsBlob(resolved);
+        if (blob) {
+          triggerDownloadFromBlob(blob, filenameGuess);
+          return;
+        }
+        // fallback: open URL
         window.open(resolved, '_blank');
-      } else {
-        toast({ title: 'No PDF available', description: 'Could not find a PDF for this appointment in storage.', status: 'info' });
+        return;
       }
+
+      // 3) fallback: attempt to fetch blob directly from storage (download)
+      const fetched = await fetchBlobFromStorageCandidates(pdfVal, fallbackName);
+      if (fetched && fetched.blob) {
+        if (mode === 'open') {
+          // open blob in new tab
+          const objUrl = URL.createObjectURL(fetched.blob);
+          window.open(objUrl, '_blank');
+          // revoke after short time
+          setTimeout(() => URL.revokeObjectURL(objUrl), 1000 * 8);
+          return;
+        }
+        // download mode
+        triggerDownloadFromBlob(fetched.blob, fetched.filename || filenameGuess);
+        return;
+      }
+
+      toast({ title: 'No PDF available', description: 'Could not find a PDF for this appointment in storage.', status: 'info' });
     } catch (err) {
       console.error('openAppointmentPdf', err);
       toast({ title: 'Could not open PDF', description: err?.message || 'Unexpected', status: 'error' });
@@ -1113,7 +1235,8 @@ export default function AppointmentsPage() {
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleAppointment(a)}>Export</MenuItem>
                               <MenuItem icon={<FaCheck />} onClick={() => markAsCompleted(a)}>Mark Completed</MenuItem>
                               <MenuItem icon={<FaListAlt />} onClick={() => openDrawer(a)}>View T1s</MenuItem>
-                              <MenuItem icon={<FaFilePdf />} onClick={() => openAppointmentPdf(a)}>Download / Open PDF</MenuItem>
+                              <MenuItem icon={<FaEye />} onClick={() => openAppointmentPdf(a, 'open')}>Open PDF</MenuItem>
+                              <MenuItem icon={<FaDownload />} onClick={() => openAppointmentPdf(a, 'download')}>Download PDF</MenuItem>
                               <MenuDivider />
                               <MenuItem icon={<FaClone />} onClick={() => cloneAppointment(a)}>Clone</MenuItem>
                               <MenuItem icon={<FaTrash />} onClick={() => deleteAppointment(a)}>Delete</MenuItem>
@@ -1205,14 +1328,18 @@ export default function AppointmentsPage() {
                 <Box>
                   <Heading size="sm">Files / PDF</Heading>
                   {activeAppt?.pdf_url ? (
-                    <Box>
-                      <Button leftIcon={<FaFilePdf />} size="sm" onClick={() => openAppointmentPdf(activeAppt)}>Open PDF</Button>
-                    </Box>
+                    <HStack spacing={3}>
+                      <Button leftIcon={<FaEye />} size="sm" onClick={() => openAppointmentPdf(activeAppt, 'open')}>Open PDF</Button>
+                      <Button leftIcon={<FaDownload />} size="sm" onClick={() => openAppointmentPdf(activeAppt, 'download')}>Download PDF</Button>
+                    </HStack>
                   ) : (
                     // If no explicit pdf_url, still try to resolve by appointment number
                     <Box>
-                      <Button leftIcon={<FaFilePdf />} size="sm" onClick={() => openAppointmentPdf(activeAppt)}>Try Open by Appointment Number</Button>
-                      <Text mt={2} color="gray.500">If a PDF exists in storage (appointments bucket) we will attempt to open it.</Text>
+                      <HStack spacing={3}>
+                        <Button leftIcon={<FaEye />} size="sm" onClick={() => openAppointmentPdf(activeAppt, 'open')}>Try Open by Appointment Number</Button>
+                        <Button leftIcon={<FaDownload />} size="sm" onClick={() => openAppointmentPdf(activeAppt, 'download')}>Try Download</Button>
+                      </HStack>
+                      <Text mt={2} color="gray.500">If a PDF exists in storage (appointments bucket) we will attempt to open/download it.</Text>
                     </Box>
                   )}
                 </Box>
