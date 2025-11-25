@@ -1109,6 +1109,15 @@ export default function SADDeclaration() {
               <AnimatePresence>
                 {pagedSads.map((s) => {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
+                  // discrepancy color rules required:
+                  // red when discharged > declared (discrepancy > 0)
+                  // blue when discharged < declared (discrepancy < 0)
+                  // green when equal (discrepancy === 0)
+                  let discColor = 'green.600';
+                  if (discrepancy > 0) discColor = 'red.600';
+                  else if (discrepancy < 0) discColor = 'blue.600';
+                  else discColor = 'green.600';
+
                   const color = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
                   const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
@@ -1129,7 +1138,7 @@ export default function SADDeclaration() {
                         </VStack>
                       </Td>
                       <Td data-label="Discrepancy">
-                        <Text color={discrepancy === 0 ? 'green.600' : (discrepancy > 0 ? 'red.600' : 'orange.600')}>
+                        <Text color={discColor} fontWeight="bold">
                           {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
                         </Text>
                       </Td>
@@ -1174,6 +1183,23 @@ export default function SADDeclaration() {
                   <>
                     <Text mb={2}>Declared weight: <strong>{Number(detailsData.sad.declared_weight || 0).toLocaleString()} kg</strong></Text>
                     <Text mb={2}>Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong></Text>
+
+                    {/* show colored discrepancy */}
+                    {(() => {
+                      const recorded = Number(detailsData.sad.total_recorded_weight || 0);
+                      const declared = Number(detailsData.sad.declared_weight || 0);
+                      const diff = recorded - declared;
+                      let color = 'green.600';
+                      if (diff > 0) color = 'red.600';
+                      else if (diff < 0) color = 'blue.600';
+                      else color = 'green.600';
+                      return (
+                        <Text mb={3} color={color} fontWeight="bold">
+                          Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
+                        </Text>
+                      );
+                    })()}
+
                     <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
                     <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
                     <Text mb={2}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleString() : 'Not recorded'}</strong></Text>
@@ -1228,7 +1254,7 @@ export default function SADDeclaration() {
                   else if (diff < 0) color = 'blue.600';
                   else color = 'green.600';
                   return (
-                    <Text mb={3} color={color}>
+                    <Text mb={3} color={color} fontWeight="bold">
                       Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
                     </Text>
                   );
