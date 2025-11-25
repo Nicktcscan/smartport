@@ -1146,7 +1146,7 @@ export default function SADDeclaration() {
                         </VStack>
                       </Td>
                       <Td data-label="Discrepancy">
-                        <Text color={discColor}>
+                        <Text color={discColor} fontWeight="bold">
                           {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
                         </Text>
                       </Td>
@@ -1206,7 +1206,7 @@ export default function SADDeclaration() {
                       else if (diff < 0) color = 'blue.600';
                       else color = 'green.600';
                       return (
-                        <Text mb={3} color={color}>
+                        <Text mb={3} color={color} fontWeight="bold">
                           Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
                         </Text>
                       );
@@ -1265,7 +1265,7 @@ export default function SADDeclaration() {
                   else if (diff < 0) color = 'blue.600';
                   else color = 'green.600';
                   return (
-                    <Text mb={3} color={color}>
+                    <Text mb={3} color={color} fontWeight="bold">
                       Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
                     </Text>
                   );
