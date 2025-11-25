@@ -715,7 +715,7 @@ export default function AppointmentPage() {
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
     };
   }
 
@@ -919,42 +919,23 @@ export default function AppointmentPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper (writes to bucket 'appointments') ----------
+  // ---------- PDF upload helper (store in bucket 'appointments' root) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
     if (!blob) return null;
+    const filename = `WeighbridgeTicket-${appointmentNumber || `appt-${Date.now()}`}.pdf`;
     try {
-      const filename = `${appointmentNumber || `appt-${Date.now()}`}.pdf`;
-      const path = `tickets/${filename}`; // inside bucket 'appointments' we store in tickets/
       // convert blob to File (browser)
       const file = new File([blob], filename, { type: 'application/pdf' });
-
-      // upload to bucket named 'appointments'
-      const { error: uploadError } = await supabase.storage.from('appointments').upload(path, file, { upsert: true });
+      // Upload to bucket named 'appointments' at root (no tickets/ subfolder)
+      const { error: uploadError } = await supabase.storage.from('appointments').upload(filename, file, { upsert: true });
       if (uploadError) {
         console.warn('uploadPdfToStorage upload error', uploadError);
         return null;
       }
-
-      // try to get a public URL
-      try {
-        const { data: urlData } = supabase.storage.from('appointments').getPublicUrl(path);
-        const publicUrl = urlData?.publicUrl || urlData?.public_url || null;
-        if (publicUrl) return publicUrl;
-      } catch (e) {
-        console.warn('getPublicUrl failed', e);
-      }
-
-      // fallback: try to create a signed URL (7 days) if public not available
-      try {
-        const { data: signedData, error: signedErr } = await supabase.storage.from('appointments').createSignedUrl(path, 60 * 60 * 24 * 7);
-        if (!signedErr && signedData && signedData.signedUrl) {
-          return signedData.signedUrl;
-        }
-      } catch (e) {
-        console.warn('createSignedUrl failed', e);
-      }
-
-      return null;
+      // get public url
+      const { data: urlData } = supabase.storage.from('appointments').getPublicUrl(filename);
+      const publicUrl = urlData?.publicUrl || null;
+      return publicUrl;
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
       return null;
@@ -1060,15 +1041,11 @@ export default function AppointmentPage() {
         // Download client-side
         downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
 
-        // Try upload to Supabase storage and update appointment.pdf_url
+        // Try upload to Supabase storage (bucket 'appointments') and update appointment.pdf_url
         try {
           const publicUrl = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
-            try {
-              await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
-            } catch (e) {
-              console.warn('storing pdf_url in db failed', e);
-            }
+            await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           }
         } catch (e) {
           console.warn('PDF storage/update failed', e);
