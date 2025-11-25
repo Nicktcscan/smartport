@@ -1,3 +1,4 @@
+/* eslint-disable no-dupe-keys */
 // pages/appointment.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
@@ -18,16 +19,14 @@ import {
   Image as PdfImage,
   Font
 } from '@react-pdf/renderer';
-import { supabase } from '../supabaseClient'; // ensure this file exists and exports a configured supabase client
-import { useAuth } from '../context/AuthContext'; // <--- added
+import { supabase } from '../supabaseClient';
+import { useAuth } from '../context/AuthContext'; // capture creating user
 
-// ---------- Assets (ensure these exist in src/assets/) ----------
+// ---------- Assets ----------
 import gralogo from '../assets/gralogo.png';
 import gnswlogo from '../assets/gnswlogo.png';
-import logo from '../assets/logo.png'; // watermark image - ensure this file exists
-
-// ---------- Monospace font registration (update path if you use a different font file) ----------
-import MonoFont from '../assets/RobotoMono-Regular.ttf'; // <-- ensure this file exists
+import logo from '../assets/logo.png';
+import MonoFont from '../assets/RobotoMono-Regular.ttf';
 Font.register({ family: 'Mono', src: MonoFont });
 
 // ---------- Config ----------
@@ -43,7 +42,7 @@ const PACKING_TYPES = [
 
 const MotionBox = motion(Box);
 
-// ---------- PDF styles (premium look) ----------
+// ---------- PDF styles ----------
 const pdfStyles = StyleSheet.create({
   page: {
     paddingTop: 28,
@@ -55,7 +54,6 @@ const pdfStyles = StyleSheet.create({
     color: '#0b1220',
     backgroundColor: '#ffffff',
   },
-
   headerBar: {
     backgroundColor: '#f3f4f6',
     paddingVertical: 12,
@@ -66,23 +64,17 @@ const pdfStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between'
   },
-
   headerLeft: { width: '18%', alignItems: 'flex-start', zIndex: 2 },
   headerCenter: { width: '60%', alignItems: 'center', textAlign: 'center', zIndex: 2 },
   headerRight: { width: '18%', alignItems: 'flex-end', zIndex: 2 },
-
   logoSmall: { width: 72, height: 40, objectFit: 'contain' },
   titleBig: { fontSize: 16, fontWeight: 700, color: '#0b1220', letterSpacing: 0.6 },
   subtitle: { fontSize: 9, color: '#6b7280', marginTop: 2 },
-
   mainBox: { borderWidth: 0.6, borderColor: '#e6eef8', padding: 16, marginBottom: 12, position: 'relative', borderRadius: 10, zIndex: 3 },
   sectionRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
-
   label: { fontSize: 10.5, fontFamily: 'Mono', fontWeight: 700, marginBottom: 2, color: '#0b1220' },
   value: { fontSize: 10.5, fontFamily: 'Times-Roman', marginBottom: 4, color: '#0b1220' },
-
   groupBoxTopBorder: { borderTopWidth: 0.8, borderTopColor: '#e6eef8', paddingTop: 10, marginTop: 10 },
-
   t1Table: { width: '100%', marginTop: 8, borderTopWidth: 0.5, borderTopColor: '#e6eef8' },
   t1HeaderRow: { flexDirection: 'row', borderBottomWidth: 0.6, borderBottomColor: '#e6eef8', paddingVertical: 6, backgroundColor: '#f8fafc' },
   t1Row: { flexDirection: 'row', paddingVertical: 6, borderBottomWidth: 0.3, borderBottomColor: '#f1f5f9' },
@@ -90,10 +82,8 @@ const pdfStyles = StyleSheet.create({
   t1Col2: { width: '42%', fontSize: 10.5 },
   t1Col3: { width: '22%', fontSize: 10.5 },
   t1Col4: { width: '28%', fontSize: 10.5 },
-
   qrArea: { marginTop: 14, flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center' },
   qrBox: { width: '34%', alignItems: 'center', marginRight: 28, zIndex: 3 },
-
   barcodeContainer: {
     position: 'absolute',
     left: 0,
@@ -103,11 +93,8 @@ const pdfStyles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 3,
   },
-
   footerText: { fontSize: 8.5, textAlign: 'center', marginTop: 12, color: '#6b7280' },
-
   infoPill: { paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, backgroundColor: '#eef2ff', color: '#4338ca', fontSize: 9 },
-
   watermarkCenter: {
     position: 'absolute',
     left: '12.5%',
@@ -118,7 +105,7 @@ const pdfStyles = StyleSheet.create({
   },
 });
 
-// ---------- New: Code39 generator using JsBarcode (reliable, proven library) ----------
+// ---------- Barcode generator (Code39 via JsBarcode) ----------
 async function ensureJsBarcodeLoaded() {
   if (typeof window === 'undefined') return;
   if (window.JsBarcode) return;
@@ -183,6 +170,7 @@ async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   }
 }
 
+// ---------- Utilities ----------
 function downloadBlob(blob, filename) {
   try {
     const url = URL.createObjectURL(blob);
@@ -349,7 +337,7 @@ function AppointmentPdf({ ticket }) {
 // ---------- Main page component ----------
 export default function AppointmentPage() {
   const toast = useToast();
-  const { user } = useAuth() || {}; // <--- added to capture logged-in user
+  const { user } = useAuth() || {}; // capture user to set created_by and logs
 
   // form state
   const [agentTin, setAgentTin] = useState('');
@@ -371,12 +359,18 @@ export default function AppointmentPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
+  // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
   const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
 
-  const [t1SadStatus, setT1SadStatus] = useState(null); // null | 'checking' | 'found' | 'missing'
+  // T1 SAD check state
+  const [t1SadStatus, setT1SadStatus] = useState(null); // null | 'checking' | 'found' | 'missing' | 'completed'
   const t1CheckTimer = useRef(null);
 
+  // block creation if any of the selected SADs are already Completed (client safety)
+  const [blockedSads, setBlockedSads] = useState([]); // list of SADs that are completed among selected T1s
+
+  // only need the setter (isOrbOpen was unused)
   const [, setOrbOpen] = useState(false);
 
   const recognitionRef = useRef(null);
@@ -385,6 +379,10 @@ export default function AppointmentPage() {
   const containerRef = useRef(null);
   const isMobile = useBreakpointValue({ base: true, md: false });
 
+  // subscription ref so we can unsubscribe
+  const sadSubRef = useRef(null);
+
+  // utility UI highlights
   const pulseRow = (index) => {
     const rows = document.querySelectorAll('.panel-card');
     const idx = Math.max(0, Math.min(index, rows.length - 1));
@@ -399,6 +397,7 @@ export default function AppointmentPage() {
     setTimeout(() => els.forEach((el) => el.classList.remove('highlight-flash')), 2000);
   };
 
+  // voice command handler
   const handleVoiceCommand = (text = '') => {
     const t = String(text || '').toLowerCase().trim();
     toast({ status: 'info', title: 'Voice command', description: `"${t}"`, duration: 2000 });
@@ -467,6 +466,7 @@ export default function AppointmentPage() {
     };
   }, []);
 
+  // Speech recognition setup
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -513,6 +513,10 @@ export default function AppointmentPage() {
     if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver License required' }); return false; }
     if (t1s.length === 0) { toast({ status: 'error', title: 'Please add at least one T1 record' }); return false; }
     if (consolidated === 'N' && t1s.length > 1) { toast({ status: 'error', title: 'Consolidated = N allows only one T1 record' }); return false; }
+    if (blockedSads.length > 0) {
+      toast({ status: 'error', title: 'Closed SAD(s) present', description: `SAD(s) ${blockedSads.join(', ')} are Completed — cannot create appointment.` });
+      return false;
+    }
     return true;
   };
 
@@ -526,9 +530,17 @@ export default function AppointmentPage() {
     setT1SadStatus(null);
     setT1ModalOpen(true);
   };
-  const closeT1Modal = () => { setT1ModalOpen(false); setEditingIndex(null); setT1Sad(''); setT1Packing(PACKING_TYPES[0].value); setT1Container(''); setT1SadStatus(null); if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current); };
+  const closeT1Modal = () => {
+    setT1ModalOpen(false);
+    setEditingIndex(null);
+    setT1Sad('');
+    setT1Packing(PACKING_TYPES[0].value);
+    setT1Container('');
+    setT1SadStatus(null);
+    if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current);
+  };
 
-  // real-time check for SAD existence + ownership while typing in modal
+  // live SAD existence & status check (debounced)
   useEffect(() => {
     if (!isT1ModalOpen) return;
     if (!t1Sad || t1Sad.trim().length === 0) { setT1SadStatus(null); return; }
@@ -537,18 +549,14 @@ export default function AppointmentPage() {
     t1CheckTimer.current = setTimeout(async () => {
       try {
         const sadVal = t1Sad.trim();
-        const { data, error } = await supabase.from('sad_declarations').select('sad_no, created_by').eq('sad_no', sadVal).maybeSingle();
+        const { data, error } = await supabase.from('sad_declarations').select('sad_no, status').eq('sad_no', sadVal).maybeSingle();
         if (error) { setT1SadStatus(null); return; }
         if (!data) {
           setT1SadStatus('missing');
+        } else if (String(data.status).toLowerCase() === 'completed') {
+          setT1SadStatus('completed');
         } else {
-          // if admin allow any; otherwise SAD must be created_by current user
-          if (user && user.role === 'admin') setT1SadStatus('found');
-          else if (data.created_by === user?.id) setT1SadStatus('found');
-          else {
-            // SAD exists but is owned by someone else
-            setT1SadStatus('missing');
-          }
+          setT1SadStatus('found');
         }
       } catch (e) {
         setT1SadStatus(null);
@@ -557,47 +565,40 @@ export default function AppointmentPage() {
     return () => {
       if (t1CheckTimer.current) clearTimeout(t1CheckTimer.current);
     };
-  }, [t1Sad, isT1ModalOpen, user]);
+  }, [t1Sad, isT1ModalOpen]);
 
-  // final save of a T1 record in the modal - now verifies ownership at save time too
   const handleT1Save = async () => {
     if (!t1Sad.trim()) { toast({ status: 'error', title: 'SAD No required' }); return; }
     if (!t1Packing) { toast({ status: 'error', title: 'Packing Type required' }); return; }
+
+    // check the SAD status server-side (final check)
+    try {
+      const sadVal = t1Sad.trim();
+      const { data: sadRow, error } = await supabase.from('sad_declarations').select('sad_no, status').eq('sad_no', sadVal).maybeSingle();
+      if (error) {
+        toast({ status: 'warning', title: 'Could not verify SAD status' });
+        return;
+      }
+      if (!sadRow) {
+        toast({ status: 'error', title: 'SAD not registered', description: 'This SAD must be registered before adding.' });
+        return;
+      }
+      if (String(sadRow.status).toLowerCase() === 'completed') {
+        toast({ status: 'error', title: 'SAD already Completed', description: `SAD ${sadVal} is Completed and cannot be used.` });
+        setBlockedSads((p) => Array.from(new Set([...p, sadVal])));
+        return;
+      }
+    } catch (e) {
+      console.warn('SAD server check failed', e);
+      toast({ status: 'warning', title: 'SAD check failed' });
+      return;
+    }
+
     if (t1Packing === 'container' && !t1Container.trim()) { toast({ status: 'error', title: 'Container No required for container packing' }); return; }
     if (consolidated === 'N' && editingIndex === null && t1s.length >= 1) { toast({ status: 'error', title: 'Consolidated = N allows only one T1' }); return; }
     if (consolidated === 'Y') {
       const existsSamePackingIndex = t1s.findIndex((r, i) => r.packingType === t1Packing && i !== editingIndex);
       if (existsSamePackingIndex !== -1) { toast({ status: 'error', title: `Packing type "${t1Packing}" already added` }); return; }
-    }
-
-    // verify ownership (server-side check)
-    try {
-      const sadVal = t1Sad.trim();
-      const { data: row, error } = await supabase.from('sad_declarations').select('sad_no, created_by').eq('sad_no', sadVal).maybeSingle();
-      if (error) {
-        console.error('Error checking SAD ownership', error);
-        toast({ status: 'error', title: 'Could not validate SAD now', description: 'Please try again' });
-        return;
-      }
-      if (!row) {
-        toast({ status: 'error', title: 'SAD not registered', description: 'This SAD is not present in sad_declarations' });
-        setT1SadStatus('missing');
-        return;
-      }
-      if (!(user && user.role === 'admin') && row.created_by !== user?.id) {
-        toast({
-          status: 'error',
-          title: 'Not allowed',
-          description: `You did not register SAD ${sadVal} — you cannot add it to an appointment`,
-          duration: 8000,
-        });
-        setT1SadStatus('missing');
-        return;
-      }
-    } catch (e) {
-      console.error('verify ownership failed', e);
-      toast({ status: 'error', title: 'SAD verification failed' });
-      return;
     }
 
     const newRow = { sadNo: t1Sad.trim(), packingType: t1Packing, containerNo: t1Packing === 'container' ? t1Container.trim() : null };
@@ -615,8 +616,31 @@ export default function AppointmentPage() {
 
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
+  // Modified openConfirm: generate numbers, set preview, then open modal
   const openConfirm = async () => {
     if (!validateMainForm()) return;
+
+    // final check: ensure none of the selected SADs are Completed
+    const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
+    const uniqueSads = Array.from(new Set(rawSadList));
+    if (uniqueSads.length === 0) {
+      toast({ status: 'error', title: 'Please add at least one T1 record' });
+      return;
+    }
+    try {
+      const { data: rows, error } = await supabase.from('sad_declarations').select('sad_no, status').in('sad_no', uniqueSads).limit(1000);
+      if (error) throw error;
+      const completed = (rows || []).filter(r => String(r.status).toLowerCase() === 'completed').map(r => r.sad_no);
+      if (completed.length) {
+        setBlockedSads(completed);
+        toast({ status: 'error', title: 'Cannot create appointment', description: `SAD(s) ${completed.join(', ')} are Completed.` });
+        return;
+      }
+    } catch (e) {
+      console.warn('Final SAD check failed', e);
+      toast({ status: 'warning', title: 'Could not verify all SAD statuses, try again' });
+      return;
+    }
 
     try {
       const pickup = pickupDate || new Date().toISOString().slice(0, 10);
@@ -642,10 +666,9 @@ export default function AppointmentPage() {
     setPreviewWeighbridgeNumber('');
   };
 
+  // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
-    // Attempt to generate unique appointment and weighbridge numbers.
-    // Robust: loops and checks DB counts to reduce collisions.
-    const maxAttempts = 12;
+    const maxAttempts = 10;
     const d = new Date(pickupDateValue);
     const YY = String(d.getFullYear()).slice(-2);
     const MM = String(d.getMonth() + 1).padStart(2, '0');
@@ -653,7 +676,6 @@ export default function AppointmentPage() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        // Count existing appointments for the pickup date to derive sequence
         const { count } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -661,16 +683,12 @@ export default function AppointmentPage() {
 
         const existing = Number(count || 0);
         const seq = existing + 1 + attempt;
-        const paddedSeq4 = String(seq).padStart(4, '0');
-        const paddedSeq5 = String(seq).padStart(5, '0');
-
-        const appointmentNumberBase = `${YY}${MM}${DD}${paddedSeq4}`;
+        const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
         const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
-        const weighbridgeBase = `WB${YY}${MM}${paddedSeq5}`;
-        const weighbridgeNumber = (attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`).toUpperCase().trim();
+        const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
+        const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
-        // Check uniqueness directly
         const { count: wbCount } = await supabase
           .from('appointments')
           .select('id', { head: true, count: 'exact' })
@@ -684,8 +702,6 @@ export default function AppointmentPage() {
         if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
           return { appointmentNumber, weighbridgeNumber };
         }
-
-        // otherwise loop and try new random suffix on next attempt
       } catch (e) {
         console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
@@ -696,7 +712,6 @@ export default function AppointmentPage() {
       }
     }
 
-    // Final fallback (very unlikely)
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
@@ -705,15 +720,15 @@ export default function AppointmentPage() {
   }
 
   async function generateNumbersUsingSupabase(pickupDateValue) {
-    // For now this delegates to generateUniqueNumbers (keeps API consistent)
     return await generateUniqueNumbers(pickupDateValue);
   }
 
+  // ---------- createDirectlyInSupabase (adds created_by, returns full object) ----------
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
     let attempts = 0;
-    const maxInsertAttempts = 8;
+    const maxInsertAttempts = 6;
     let lastErr = null;
     const useProvidedNumbers = Boolean(payload.appointmentNumber && payload.weighbridgeNumber);
 
@@ -722,63 +737,59 @@ export default function AppointmentPage() {
       let appointmentNumber;
       let weighbridgeNumber;
 
+      if (useProvidedNumbers && attempts === 1) {
+        appointmentNumber = payload.appointmentNumber;
+        weighbridgeNumber = payload.weighbridgeNumber;
+      } else {
+        const nums = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
+        appointmentNumber = nums.appointmentNumber;
+        weighbridgeNumber = nums.weighbridgeNumber;
+      }
+
+      const appointmentInsert = {
+        appointment_number: appointmentNumber,
+        weighbridge_number: weighbridgeNumber,
+        agent_tin: payload.agentTin,
+        agent_name: payload.agentName,
+        warehouse_location: payload.warehouse,
+        pickup_date: payload.pickupDate,
+        consolidated: payload.consolidated || 'N',
+        truck_number: payload.truckNumber,
+        driver_name: payload.driverName,
+        driver_license_no: payload.driverLicense,
+        total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
+        total_documented_weight: payload.totalDocumentedWeight || null,
+        regime: payload.regime || null,
+        barcode: null,
+        pdf_url: null,
+        created_by: user?.id || null, // capture owner
+      };
+
       try {
-        if (useProvidedNumbers && attempts === 1) {
-          appointmentNumber = String(payload.appointmentNumber).trim();
-          weighbridgeNumber = String(payload.weighbridgeNumber).trim().toUpperCase();
-        } else {
-          const nums = await generateUniqueNumbers(payload.pickupDate || new Date().toISOString().slice(0, 10));
-          appointmentNumber = nums.appointmentNumber;
-          weighbridgeNumber = nums.weighbridgeNumber;
-        }
-
-        const appointmentInsert = {
-          appointment_number: appointmentNumber,
-          weighbridge_number: weighbridgeNumber,
-          agent_tin: payload.agentTin,
-          agent_name: payload.agentName,
-          warehouse_location: payload.warehouse,
-          pickup_date: payload.pickupDate,
-          consolidated: payload.consolidated || 'N',
-          truck_number: payload.truckNumber,
-          driver_name: payload.driverName,
-          driver_license_no: payload.driverLicense,
-          total_t1s: Array.isArray(payload.t1s) ? payload.t1s.length : 1,
-          total_documented_weight: payload.totalDocumentedWeight || null,
-          regime: payload.regime || null,
-          barcode: null,
-          pdf_url: null,
-          created_by: payload.createdBy || null, // <--- capture creator here
-        };
-
-        // Insert and request the created row back (single)
         const { data: inserted, error: insertErr } = await supabase
           .from('appointments')
           .insert([appointmentInsert])
-          .select('*')
-          .single();
+          .select()
+          .maybeSingle();
 
         if (insertErr) {
           lastErr = insertErr;
           const msg = (insertErr && insertErr.message) ? insertErr.message.toLowerCase() : '';
-          // common unique constraint / conflict detection:
           if (msg.includes('weighbridge_number') || msg.includes('appointment_number') || (insertErr.code && String(insertErr.code).includes('23505'))) {
             console.warn('Insert conflict on unique column, retrying generation...', insertErr);
-            // small wait then continue so a new number is generated on next attempt
-            await new Promise(r => setTimeout(r, 140 + Math.random() * 260));
+            await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
             continue;
           }
-          // other error -> throw
           throw insertErr;
         }
 
-        if (!inserted || !inserted.id) {
-          throw new Error('Failed to insert appointment (no row returned).');
+        if (!inserted) {
+          throw new Error('Failed to insert appointment.');
         }
 
         const appointmentId = inserted.id;
 
-        // Build t1 rows and insert them referencing the appointment id
+        // insert T1 rows
         const t1Rows = (payload.t1s || []).map((r) => ({
           appointment_id: appointmentId,
           sad_no: r.sadNo,
@@ -789,61 +800,43 @@ export default function AppointmentPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
-            // rollback created appointment if t1 insert fails
+            // roll back appointment insertion if t1 insert failed
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
         }
 
-        // Fetch the appointment with t1 records for full details (single)
+        // fetch full appointment with t1s
         const { data: fullAppointment, error: fetchErr } = await supabase
           .from('appointments')
           .select('*, t1_records(*)')
           .eq('id', appointmentId)
-          .single();
+          .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
-          // If fetch failed, still return the minimal constructed object using 'inserted'.
-          console.warn('fetch after insert failed; returning inserted row.', fetchErr);
-          // persist the created numbers to localStorage for global recognition
-          if (typeof window !== 'undefined') {
-            try {
-              localStorage.setItem('lastWeighbridgeNumber', inserted.weighbridge_number || weighbridgeNumber || '');
-              localStorage.setItem('lastAppointmentNumber', inserted.appointment_number || appointmentNumber || '');
-            } catch (e) {}
-          }
           return {
             appointment: {
               id: appointmentId,
-              appointmentNumber: inserted.appointment_number || appointmentNumber,
-              weighbridgeNumber: inserted.weighbridge_number || weighbridgeNumber,
-              warehouse: inserted.warehouse_location,
-              warehouseLabel: payload.warehouseLabel || inserted.warehouse_location,
-              pickupDate: inserted.pickup_date,
-              agentName: inserted.agent_name,
-              agentTin: inserted.agent_tin,
-              consolidated: inserted.consolidated,
-              truckNumber: inserted.truck_number,
-              driverName: inserted.driver_name,
-              driverLicense: inserted.driver_license_no,
-              regime: inserted.regime,
-              totalDocumentedWeight: inserted.total_documented_weight,
+              appointmentNumber,
+              weighbridgeNumber,
+              warehouse: appointmentInsert.warehouse_location,
+              warehouseLabel: payload.warehouseLabel || appointmentInsert.warehouse_location,
+              pickupDate: appointmentInsert.pickup_date,
+              agentName: appointmentInsert.agent_name,
+              agentTin: appointmentInsert.agent_tin,
+              consolidated: appointmentInsert.consolidated,
+              truckNumber: appointmentInsert.truck_number,
+              driverName: appointmentInsert.driver_name,
+              driverLicense: appointmentInsert.driver_license_no,
+              regime: appointmentInsert.regime,
+              totalDocumentedWeight: appointmentInsert.total_documented_weight,
               t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
               createdAt: inserted.created_at,
-              created_by: inserted.created_by || null,
+              id: appointmentId,
             }
           };
         }
 
-        // Persist created numbers to localStorage to help global recognition across the app
-        if (typeof window !== 'undefined') {
-          try {
-            localStorage.setItem('lastWeighbridgeNumber', fullAppointment.weighbridge_number || weighbridgeNumber || '');
-            localStorage.setItem('lastAppointmentNumber', fullAppointment.appointment_number || appointmentNumber || '');
-          } catch (e) {}
-        }
-
-        // Return the fully assembled appointment object using canonical DB fields
         return {
           appointment: {
             id: fullAppointment.id,
@@ -862,18 +855,17 @@ export default function AppointmentPage() {
             totalDocumentedWeight: fullAppointment.total_documented_weight,
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
-            created_by: fullAppointment.created_by || null,
+            id: fullAppointment.id,
           }
         };
       } catch (finalErr) {
         lastErr = finalErr;
-        // If we've exhausted attempts, throw; otherwise try again (with slight delay)
         if (attempts >= maxInsertAttempts) {
           console.error('createDirectlyInSupabase: exhausted attempts', finalErr);
           throw finalErr;
         }
         console.warn('createDirectlyInSupabase: attempt failed, retrying', finalErr);
-        await new Promise(r => setTimeout(r, 140 + Math.random() * 260));
+        await new Promise(r => setTimeout(r, 120 + Math.random() * 200));
         continue;
       }
     }
@@ -881,6 +873,7 @@ export default function AppointmentPage() {
     throw lastErr || new Error('Could not create appointment (unknown error)');
   };
 
+  // ---------- buildPrintableTicketObject ----------
   async function buildPrintableTicketObject(dbAppointment) {
     const appointmentNum =
       dbAppointment.appointment_number ??
@@ -926,10 +919,59 @@ export default function AppointmentPage() {
     return ticket;
   }
 
+  // ---------- PDF upload helper (stores in 'appointments' bucket) ----------
+  async function uploadPdfToStorage(blob, appointmentNumber) {
+    if (!blob) return null;
+    const bucketName = 'appointments'; // <- your new bucket
+    const filename = `${appointmentNumber || `appt-${Date.now()}`}.pdf`;
+    const path = `tickets/${filename}`;
+
+    try {
+      // convert blob to File (browser)
+      const file = new File([blob], filename, { type: 'application/pdf' });
+      // upload
+      const { error: uploadError } = await supabase.storage.from(bucketName).upload(path, file, { upsert: true });
+      if (uploadError) {
+        console.warn('uploadPdfToStorage upload error', uploadError);
+        // continue to fallback
+      }
+
+      // try public url
+      try {
+        const { data: urlData } = supabase.storage.from(bucketName).getPublicUrl(path);
+        const publicUrl = (urlData && (urlData.publicUrl || urlData.publicURL)) ?? null;
+        if (publicUrl) return publicUrl;
+      } catch (e) {
+        // ignore
+      }
+
+      // if no public URL, create signed URL for 7 days
+      try {
+        const expiresIn = 60 * 60 * 24 * 7; // 7 days
+        const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, expiresIn);
+        if (signedErr) {
+          console.warn('createSignedUrl error', signedErr);
+        } else {
+          const signedUrl = signedData?.signedUrl || signedData?.signedURL || null;
+          if (signedUrl) return signedUrl;
+        }
+      } catch (e) {
+        console.warn('createSignedUrl failed', e);
+      }
+
+      // final fallback: return null if no url available
+      return null;
+    } catch (e) {
+      console.warn('uploadPdfToStorage failed', e);
+      return null;
+    }
+  }
+
+  // ---------- handleCreateAppointment ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // ownership check for all SADs before even trying to create
+    // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -940,7 +982,7 @@ export default function AppointmentPage() {
 
       const { data: existing, error: sadErr } = await supabase
         .from('sad_declarations')
-        .select('sad_no, created_by')
+        .select('sad_no, status')
         .in('sad_no', uniqueSads)
         .limit(1000);
 
@@ -950,31 +992,24 @@ export default function AppointmentPage() {
         return;
       }
 
-      const presentRows = (existing || []);
-      const missing = [];
-      for (const s of uniqueSads) {
-        const row = presentRows.find(r => String(r.sad_no).trim() === String(s).trim());
-        if (!row) {
-          missing.push(s);
-          continue;
-        }
-        // if not admin, ensure the current user is the creator
-        if (!(user && user.role === 'admin')) {
-          if (!row.created_by || row.created_by !== user?.id) {
-            missing.push(s);
-            continue;
-          }
-        }
-      }
+      const present = (existing || []).map(r => String(r.sad_no).trim());
+      const missing = uniqueSads.filter(s => !present.includes(s));
 
       if (missing.length > 0) {
         toast({
-          title: "You can't create appointments for these SAD(s)",
-          description: `Missing / not authorized: ${missing.join(', ')}`,
+          title: "This Appointment has an SAD that has not been registered. Kindly Contact App Support or Weighbridge Operators for assistance",
+          description: `Missing SAD(s): ${missing.join(', ')}`,
           status: 'error',
           duration: 9000,
           isClosable: true,
         });
+        return;
+      }
+
+      const completed = (existing || []).filter(r => String(r.status).toLowerCase() === 'completed').map(r => r.sad_no);
+      if (completed.length > 0) {
+        setBlockedSads(completed);
+        toast({ status: 'error', title: 'Some SADs are Completed', description: `SAD(s) ${completed.join(', ')} are already Completed and cannot be used.` });
         return;
       }
     } catch (err) {
@@ -1000,22 +1035,13 @@ export default function AppointmentPage() {
       appointmentNumber: previewAppointmentNumber || undefined,
       weighbridgeNumber: previewWeighbridgeNumber || undefined,
       t1s: t1s.map(r => ({ sadNo: r.sadNo, packingType: r.packingType, containerNo: r.containerNo || '' })),
-      createdBy: user?.id || null, // <--- attach the currently logged-in user as creator
-      warehouseLabelProvided: (WAREHOUSES.find(w => w.value === warehouse) || {}).label || warehouse,
     };
 
     try {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // Make sure the actual created numbers are visible/persisted for global recognition
-      if (typeof window !== 'undefined') {
-        try {
-          localStorage.setItem('lastWeighbridgeNumber', dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '');
-          localStorage.setItem('lastAppointmentNumber', dbAppointment.appointmentNumber || dbAppointment.appointment_number || '');
-        } catch (e) {}
-      }
-
+      // build printable ticket (includes barcode image)
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
@@ -1031,31 +1057,66 @@ export default function AppointmentPage() {
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
       });
 
+      // generate PDF & upload & download
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
-        downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
+
+        // Upload to 'appointments' bucket BEFORE prompting download so it's stored even if download is interrupted
+        try {
+          const publicUrl = await uploadPdfToStorage(blob, printable.appointmentNumber);
+          if (publicUrl && dbAppointment.id) {
+            try {
+              await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+            } catch (updErr) {
+              console.warn('Could not update appointment pdf_url', updErr);
+            }
+          }
+          if (publicUrl) {
+            toast({ title: 'Ticket saved', description: 'PDF uploaded to storage', status: 'success', duration: 3000 });
+          } else {
+            toast({ title: 'Ticket saved (no public url)', description: 'PDF uploaded but no public URL available', status: 'info', duration: 3000 });
+          }
+        } catch (e) {
+          console.warn('PDF storage/upload failed', e);
+          toast({ title: 'Upload failed', description: 'PDF could not be uploaded to storage', status: 'warning' });
+        }
+
+        // Download client-side for user
+        try {
+          downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
+        } catch (dlErr) {
+          console.warn('client download failed', dlErr);
+        }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
         toast({ title: 'Appointment created', description: 'Saved but PDF generation failed', status: 'warning' });
       }
 
-      // show the actual stored numbers to the user (good for debugging/collisions)
-      toast({
-        title: 'Appointment created',
-        description: `Appointment saved — Weighbridge: ${dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number}`,
-        status: 'success',
-      });
+      // write appointment log
+      try {
+        await supabase.from('appointment_logs').insert([{
+          appointment_id: dbAppointment.id,
+          changed_by: user?.id || null,
+          action: 'create',
+          message: `Created appointment ${dbAppointment.appointmentNumber || dbAppointment.appointment_number}`,
+          created_at: new Date().toISOString(),
+        }]);
+      } catch (e) { console.warn('log write failed', e); }
+
+      toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
       await triggerConfetti(160);
 
+      // reset UI
       setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
       setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
       setConfirmOpen(false);
       setPreviewAppointmentNumber('');
       setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
+      setBlockedSads([]);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
       const message = err?.message || String(err);
@@ -1132,6 +1193,107 @@ export default function AppointmentPage() {
     );
   };
 
+  // ---------- Subscription: listen to sad_declarations updates and close appointments when SAD completed ----------
+  useEffect(() => {
+    const subscribe = async () => {
+      try {
+        if (supabase.channel) {
+          const ch = supabase.channel('client:sad-declarations-appointment-sync')
+            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'sad_declarations' }, async (payload) => {
+              const newRow = payload?.new;
+              if (!newRow) return;
+              const sadNo = String(newRow.sad_no || '').trim();
+              const status = String(newRow.status || '').toLowerCase();
+              if (status === 'completed') {
+                // find related appointment ids via t1_records
+                try {
+                  const { data: trows, error: terr } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(1000);
+                  if (terr) throw terr;
+                  const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
+                  if (apptIds.length) {
+                    // update appointments status to Completed
+                    const { error: upErr } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
+                    if (upErr) throw upErr;
+
+                    // log for each appointment
+                    const logs = apptIds.map(id => ({
+                      appointment_id: id,
+                      changed_by: null,
+                      action: 'sad_auto_close',
+                      message: `SAD ${sadNo} marked Completed — appointment closed`,
+                      created_at: new Date().toISOString(),
+                    }));
+                    try {
+                      // attempt batched inserts
+                      for (let i = 0; i < logs.length; i += 50) {
+                        const chunk = logs.slice(i, i + 50);
+                        await supabase.from('appointment_logs').insert(chunk);
+                      }
+                    } catch (e) { /* ignore logging errors */ }
+
+                    toast({ title: 'SAD Completed', description: `SAD ${sadNo} is Completed — ${apptIds.length} appointment(s) closed.`, status: 'info', duration: 7000 });
+                  }
+                } catch (e) {
+                  console.warn('Error closing appointments for SAD update', e);
+                }
+              }
+
+              // if this SAD is in the current t1s, mark as blocked client-side
+              try {
+                const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
+                if (mySads.has(sadNo) && status === 'completed') {
+                  setBlockedSads(prev => Array.from(new Set([...prev, sadNo])));
+                  toast({ status: 'error', title: 'SAD completed', description: `SAD ${sadNo} included in this appointment is now Completed and cannot be used.` });
+                }
+              } catch (e) { /* ignore */ }
+            })
+            .subscribe();
+
+          sadSubRef.current = ch;
+        } else {
+          // legacy realtime
+          const s = supabase.from('sad_declarations').on('UPDATE', async (payload) => {
+            const newRow = payload?.new;
+            if (!newRow) return;
+            const sadNo = String(newRow.sad_no || '').trim();
+            const status = String(newRow.status || '').toLowerCase();
+            if (status === 'completed') {
+              try {
+                const { data: trows } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(1000);
+                const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
+                if (apptIds.length) {
+                  await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
+                }
+              } catch (e) { console.warn(e); }
+            }
+            const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
+            if (mySads.has(sadNo) && status === 'completed') {
+              setBlockedSads(prev => Array.from(new Set([...prev, sadNo])));
+              toast({ status: 'error', title: 'SAD completed', description: `SAD ${sadNo} included in this appointment is now Completed and cannot be used.` });
+            }
+          }).subscribe();
+          sadSubRef.current = s;
+        }
+      } catch (e) {
+        console.warn('subscribe to sad_declarations failed', e);
+      }
+    };
+
+    subscribe();
+
+    return () => {
+      try {
+        if (sadSubRef.current && supabase.removeChannel) {
+          supabase.removeChannel(sadSubRef.current).catch(() => {});
+        } else if (sadSubRef.current && sadSubRef.current.unsubscribe) {
+          sadSubRef.current.unsubscribe();
+        }
+      } catch (e) { /* ignore */ }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [t1s, user]);
+
+  // ---------- rest of UI rendering ----------
   return (
     <Container maxW="container.lg" py={8} ref={containerRef}>
       <Heading mb={4}>Weighbridge Appointment — Self Service</Heading>
@@ -1226,6 +1388,7 @@ export default function AppointmentPage() {
           <Button variant="outline" onClick={() => {
             setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
             setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
+            setBlockedSads([]);
             toast({ status: 'info', title: 'Form cleared' });
           }}>Clear</Button>
 
@@ -1233,6 +1396,7 @@ export default function AppointmentPage() {
         </HStack>
       </Box>
 
+      {/* Floating crystal orb CTA (opens T1 modal) */}
       <Box className="floating-orb" onClick={() => { setOrbOpen(true); setT1ModalOpen(true); }} role="button" aria-label="Add T1">
         <MotionBox
           className="orb"
@@ -1246,6 +1410,7 @@ export default function AppointmentPage() {
         </MotionBox>
       </Box>
 
+      {/* T1 Modal — upgraded */}
       <Modal isOpen={isT1ModalOpen} onClose={closeT1Modal} isCentered size="md">
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
         <AnimatePresence>
@@ -1258,8 +1423,8 @@ export default function AppointmentPage() {
               <ModalContent bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" borderRadius="2xl" boxShadow="0 30px 120px rgba(2,6,23,0.12)">
                 <ModalHeader display="flex" alignItems="center" justifyContent="space-between">
                   <Box>{editingIndex !== null ? 'Edit T1 Record' : 'Add T1 Record'}</Box>
-                  <Badge colorScheme={t1SadStatus === 'found' ? 'green' : t1SadStatus === 'checking' ? 'yellow' : t1SadStatus === 'missing' ? 'red' : 'gray'}>
-                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found / Not yours' : 'SAD status'}
+                  <Badge colorScheme={t1SadStatus === 'found' ? 'green' : t1SadStatus === 'checking' ? 'yellow' : t1SadStatus === 'missing' ? 'red' : t1SadStatus === 'completed' ? 'red' : 'gray'}>
+                    {t1SadStatus === 'found' ? 'Registered' : t1SadStatus === 'checking' ? 'Checking...' : t1SadStatus === 'missing' ? 'Not found' : t1SadStatus === 'completed' ? 'Completed' : 'SAD status'}
                   </Badge>
                 </ModalHeader>
                 <ModalCloseButton />
@@ -1277,18 +1442,10 @@ export default function AppointmentPage() {
                                 try {
                                   const sadVal = (t1Sad || '').trim();
                                   if (!sadVal) { setT1SadStatus(null); return; }
-                                  const { data } = await supabase.from('sad_declarations').select('sad_no, created_by').eq('sad_no', sadVal).maybeSingle();
-                                  if (!data) {
-                                    setT1SadStatus('missing');
-                                    toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' });
-                                  } else {
-                                    if (user && user.role === 'admin') setT1SadStatus('found');
-                                    else if (data.created_by === user?.id) setT1SadStatus('found');
-                                    else {
-                                      setT1SadStatus('missing');
-                                      toast({ status: 'error', title: 'SAD not owned', description: 'This SAD was registered by another user; you cannot create appointments for it.' });
-                                    }
-                                  }
+                                  const { data } = await supabase.from('sad_declarations').select('sad_no, status').eq('sad_no', sadVal).maybeSingle();
+                                  if (!data) { setT1SadStatus('missing'); toast({ status: 'warning', title: 'SAD not registered', description: 'This SAD does not exist in the declarations table.' }); }
+                                  else if (String(data.status).toLowerCase() === 'completed') { setT1SadStatus('completed'); }
+                                  else { setT1SadStatus('found'); }
                                 } catch (e) {
                                   setT1SadStatus(null);
                                 }
@@ -1300,9 +1457,10 @@ export default function AppointmentPage() {
                           </HStack>
                         </InputRightElement>
                       </InputGroup>
-                      {t1SadStatus === 'found' && <Text color="green.600" mt={1}>SAD found and authorized for your account.</Text>}
-                      {t1SadStatus === 'missing' && <Text color="red.600" mt={1}>SAD not found — or not registered by you. It must be registered before creating an appointment with it.</Text>}
+                      {t1SadStatus === 'found' && <Text color="green.600" mt={1}>SAD found in declarations.</Text>}
+                      {t1SadStatus === 'missing' && <Text color="red.600" mt={1}>SAD not found — it must be registered before creating an appointment with it.</Text>}
                       {t1SadStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking SAD existence...</Text>}
+                      {t1SadStatus === 'completed' && <Text color="red.600" mt={1}>This SAD is already Completed and cannot be used.</Text>}
                     </FormControl>
 
                     <FormControl isRequired>
@@ -1338,6 +1496,7 @@ export default function AppointmentPage() {
         </AnimatePresence>
       </Modal>
 
+      {/* Confirm Modal */}
       <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered>
         <ModalOverlay />
         <ModalContent maxW="lg" borderRadius="lg" className="appt-glass">

@@ -113,7 +113,7 @@ async function ensureJsBarcodeLoaded() {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js';
     s.onload = () => resolve();
-    s.onerror = (e) => reject(new Error('Failed to load JsBarcode'));
+    s.onerror = () => reject(new Error('Failed to load JsBarcode'));
     document.head.appendChild(s);
   });
 }
@@ -919,23 +919,48 @@ export default function AppointmentPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper ----------
+  // ---------- PDF upload helper (stores in 'appointments' bucket) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
     if (!blob) return null;
+    const bucketName = 'appointments'; // <- your new bucket
     const filename = `${appointmentNumber || `appt-${Date.now()}`}.pdf`;
     const path = `tickets/${filename}`;
+
     try {
       // convert blob to File (browser)
       const file = new File([blob], filename, { type: 'application/pdf' });
-      const { error: uploadError } = await supabase.storage.from('tickets').upload(path, file, { upsert: true });
+      // upload
+      const { error: uploadError } = await supabase.storage.from(bucketName).upload(path, file, { upsert: true });
       if (uploadError) {
         console.warn('uploadPdfToStorage upload error', uploadError);
-        return null;
+        // continue to fallback
       }
-      // get public url
-      const { data: urlData } = supabase.storage.from('tickets').getPublicUrl(path);
-      const publicUrl = urlData?.publicUrl || null;
-      return publicUrl;
+
+      // try public url
+      try {
+        const { data: urlData } = supabase.storage.from(bucketName).getPublicUrl(path);
+        const publicUrl = (urlData && (urlData.publicUrl || urlData.publicURL)) ?? null;
+        if (publicUrl) return publicUrl;
+      } catch (e) {
+        // ignore
+      }
+
+      // if no public URL, create signed URL for 7 days
+      try {
+        const expiresIn = 60 * 60 * 24 * 7; // 7 days
+        const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, expiresIn);
+        if (signedErr) {
+          console.warn('createSignedUrl error', signedErr);
+        } else {
+          const signedUrl = signedData?.signedUrl || signedData?.signedURL || null;
+          if (signedUrl) return signedUrl;
+        }
+      } catch (e) {
+        console.warn('createSignedUrl failed', e);
+      }
+
+      // final fallback: return null if no url available
+      return null;
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
       return null;
@@ -1032,23 +1057,37 @@ export default function AppointmentPage() {
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
       });
 
-      // generate PDF & download & upload
+      // generate PDF & upload & download
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
 
-        // Download client-side
-        downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
-
-        // Try upload to Supabase storage and update appointment.pdf_url
+        // Upload to 'appointments' bucket BEFORE prompting download so it's stored even if download is interrupted
         try {
           const publicUrl = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
-            await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+            try {
+              await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+            } catch (updErr) {
+              console.warn('Could not update appointment pdf_url', updErr);
+            }
+          }
+          if (publicUrl) {
+            toast({ title: 'Ticket saved', description: 'PDF uploaded to storage', status: 'success', duration: 3000 });
+          } else {
+            toast({ title: 'Ticket saved (no public url)', description: 'PDF uploaded but no public URL available', status: 'info', duration: 3000 });
           }
         } catch (e) {
-          console.warn('PDF storage/update failed', e);
+          console.warn('PDF storage/upload failed', e);
+          toast({ title: 'Upload failed', description: 'PDF could not be uploaded to storage', status: 'warning' });
+        }
+
+        // Download client-side for user
+        try {
+          downloadBlob(blob, `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`);
+        } catch (dlErr) {
+          console.warn('client download failed', dlErr);
         }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
