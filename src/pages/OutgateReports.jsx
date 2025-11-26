@@ -205,7 +205,8 @@ async function fetchAllPagedSupabase(tableName, selectCols = '*', orderBy = null
 export default function OutgateReports() {
   const { user } = useAuth();
   const [reports, setReports] = useState([]);
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchInput, setSearchInput] = useState(''); // typing buffer
+  const [searchTerm, setSearchTerm] = useState(''); // actual executed search
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [timeFrom, setTimeFrom] = useState('');
@@ -221,10 +222,9 @@ export default function OutgateReports() {
   const [selectedReport, setSelectedReport] = useState(null);
   const [docsForView, setDocsForView] = useState([]);
 
-  // SAD search results
+  // SAD search results (populated only when search is executed)
   const [sadResults, setSadResults] = useState([]);
   const [sadLoading, setSadLoading] = useState(false);
-  const sadDebounceRef = useRef(null);
 
   const [ticketStatusMap, setTicketStatusMap] = useState({});
   const [totalTransactions, setTotalTransactions] = useState(0);
@@ -394,26 +394,92 @@ export default function OutgateReports() {
     };
   }, [toast]);
 
-  useEffect(() => {
-    if (sadDebounceRef.current) {
-      clearTimeout(sadDebounceRef.current);
-      sadDebounceRef.current = null;
-    }
-
-    const q = (searchTerm || '').trim();
-    if (!q) {
+  // ---------- NEW: perform exact SAD search only when triggered ----------
+  const performSadSearch = async (q) => {
+    const qtrim = (q || '').toString().trim();
+    if (!qtrim) {
       setSadResults([]);
       setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+      setSearchTerm('');
       return;
     }
 
-    const fetchSadDeclaration = async () => {
+    setSadLoading(true);
+    try {
+      // Fetch tickets with exact sad_no (paged)
+      const ticketsData = await fetchAllPagedSupabase(
+        'tickets',
+        '*',
+        null,
+        false,
+        (qb) => qb.eq('sad_no', qtrim).order('date', { ascending: false })
+      );
+
+      // Deduplicate by ticket_no keeping latest by date
+      const dedupeMap = new Map();
+      (ticketsData || []).forEach((t) => {
+        const ticketNo = (t.ticket_no ?? t.ticketId ?? t.id ?? '').toString().trim();
+        if (!ticketNo) return;
+        const thisDate = new Date(t.date ?? t.submitted_at ?? t.created_at ?? 0).getTime();
+        const existing = dedupeMap.get(ticketNo);
+        if (!existing) dedupeMap.set(ticketNo, t);
+        else {
+          const existingDate = new Date(existing.date ?? existing.submitted_at ?? existing.created_at ?? 0).getTime();
+          if (thisDate >= existingDate) dedupeMap.set(ticketNo, t);
+        }
+      });
+
+      const deduped = Array.from(dedupeMap.values());
+
+      const mapped = deduped.map((t) => {
+        const ticketNo = t.ticket_no ?? (t.ticket_id ? String(t.ticket_id) : null);
+        const matchingOutgates = reports.filter((r) => r.ticketNo && String(r.ticketNo) === String(ticketNo));
+        let chosenOutgate = null;
+        if (matchingOutgates.length > 0) {
+          chosenOutgate = matchingOutgates.reduce((best, cur) => {
+            const bestT = best?.outgateDateTime ? new Date(best.outgateDateTime).getTime() : 0;
+            const curT = cur?.outgateDateTime ? new Date(cur.outgateDateTime).getTime() : 0;
+            return curT >= bestT ? cur : best;
+          }, matchingOutgates[0]);
+        }
+
+        const computed = computeWeights({
+          gross: t.gross,
+          tare: t.tare,
+          net: t.net,
+        });
+
+        return {
+          ticketId: t.ticket_id ?? t.id ?? ticketNo ?? `${Math.random()}`,
+          ticketNo,
+          sadNo: t.sad_no ?? t.sadNo ?? null,
+          date: chosenOutgate ? chosenOutgate.outgateDateTime : (t.date ?? t.submitted_at ?? t.created_at ?? null),
+          outgateRef: chosenOutgate ?? null,
+          truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
+          gross: computed.gross,
+          tare: computed.tare,
+          net: computed.net,
+          driver: t.driver ?? null,
+          raw: t,
+        };
+      });
+
+      mapped.sort((a, b) => {
+        const aT = a.date ? new Date(a.date).getTime() : 0;
+        const bT = b.date ? new Date(b.date).getTime() : 0;
+        return bT - aT;
+      });
+
+      setSadResults(mapped);
+
+      // Fetch the SAD declaration row for exact SAD
       try {
         const { data: sadRow, error } = await supabase
           .from('sad_declarations')
           .select('sad_no,declared_weight,status,total_recorded_weight,created_at')
-          .ilike('sad_no', `${q}`)
+          .eq('sad_no', qtrim)
           .maybeSingle();
+
         if (!error && sadRow) {
           setSadDeclaration({
             declaredWeight: sadRow.declared_weight != null ? Number(sadRow.declared_weight) : null,
@@ -429,101 +495,19 @@ export default function OutgateReports() {
         console.debug('Failed to fetch SAD declaration', err);
         setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
       }
-    };
 
-    sadDebounceRef.current = setTimeout(async () => {
-      setSadLoading(true);
+      setSearchTerm(qtrim);
+    } catch (err) {
+      console.error('SAD search failed', err);
+      toast({ title: 'SAD search failed', description: String(err), status: 'error', duration: 3000 });
+      setSadResults([]);
+      setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
+    } finally {
+      setSadLoading(false);
+    }
+  };
 
-      try {
-        // ---------- PAGED SAD tickets fetch ----------
-        // Use the reusable paged fetch helper so all matching tickets are returned
-        const ticketsData = await fetchAllPagedSupabase(
-          'tickets',
-          '*',
-          null,
-          false,
-          (qb) => qb.ilike('sad_no', `%${q}%`).order('date', { ascending: false })
-        );
-
-        if (!ticketsData || ticketsData.length === 0) {
-          setSadResults([]);
-          setSadLoading(false);
-          await fetchSadDeclaration();
-          return;
-        }
-
-        const dedupeMap = new Map();
-        (ticketsData || []).forEach((t) => {
-          const ticketNo = (t.ticket_no ?? t.ticketNo ?? t.ticket_id ?? '').toString().trim();
-          if (!ticketNo) return;
-          const thisDate = new Date(t.date ?? t.submitted_at ?? t.created_at ?? 0).getTime();
-          const existing = dedupeMap.get(ticketNo);
-          if (!existing) dedupeMap.set(ticketNo, t);
-          else {
-            const existingDate = new Date(existing.date ?? existing.submitted_at ?? existing.created_at ?? 0).getTime();
-            if (thisDate >= existingDate) dedupeMap.set(ticketNo, t);
-          }
-        });
-
-        const deduped = Array.from(dedupeMap.values());
-
-        const mapped = deduped
-          .map((t) => {
-            const ticketNo = t.ticket_no ?? t.ticketNo ?? (t.ticket_id ? String(t.ticket_id) : null);
-            const matchingOutgates = reports.filter((r) => r.ticketNo && String(r.ticketNo) === String(ticketNo));
-            let chosenOutgate = null;
-            if (matchingOutgates.length > 0) {
-              chosenOutgate = matchingOutgates.reduce((best, cur) => {
-                const bestT = best?.outgateDateTime ? new Date(best.outgateDateTime).getTime() : 0;
-                const curT = cur?.outgateDateTime ? new Date(cur.outgateDateTime).getTime() : 0;
-                return curT >= bestT ? cur : best;
-              }, matchingOutgates[0]);
-            }
-
-            const computed = computeWeights({
-              gross: t.gross,
-              tare: t.tare,
-              net: t.net,
-            });
-
-            return {
-              ticketId: t.ticket_id ?? t.id ?? ticketNo ?? `${Math.random()}`,
-              ticketNo,
-              sadNo: t.sad_no ?? t.sadNo ?? null,
-              date: chosenOutgate ? chosenOutgate.outgateDateTime : (t.date ?? t.submitted_at ?? t.created_at ?? null),
-              outgateRef: chosenOutgate ?? null,
-              truck: t.gnsw_truck_no ?? t.truck_on_wb ?? t.vehicle_number ?? null,
-              gross: computed.gross,
-              tare: computed.tare,
-              net: computed.net,
-              driver: t.driver ?? null,
-              raw: t,
-            };
-          });
-
-        mapped.sort((a, b) => {
-          const aT = a.date ? new Date(a.date).getTime() : 0;
-          const bT = b.date ? new Date(b.date).getTime() : 0;
-          return bT - aT;
-        });
-
-        setSadResults(mapped);
-
-        await fetchSadDeclaration();
-      } catch (err) {
-        console.error('SAD search failed', err);
-        setSadResults([]);
-        await fetchSadDeclaration();
-      } finally {
-        setSadLoading(false);
-      }
-    }, 600);
-
-    return () => {
-      if (sadDebounceRef.current) clearTimeout(sadDebounceRef.current);
-    };
-  }, [searchTerm, reports]);
-
+  // derived data
   const dedupedReports = useMemo(() => dedupeReportsByTicketNo(reports), [reports]);
 
   const { startDateTime, endDateTime } = useMemo(() => {
@@ -546,6 +530,8 @@ export default function OutgateReports() {
 
     return dedupedReports.filter((r) => {
       if (term) {
+        // when searchTerm is set, we are showing SAD-specific results elsewhere;
+        // this filter is primarily for the unique-ticket view - keep behavior unchanged
         const hay = [
           r.vehicleNumber,
           r.ticketNo,
@@ -798,7 +784,10 @@ export default function OutgateReports() {
   };
 
   const handleResetAll = () => {
+    setSearchInput('');
     setSearchTerm('');
+    setSadResults([]);
+    setSadDeclaration({ declaredWeight: null, status: 'Unknown', exists: false, total_recorded_weight: null });
     setDateFrom('');
     setDateTo('');
     setTimeFrom('');
@@ -985,19 +974,20 @@ export default function OutgateReports() {
   const pageEnd = pageStart + itemsPerPage;
   const pagedUniqueReports = uniqueFilteredReports.slice(pageStart, pageEnd);
 
-  // --- vivid stat card styles (reusable)
+  // --- neutral top stat card styles (avoid blue/red/green)
   const statCardStyle = {
     borderRadius: 12,
     p: 4,
-    boxShadow: '0 8px 30px rgba(99,102,241,0.12), inset 0 -6px 18px rgba(255,255,255,0.18)',
+    boxShadow: '0 8px 30px rgba(99,102,241,0.06), inset 0 -6px 18px rgba(255,255,255,0.06)',
     color: '#041124',
   };
 
-  const vividCards = {
-    a: { bg: 'linear-gradient(135deg,#fff7ed 0%, #ffe0b2 100%)', border: '1px solid rgba(255,165,64,0.12)' },
-    b: { bg: 'linear-gradient(135deg,#ecfeff 0%, #c7fff6 100%)', border: '1px solid rgba(16,185,129,0.08)' },
-    c: { bg: 'linear-gradient(135deg,#f0fdf4 0%, #b9f6d0 100%)', border: '1px solid rgba(34,197,94,0.06)' },
-    d: { bg: 'linear-gradient(135deg,#f5f3ff 0%, #dbeafe 100%)', border: '1px solid rgba(124,58,237,0.08)' },
+  // changed to warm / neutral palettes (no blue/red/green)
+  const topCards = {
+    a: { bg: 'linear-gradient(135deg,#fffaf0 0%, #fff3d9 100%)', border: '1px solid rgba(160,120,40,0.06)' }, // warm cream
+    b: { bg: 'linear-gradient(135deg,#fff8f2 0%, #fff0e0 100%)', border: '1px solid rgba(200,120,80,0.06)' }, // soft peach
+    c: { bg: 'linear-gradient(135deg,#fff9f4 0%, #fff3e8 100%)', border: '1px solid rgba(180,120,60,0.06)' }, // soft sand
+    d: { bg: 'linear-gradient(135deg,#fbf7ff 0%, #f7efff 100%)', border: '1px solid rgba(140,90,180,0.06)' }, // subtle lilac (not vivid blue/green/red)
   };
 
   // ---------------------------------------
@@ -1073,27 +1063,27 @@ export default function OutgateReports() {
         </HStack>
       </Flex>
 
-      {/* Stats — match ConfirmExit layout but replaced/updated */}
+      {/* Stats — top cards use neutral/warm palette (avoid blue/red/green) */}
       <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.a.bg, color: '#041124', border: vividCards.a.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: topCards.a.bg, color: '#041124', border: topCards.a.border }}>
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{totalSADs != null ? totalSADs : '—'}</StatNumber>
           <StatHelpText>Total registered SAD declarations</StatHelpText>
         </Stat>
 
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.b.bg, color: '#041124', border: vividCards.b.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: topCards.b.bg, color: '#041124', border: topCards.b.border }}>
           <StatLabel>Confirmed Exits</StatLabel>
           <StatNumber>{exitedCount}</StatNumber>
           <StatHelpText>Total Exited Trucks</StatHelpText>
         </Stat>
 
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.c.bg, color: '#041124', border: vividCards.c.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: topCards.c.bg, color: '#041124', border: topCards.c.border }}>
           <StatLabel>Total Declared Weight</StatLabel>
           <StatNumber>{totalDeclaredWeight != null ? `${formatWeight(totalDeclaredWeight)} kg` : '—'}</StatNumber>
           <StatHelpText>Sum of all declared weights</StatHelpText>
         </Stat>
 
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.d.bg, color: '#041124', border: vividCards.d.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: topCards.d.bg, color: '#041124', border: topCards.d.border }}>
           <StatLabel>Total Discharged Weight</StatLabel>
           <StatNumber>{totalDischargedWeight != null ? `${formatWeight(totalDischargedWeight)} kg` : '—'}</StatNumber>
           <StatHelpText>Sum of all discharged (Nets)</StatHelpText>
@@ -1143,13 +1133,19 @@ export default function OutgateReports() {
             <FormLabel>Search</FormLabel>
             <Flex>
               <Input
-                placeholder="Search here (ticket, truck, sad...)"
-                value={searchTerm}
-                onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
+                placeholder="Search here (type exact SAD number, then click search)"
+                value={searchInput}
+                onChange={(e) => { setSearchInput(e.target.value); }}
               />
-              <IconButton aria-label="Search" icon={<SearchIcon />} ml={2} onClick={() => { setCurrentPage(1); }} />
+              <IconButton
+                aria-label="Search"
+                icon={<SearchIcon />}
+                ml={2}
+                onClick={() => performSadSearch(searchInput)}
+                title="Search SAD (exact)"
+              />
             </Flex>
-            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type a SAD number to see totals below.</Text>
+            <Text fontSize="xs" color="gray.500" mt={1}>Tip: type an exact SAD number then click the search icon.</Text>
           </Box>
 
           <Box>
