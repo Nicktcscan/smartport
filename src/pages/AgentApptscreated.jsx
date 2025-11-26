@@ -264,7 +264,7 @@ export default function AppointmentsPage() {
       try {
         // get public URL via Supabase
         const { data } = supabase.storage.from(bucket).getPublicUrl(path);
-        const publicUrl = data?.publicUrl || null;
+        const publicUrl = data?.publicUrl || data?.public_url || null;
         if (!publicUrl) continue;
 
         // quick HEAD check to confirm file exists & is reachable

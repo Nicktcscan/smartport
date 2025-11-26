@@ -921,11 +921,13 @@ export default function AppointmentPage() {
   }
 
   // ---------- PDF upload helper (using appointments bucket) ----------
+  // Returns { publicUrl, signedUrl, path, error }
   async function uploadPdfToStorage(blob, appointmentNumber) {
-    if (!blob) return { publicUrl: null, path: null };
+    if (!blob) return { publicUrl: null, signedUrl: null, path: null, error: 'no_blob' };
 
-    const bucketName = 'appointments'; // user-requested bucket
-    const filename = `WeighbridgeTicket-${appointmentNumber || `appt-${Date.now()}`}.pdf`;
+    const bucketName = 'appointments';
+    const safeAppointment = String(appointmentNumber || `appt-${Date.now()}`).replace(/\s+/g, '_').replace(/[^\w\-\\.]/g, '');
+    const filename = `WeighbridgeTicket-${safeAppointment}.pdf`;
     const path = `tickets/${filename}`;
 
     try {
@@ -943,38 +945,44 @@ export default function AppointmentPage() {
       // upload (upsert true ensures retries don't fail on duplicate path)
       const { data: uploadData, error: uploadError } = await supabase.storage
         .from(bucketName)
-        .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
+        .upload(path, fileForUpload, { upsert: true });
 
       if (uploadError) {
         console.warn('uploadPdfToStorage upload error', uploadError);
-        // still attempt to return a path if data exists
-        if (!uploadData) return { publicUrl: null, path: null };
+        // if uploadError but uploadData returned (rare), continue; otherwise return
+        if (!uploadData) return { publicUrl: null, signedUrl: null, path: null, error: uploadError.message || String(uploadError) };
       }
 
-      // Try to get a public URL first
+      // Try to get a public URL first (await properly)
       try {
-        const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
-        const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
-        if (publicUrl) return { publicUrl, path };
+        const { data: pubData, error: pubErr } = await supabase.storage.from(bucketName).getPublicUrl(path);
+        if (!pubErr && pubData) {
+          const publicUrl = pubData?.publicUrl || pubData?.public_url || null;
+          if (publicUrl) {
+            return { publicUrl, signedUrl: null, path, error: null };
+          }
+        }
       } catch (e) {
-        // ignore
+        console.warn('getPublicUrl failed', e);
       }
 
       // Fallback: create a signed URL (1 hour) if bucket is private
       try {
         const signedSeconds = 60 * 60; // 1 hour
         const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
-        if (!signedErr && signedData?.signedUrl) {
-          return { publicUrl: signedData.signedUrl, path };
+        if (!signedErr && signedData) {
+          const signedUrl = signedData?.signedUrl || signedData?.signed_url || null;
+          if (signedUrl) return { publicUrl: null, signedUrl, path, error: null };
         }
       } catch (e) {
-        // ignore
+        console.warn('createSignedUrl failed', e);
       }
 
-      return { publicUrl: null, path };
+      // If neither public nor signed url created, return the storage path for reference.
+      return { publicUrl: null, signedUrl: null, path, error: null };
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
-      return { publicUrl: null, path: null };
+      return { publicUrl: null, signedUrl: null, path: null, error: e?.message || String(e) };
     }
   }
 
@@ -1080,16 +1088,37 @@ export default function AppointmentPage() {
 
         // Try upload to Supabase storage (appointments bucket) and update appointment.pdf_url
         try {
-          const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
-          if (publicUrl && dbAppointment.id) {
-            // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
-            await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
-          } else if (path && dbAppointment.id) {
-            // store path as fallback
-            await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
+          const uploadResult = await uploadPdfToStorage(blob, printable.appointmentNumber);
+          if (uploadResult.error) {
+            console.warn('uploadResult.error', uploadResult.error);
+            toast({ title: 'PDF upload failed', description: uploadResult.error, status: 'warning' });
+          }
+
+          let finalUrlToStore = null;
+          if (uploadResult.publicUrl) finalUrlToStore = uploadResult.publicUrl;
+          else if (uploadResult.signedUrl) finalUrlToStore = uploadResult.signedUrl;
+          else if (uploadResult.path) {
+            // Construct a path marker (so UI can attempt to resolve using storage API later).
+            // Preferred: update pdf_url with a URL, but if bucket is private and signed URL couldn't be generated,
+            // store the internal path so other server-side jobs can expose it later.
+            finalUrlToStore = uploadResult.path;
+          }
+
+          if (finalUrlToStore && dbAppointment.id) {
+            const { error: updErr } = await supabase.from('appointments').update({ pdf_url: finalUrlToStore }).eq('id', dbAppointment.id);
+            if (updErr) {
+              console.warn('Failed to update appointment.pdf_url', updErr);
+              toast({ title: 'Saved but failed to link PDF', description: 'Appointment created but we could not update the DB with the PDF link.', status: 'warning' });
+            } else {
+              toast({ title: 'PDF saved to storage', description: 'Appointment PDF uploaded and linked.', status: 'success' });
+            }
+          } else {
+            // no usable url
+            toast({ title: 'PDF uploaded (no public URL)', description: 'PDF uploaded but no public or signed URL available; stored path only.', status: 'info' });
           }
         } catch (e) {
           console.warn('PDF storage/update failed', e);
+          toast({ title: 'PDF upload failed', description: e?.message || String(e), status: 'warning' });
         }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
