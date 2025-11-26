@@ -865,6 +865,27 @@ export default function SADDeclaration() {
 
   const RowMotion = motion(Tr);
 
+  // --- Derived for Discrepancy stat card (overall)
+  const totalDeclared = dashboardStats.totalDeclared || 0;
+  const totalRecorded = dashboardStats.totalRecorded || 0;
+  const totalDisc = totalRecorded - totalDeclared;
+
+  let discBg = 'linear-gradient(90deg,#94a3b8,#cbd5e1)'; // default gray-ish when declared=0
+  if (totalDeclared > 0) {
+    if (totalDisc > 0) {
+      // discharged > declared -> RED
+      discBg = 'linear-gradient(90deg,#ef4444,#fb7185)';
+    } else if (totalDisc < 0) {
+      // discharged < declared -> BLUE
+      discBg = 'linear-gradient(90deg,#3b82f6,#60a5fa)';
+    } else {
+      // equal -> GREEN
+      discBg = 'linear-gradient(90deg,#10b981,#06b6d4)';
+    }
+  }
+
+  const discDisplayText = totalDeclared > 0 ? `${totalDisc === 0 ? '0' : (totalDisc > 0 ? `+${formatNumber(String(totalDisc))}` : `${formatNumber(String(totalDisc))}`)} kg` : 'N/A';
+
   return (
     <Container maxW="8xl" py={6} className="sad-container">
       <style>{pageCss}</style>
@@ -901,6 +922,15 @@ export default function SADDeclaration() {
           <StatLabel style={{ color: 'rgba(255,255,255,0.95)' }}>% Completed</StatLabel>
           <StatNumber style={{ color: '#fff' }}>{dashboardStats.totalSADs ? Math.round((dashboardStats.completed / dashboardStats.totalSADs) * 100) : 0}%</StatNumber>
           <StatHelpText style={{ color: 'rgba(255,255,255,0.9)' }}>{dashboardStats.completed} completed</StatHelpText>
+        </Stat>
+
+        {/* NEW: Discrepancy stat card (dynamic background) */}
+        <Stat bg={discBg} color="white" p={3} borderRadius="md" boxShadow="sm" style={{ minWidth: 220 }}>
+          <StatLabel style={{ color: 'rgba(255,255,255,0.95)' }}>Total Discrepancy</StatLabel>
+          <StatNumber style={{ color: '#fff' }}>{discDisplayText}</StatNumber>
+          <StatHelpText style={{ color: 'rgba(255,255,255,0.9)' }}>
+            {totalDeclared > 0 ? `Declared: ${formatNumber(String(totalDeclared))} kg • Discharged: ${formatNumber(String(totalRecorded))} kg` : 'Declared weight missing'}
+          </StatHelpText>
         </Stat>
       </div>
 
