@@ -776,6 +776,7 @@ export default function WeightReports() {
 
   // -------------------------------------------
   // handleGenerateReport - fetch tickets + keep operator in ticket rows only
+  // (invoked ONLY by Generate Report button)
   // -------------------------------------------
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
@@ -1002,21 +1003,13 @@ export default function WeightReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir, originalTickets]);
 
-  // ---------- debounce auto-search for SAD as user types (dynamic experience) ----------
+  // ---------- NEW: only-clear-when-input-empty effect (NO auto-search) ----------
   useEffect(() => {
     if (!searchSAD || searchSAD.trim() === '') {
       setOriginalTickets([]);
       setFilteredTickets([]);
       setReportMeta({});
-      return;
     }
-
-    const handler = setTimeout(() => {
-      handleGenerateReport();
-    }, 600); // 600ms debounce
-
-    return () => clearTimeout(handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchSAD]);
 
   const applyRange = () => computeFilteredTickets();
