@@ -21,9 +21,9 @@ const AuthContext = createContext();
  * - Listens to auth state changes from Supabase while avoiding noisy re-resolves
  *
  * Key fix:
- * - Uses lastResolvedUserRef to avoid relying on `user` from a stale closure inside
- *   an async effect/listener. This prevents UI resets when the SDK refreshes tokens
- *   or when switching tabs.
+ * - Avoid duplicate inserts into `users` when a row with the same email exists under a different id.
+ * - If a users row is missing for the current user id, check by email first. If an existing email-row is found,
+ *   use its role rather than attempting to blindly insert and risk a unique constraint error.
  */
 export const AuthProvider = ({ children }) => {
   const navigate = useNavigate();
@@ -224,29 +224,93 @@ export const AuthProvider = ({ children }) => {
             .maybeSingle();
 
           if (error) {
-            console.error('Error fetching role from users table:', error);
+            console.error('Error fetching role from users table by id:', error);
           }
 
           if (!userData) {
-            // create fallback row & set role to 'agent'
+            // No row found for this id. There are multiple possible reasons:
+            //  - user signed up via Auth but we never created a users row for this id
+            //  - a users row exists under the same email but different id (possible duplicate signup)
+            // To avoid a unique constraint violation on email, first check if a row exists with this email.
+            let existingByEmail = null;
             try {
-              const { error: insertError } = await supabase.from('users').insert({
-                id: currentUser.id,
-                email: currentUser.email,
-                role: 'agent',
-              });
-              if (insertError) {
-                console.error('Error inserting default user row:', insertError);
-                setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
-                lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
-              } else {
+              const { data: emailRow, error: emailErr } = await supabase
+                .from('users')
+                .select('id, role, email')
+                .eq('email', currentUser.email)
+                .maybeSingle();
+
+              if (emailErr) {
+                console.warn('Email lookup for users table failed:', emailErr);
+              } else if (emailRow) {
+                existingByEmail = emailRow;
+              }
+            } catch (e) {
+              console.warn('Failed to lookup users by email:', e);
+            }
+
+            if (existingByEmail) {
+              // Found an existing users row that matches the email. Use its role to establish access.
+              const resolvedRole = existingByEmail.role || 'agent';
+              setUserOnly({ id: currentUser.id, email: currentUser.email, role: resolvedRole });
+              lastResolvedUserRef.current = { id: currentUser.id, role: resolvedRole };
+            } else {
+              // No row by id and no row by email — safe to insert a new row for this user id.
+              try {
+                const { data: insertedRow, error: insertError } = await supabase
+                  .from('users')
+                  .insert(
+                    {
+                      id: currentUser.id,
+                      email: currentUser.email,
+                      role: 'agent',
+                    },
+                    { returning: 'representation' }
+                  )
+                  .maybeSingle();
+
+                if (insertError) {
+                  // Handle insertion error gracefully. If insertion failed because of a race (someone
+                  // inserted a row with the same email concurrently), try to recover by looking up by email.
+                  console.error('Error inserting default user row:', insertError);
+
+                  // Try to recover by re-querying by email:
+                  try {
+                    const { data: fallbackRow, error: fallbackErr } = await supabase
+                      .from('users')
+                      .select('id, role, email')
+                      .eq('email', currentUser.email)
+                      .maybeSingle();
+
+                    if (!fallbackErr && fallbackRow) {
+                      const resolvedRole = fallbackRow.role || 'agent';
+                      setUserOnly({ id: currentUser.id, email: currentUser.email, role: resolvedRole });
+                      lastResolvedUserRef.current = { id: currentUser.id, role: resolvedRole };
+                    } else {
+                      // final fallback: set user locally as agent
+                      setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+                      lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
+                    }
+                  } catch (e) {
+                    console.error('Fallback lookup by email after insert failure failed:', e);
+                    setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+                    lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
+                  }
+                } else if (insertedRow) {
+                  // Successfully inserted
+                  const resolvedRole = insertedRow.role || 'agent';
+                  setUserOnly({ id: currentUser.id, email: currentUser.email, role: resolvedRole });
+                  lastResolvedUserRef.current = { id: currentUser.id, role: resolvedRole };
+                } else {
+                  // Unexpected: treat as agent locally
+                  setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
+                  lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
+                }
+              } catch (e) {
+                console.error('Insert fallback user failed (unexpected):', e);
                 setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
                 lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
               }
-            } catch (e) {
-              console.error('Insert fallback user failed:', e);
-              setUserOnly({ id: currentUser.id, email: currentUser.email, role: 'agent' });
-              lastResolvedUserRef.current = { id: currentUser.id, role: 'agent' };
             }
           } else if (userData?.role) {
             // set full user with role
