@@ -776,7 +776,6 @@ export default function WeightReports() {
 
   // -------------------------------------------
   // handleGenerateReport - fetch tickets + keep operator in ticket rows only
-  // (invoked ONLY by Generate Report button)
   // -------------------------------------------
   const handleGenerateReport = async () => {
     if (!searchSAD.trim()) {
@@ -790,7 +789,9 @@ export default function WeightReports() {
       let page = 0;
       let allRows = [];
       let keepFetching = true;
-      const ilikePattern = `%${searchSAD.trim()}%`;
+
+      // **Exact match** on sad_no (no partial search)
+      const exactSad = searchSAD.trim();
 
       while (keepFetching) {
         const from = page * pageSize;
@@ -798,7 +799,7 @@ export default function WeightReports() {
         const { data, error } = await supabase
           .from('tickets')
           .select('*')
-          .ilike('sad_no', ilikePattern)
+          .eq('sad_no', exactSad)
           .range(from, to);
 
         if (error) {
@@ -961,13 +962,13 @@ export default function WeightReports() {
         return sum + (Number.isFinite(val) ? val : 0);
       }, 0);
 
-      // fetch SAD declaration row (optional)
+      // fetch SAD declaration row (optional) - exact match
       let sadRow = null;
       try {
         const { data: sadData, error: sadError } = await supabase
           .from('sad_declarations')
           .select('sad_no, declared_weight, total_recorded_weight, status')
-          .ilike('sad_no', `${searchSAD.trim()}`)
+          .eq('sad_no', exactSad)
           .maybeSingle();
         if (!sadError) sadRow = sadData || null;
       } catch (e) {
@@ -1003,13 +1004,21 @@ export default function WeightReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir, originalTickets]);
 
-  // ---------- NEW: only-clear-when-input-empty effect (NO auto-search) ----------
+  // ---------- debounce auto-search for SAD as user types (dynamic experience) ----------
   useEffect(() => {
     if (!searchSAD || searchSAD.trim() === '') {
       setOriginalTickets([]);
       setFilteredTickets([]);
       setReportMeta({});
+      return;
     }
+
+    const handler = setTimeout(() => {
+      handleGenerateReport();
+    }, 600); // 600ms debounce
+
+    return () => clearTimeout(handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchSAD]);
 
   const applyRange = () => computeFilteredTickets();
