@@ -1,6 +1,5 @@
-/* eslint-disable no-dupe-keys */
-/* eslint-disable react/jsx-no-undef */
 // pages/AgentAppt.jsx
+/* eslint-disable no-dupe-keys */
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Box, Button, Container, Heading, Input as ChakraInput, Select, Text, SimpleGrid,
@@ -716,7 +715,7 @@ export default function AppointmentPage() {
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-      weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
     };
   }
 
@@ -920,69 +919,68 @@ export default function AppointmentPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper (using appointments bucket) ----------
-  // Returns { publicUrl, signedUrl, path, error }
+  // ---------- PDF upload helper (robust) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
-    if (!blob) return { publicUrl: null, signedUrl: null, path: null, error: 'no_blob' };
+    if (!blob) return { publicUrl: null, path: null, error: 'no-blob' };
 
-    const bucketName = 'appointments';
-    const safeAppointment = String(appointmentNumber || `appt-${Date.now()}`).replace(/\s+/g, '_').replace(/[^\w\-\\.]/g, '');
-    const filename = `WeighbridgeTicket-${safeAppointment}.pdf`;
+    const bucketName = 'appointments'; // user requested bucket
+    const filename = `WeighbridgeTicket-${appointmentNumber || `appt-${Date.now()}`}.pdf`;
     const path = `tickets/${filename}`;
 
     try {
-      // Convert blob to File (browser)
+      // make File if possible (Browser)
       let fileForUpload;
       try {
         fileForUpload = new File([blob], filename, { type: 'application/pdf' });
       } catch (e) {
-        // fallback: convert to Uint8Array
-        const arrayBuffer = await blob.arrayBuffer();
-        const uint8 = new Uint8Array(arrayBuffer);
-        fileForUpload = uint8;
+        // fallback: try to convert to Uint8Array
+        try {
+          const arrayBuffer = await blob.arrayBuffer();
+          const uint8 = new Uint8Array(arrayBuffer);
+          fileForUpload = uint8;
+        } catch (err) {
+          console.error('uploadPdfToStorage: converting blob fallback failed', err);
+          return { publicUrl: null, path: null, error: err };
+        }
       }
 
-      // upload (upsert true ensures retries don't fail on duplicate path)
-      const { data: uploadData, error: uploadError } = await supabase.storage
+      // Attempt upload with upsert (safe if same name exists)
+      const { error: uploadError } = await supabase.storage
         .from(bucketName)
-        .upload(path, fileForUpload, { upsert: true });
+        .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
 
       if (uploadError) {
         console.warn('uploadPdfToStorage upload error', uploadError);
-        // if uploadError but uploadData returned (rare), continue; otherwise return
-        if (!uploadData) return { publicUrl: null, signedUrl: null, path: null, error: uploadError.message || String(uploadError) };
+        // return error info so caller can react
+        return { publicUrl: null, path: null, error: uploadError };
       }
 
-      // Try to get a public URL first (await properly)
+      // Try to get a public URL
       try {
-        const { data: pubData, error: pubErr } = await supabase.storage.from(bucketName).getPublicUrl(path);
-        if (!pubErr && pubData) {
-          const publicUrl = pubData?.publicUrl || pubData?.public_url || null;
-          if (publicUrl) {
-            return { publicUrl, signedUrl: null, path, error: null };
-          }
-        }
+        const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
+        // pubRes might be { publicUrl } or { public_url } depending on sdk
+        const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
+        if (publicUrl) return { publicUrl, path, error: null };
       } catch (e) {
-        console.warn('getPublicUrl failed', e);
+        console.warn('uploadPdfToStorage getPublicUrl failed', e);
       }
 
-      // Fallback: create a signed URL (1 hour) if bucket is private
+      // If bucket is private, create signed URL (best-effort)
       try {
         const signedSeconds = 60 * 60; // 1 hour
         const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
-        if (!signedErr && signedData) {
-          const signedUrl = signedData?.signedUrl || signedData?.signed_url || null;
-          if (signedUrl) return { publicUrl: null, signedUrl, path, error: null };
+        if (!signedErr && signedData?.signedUrl) {
+          return { publicUrl: signedData.signedUrl, path, error: null };
         }
       } catch (e) {
-        console.warn('createSignedUrl failed', e);
+        console.warn('uploadPdfToStorage createSignedUrl failed', e);
       }
 
-      // If neither public nor signed url created, return the storage path for reference.
-      return { publicUrl: null, signedUrl: null, path, error: null };
+      // fallback: return path so caller can decide what to persist
+      return { publicUrl: null, path, error: null };
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
-      return { publicUrl: null, signedUrl: null, path: null, error: e?.message || String(e) };
+      return { publicUrl: null, path: null, error: e };
     }
   }
 
@@ -1082,43 +1080,51 @@ export default function AppointmentPage() {
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
 
-        // Download client-side
+        if (!blob || blob.size === 0) {
+          throw new Error('Generated PDF blob is empty');
+        }
+
+        // Download client-side (optional)
         const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
-        downloadBlob(blob, filename);
+        try { downloadBlob(blob, filename); } catch (e) { console.warn('client download failed', e); }
 
         // Try upload to Supabase storage (appointments bucket) and update appointment.pdf_url
         try {
-          const uploadResult = await uploadPdfToStorage(blob, printable.appointmentNumber);
-          if (uploadResult.error) {
-            console.warn('uploadResult.error', uploadResult.error);
-            toast({ title: 'PDF upload failed', description: uploadResult.error, status: 'warning' });
-          }
-
-          let finalUrlToStore = null;
-          if (uploadResult.publicUrl) finalUrlToStore = uploadResult.publicUrl;
-          else if (uploadResult.signedUrl) finalUrlToStore = uploadResult.signedUrl;
-          else if (uploadResult.path) {
-            // Construct a path marker (so UI can attempt to resolve using storage API later).
-            // Preferred: update pdf_url with a URL, but if bucket is private and signed URL couldn't be generated,
-            // store the internal path so other server-side jobs can expose it later.
-            finalUrlToStore = uploadResult.path;
-          }
-
-          if (finalUrlToStore && dbAppointment.id) {
-            const { error: updErr } = await supabase.from('appointments').update({ pdf_url: finalUrlToStore }).eq('id', dbAppointment.id);
-            if (updErr) {
-              console.warn('Failed to update appointment.pdf_url', updErr);
-              toast({ title: 'Saved but failed to link PDF', description: 'Appointment created but we could not update the DB with the PDF link.', status: 'warning' });
-            } else {
-              toast({ title: 'PDF saved to storage', description: 'Appointment PDF uploaded and linked.', status: 'success' });
-            }
+          const uploadRes = await uploadPdfToStorage(blob, printable.appointmentNumber);
+          if (uploadRes.error) {
+            console.warn('uploadPdfToStorage returned error', uploadRes.error);
+            toast({ title: 'PDF saved locally', description: 'Upload failed — appointment saved without pdf_url. See console for details.', status: 'warning' });
           } else {
-            // no usable url
-            toast({ title: 'PDF uploaded (no public URL)', description: 'PDF uploaded but no public or signed URL available; stored path only.', status: 'info' });
+            const publicUrl = uploadRes.publicUrl || null;
+            const storedPath = uploadRes.path || null;
+
+            if (publicUrl && dbAppointment.id) {
+              // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
+              const { error: upErr } = await supabase.from('appointments').update({ pdf_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', dbAppointment.id);
+              if (upErr) {
+                console.warn('Failed to persist publicUrl to appointment row', upErr);
+                toast({ title: 'Uploaded PDF but DB update failed', status: 'warning' });
+              } else {
+                toast({ title: 'Appointment created & PDF uploaded', description: 'PDF is now in storage.', status: 'success' });
+                // update local state (if needed)
+              }
+            } else if (storedPath && dbAppointment.id) {
+              // store path as fallback if you want — here we attempt to update pdf_url with the storage path
+              const { error: upErr2 } = await supabase.from('appointments').update({ pdf_url: storedPath, updated_at: new Date().toISOString() }).eq('id', dbAppointment.id);
+              if (upErr2) {
+                console.warn('Failed to persist storage path to appointment row', upErr2);
+                toast({ title: 'Uploaded PDF but DB update failed', status: 'warning' });
+              } else {
+                toast({ title: 'Appointment created & PDF uploaded (path)', description: 'PDF uploaded. pdf_url holds storage path.', status: 'success' });
+              }
+            } else {
+              // neither publicUrl nor path - upload succeeded but we couldn't determine a usable URL
+              toast({ title: 'PDF uploaded', description: 'Uploaded but no public URL available. You may need to create a signed URL to view.', status: 'info' });
+            }
           }
         } catch (e) {
-          console.warn('PDF storage/update failed', e);
-          toast({ title: 'PDF upload failed', description: e?.message || String(e), status: 'warning' });
+          console.error('PDF storage/upload failed', e);
+          toast({ title: 'Appointment created', description: 'Saved but PDF upload failed', status: 'warning' });
         }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
@@ -1541,7 +1547,7 @@ export default function AppointmentPage() {
 
                   <HStack mb={2} spacing={3}>
                     <Text fontWeight="semibold" minW="150px">Appointment No:</Text>
-                    <Text color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
+                    <Text	color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
                     <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewAppointmentNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
                   </HStack>
 
