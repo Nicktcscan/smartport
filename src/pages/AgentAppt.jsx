@@ -1,4 +1,5 @@
 /* eslint-disable no-dupe-keys */
+/* eslint-disable react/jsx-no-undef */
 // pages/AgentAppt.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
@@ -919,14 +920,11 @@ export default function AppointmentPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper (UPDATED to use appointments bucket) ----------
+  // ---------- PDF upload helper (using appointments bucket) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
     if (!blob) return { publicUrl: null, path: null };
 
-    // PICK THE BUCKET NAME USER REQUESTED
-    const bucketName = 'appointments'; // <--- user provided bucket
-
-    // filename & path
+    const bucketName = 'appointments'; // user-requested bucket
     const filename = `WeighbridgeTicket-${appointmentNumber || `appt-${Date.now()}`}.pdf`;
     const path = `tickets/${filename}`;
 
@@ -936,7 +934,7 @@ export default function AppointmentPage() {
       try {
         fileForUpload = new File([blob], filename, { type: 'application/pdf' });
       } catch (e) {
-        // fallback if File constructor fails in some environments: convert to Uint8Array
+        // fallback: convert to Uint8Array
         const arrayBuffer = await blob.arrayBuffer();
         const uint8 = new Uint8Array(arrayBuffer);
         fileForUpload = uint8;
@@ -954,11 +952,12 @@ export default function AppointmentPage() {
       }
 
       // Try to get a public URL first
-      const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
-      const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
-
-      if (publicUrl) {
-        return { publicUrl, path };
+      try {
+        const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
+        const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
+        if (publicUrl) return { publicUrl, path };
+      } catch (e) {
+        // ignore
       }
 
       // Fallback: create a signed URL (1 hour) if bucket is private
@@ -971,10 +970,6 @@ export default function AppointmentPage() {
       } catch (e) {
         // ignore
       }
-
-      // final fallback: construct project URL (less recommended) — try to return something
-      try {
-      } catch (e) { /* ignore */ }
 
       return { publicUrl: null, path };
     } catch (e) {
@@ -1090,7 +1085,7 @@ export default function AppointmentPage() {
             // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           } else if (path && dbAppointment.id) {
-            // store path as fallback if you want — here we attempt to update pdf_url with the storage path
+            // store path as fallback
             await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
