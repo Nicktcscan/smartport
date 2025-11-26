@@ -1,4 +1,5 @@
 /* eslint-disable no-dupe-keys */
+/* eslint-disable react/jsx-no-undef */
 // pages/appointment.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
@@ -943,22 +944,32 @@ export default function AppointmentPage() {
       }
 
       // upload (upsert true ensures retries don't fail on duplicate path)
-      const { data: uploadData, error: uploadError } = await supabase.storage
-        .from(bucketName)
-        .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
+      let uploadRes;
+      try {
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from(bucketName)
+          .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
 
-      if (uploadError) {
-        console.warn('uploadPdfToStorage upload error', uploadError);
-        // still attempt to return a path if data exists
-        if (!uploadData) return { publicUrl: null, path: null };
+        uploadRes = { data: uploadData, error: uploadError };
+        if (uploadError) {
+          console.warn('uploadPdfToStorage upload error', uploadError);
+        }
+      } catch (e) {
+        console.warn('uploadPdfToStorage upload threw', e);
+        // continue to attempt URL resolution below if possible
+        // eslint-disable-next-line no-unused-vars
+        uploadRes = { data: null, error: e };
       }
 
-      // Try to get a public URL first
-      const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
-      const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
-
-      if (publicUrl) {
-        return { publicUrl, path };
+      // Try to get a public URL first (works if bucket is public)
+      try {
+        const getPub = await supabase.storage.from(bucketName).getPublicUrl(path);
+        const publicUrl = getPub?.data?.publicUrl || getPub?.public_url || null;
+        if (publicUrl) {
+          return { publicUrl, path };
+        }
+      } catch (e) {
+        // ignore
       }
 
       // Fallback: create a signed URL (1 hour) if bucket is private
@@ -972,10 +983,7 @@ export default function AppointmentPage() {
         // ignore
       }
 
-      // final fallback: construct project URL (less recommended) — try to return something
-      try {
-      } catch (e) { /* ignore */ }
-
+      // If we get here, return path (so UI can at least attempt to resolve later server-side)
       return { publicUrl: null, path };
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
@@ -1079,9 +1087,13 @@ export default function AppointmentPage() {
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
 
-        // Download client-side
-        const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
-        downloadBlob(blob, filename);
+        // Download client-side for user convenience
+        try {
+          const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
+          downloadBlob(blob, filename);
+        } catch (e) {
+          console.warn('download client-side failed', e);
+        }
 
         // Try upload to Supabase storage (appointments bucket) and update appointment.pdf_url
         try {
@@ -1090,7 +1102,7 @@ export default function AppointmentPage() {
             // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           } else if (path && dbAppointment.id) {
-            // store path as fallback if you want — here we attempt to update pdf_url with the storage path
+            // store path as fallback
             await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
