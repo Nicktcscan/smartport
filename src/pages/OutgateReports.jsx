@@ -171,8 +171,6 @@ function dedupeReportsByTicketNo(rows = []) {
 
 /* -----------------------
    Supabase paged fetch helper
-   - pages using .range(from, to) with pageSize = 1000
-   - accepts an optional filterFn(query) to apply WHEREs / ORDERs before range
 ----------------------- */
 async function fetchAllPagedSupabase(tableName, selectCols = '*', orderBy = null, ascending = false, filterFn = null) {
   const pageSize = 1000;
@@ -181,7 +179,6 @@ async function fetchAllPagedSupabase(tableName, selectCols = '*', orderBy = null
   while (true) {
     const to = from + pageSize - 1;
     let baseQuery = supabase.from(tableName).select(selectCols);
-    // if caller provided filterFn, let it set WHEREs and ORDERs
     if (typeof filterFn === 'function') {
       baseQuery = filterFn(baseQuery);
     } else if (orderBy) {
@@ -435,8 +432,6 @@ export default function OutgateReports() {
       setSadLoading(true);
 
       try {
-        // ---------- PAGED SAD tickets fetch ----------
-        // Use the reusable paged fetch helper so all matching tickets are returned
         const ticketsData = await fetchAllPagedSupabase(
           'tickets',
           '*',
@@ -989,22 +984,60 @@ export default function OutgateReports() {
   const statCardStyle = {
     borderRadius: 12,
     p: 4,
-    boxShadow: '0 8px 30px rgba(99,102,241,0.12), inset 0 -6px 18px rgba(255,255,255,0.18)',
+    boxShadow: '0 8px 30px rgba(99,102,241,0.06), inset 0 -6px 18px rgba(255,255,255,0.18)',
     color: '#041124',
+    background: 'white',
   };
 
-  const vividCards = {
-    a: { bg: 'linear-gradient(135deg,#fff7ed 0%, #ffe0b2 100%)', border: '1px solid rgba(255,165,64,0.12)' },
-    b: { bg: 'linear-gradient(135deg,#ecfeff 0%, #c7fff6 100%)', border: '1px solid rgba(16,185,129,0.08)' },
-    c: { bg: 'linear-gradient(135deg,#f0fdf4 0%, #b9f6d0 100%)', border: '1px solid rgba(34,197,94,0.06)' },
-    d: { bg: 'linear-gradient(135deg,#f5f3ff 0%, #dbeafe 100%)', border: '1px solid rgba(124,58,237,0.08)' },
-  };
+  // Discrepancy gradients / colors
+  const redBg = 'linear-gradient(135deg,#fff1f2 0%, #fee2e2 100%)';
+  const blueBg = 'linear-gradient(135deg,#eff6ff 0%, #dbeafe 100%)';
+  const greenBg = 'linear-gradient(135deg,#ecfdf5 0%, #d1fae5 100%)';
+  const neutralBg = 'linear-gradient(135deg,#ffffff 0%, #f8fafc 100%)';
 
-  // -------------------------
-  // Render
-  // -------------------------
+  const pageCss = `
+    /* small theme tweaks kept local */
+    .panel-3d { border-radius: 12px; }
+  `;
+
+  /* -------------------------
+     Render
+  ------------------------- */
+  // compute discrepancy card values / styling
+  const declaredNum = (totalDeclaredWeight !== null && totalDeclaredWeight !== undefined) ? Number(totalDeclaredWeight) : null;
+  const dischargedNum = (totalDischargedWeight !== null && totalDischargedWeight !== undefined) ? Number(totalDischargedWeight) : null;
+  let discrepancyBg = neutralBg;
+  let discrepancyLabel = 'Discrepancy';
+  let discrepancyValueDisplay = '—';
+
+  if (declaredNum !== null && dischargedNum !== null) {
+    const diff = dischargedNum - declaredNum;
+    // show absolute diff + sign words
+    const abs = Math.abs(diff);
+    discrepancyValueDisplay = `${formatWeight(abs)} kg`;
+    if (diff > 0) {
+      // discharged > declared => red
+      discrepancyBg = redBg;
+      discrepancyLabel = 'Discharged > Declared';
+    } else if (diff < 0) {
+      // discharged < declared => blue
+      discrepancyBg = blueBg;
+      discrepancyLabel = 'Discharged < Declared';
+    } else {
+      // equal => green
+      discrepancyBg = greenBg;
+      discrepancyLabel = 'Discharged = Declared';
+    }
+  } else {
+    discrepancyBg = neutralBg;
+    discrepancyLabel = 'Discrepancy';
+    discrepancyValueDisplay = '—';
+  }
+
   return (
     <Box p={{ base: 4, md: 8 }} style={{ fontFamily: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, Arial' }}>
+      <style>{pageCss}</style>
+
       {/* Header */}
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Stack spacing={1}>
@@ -1029,49 +1062,68 @@ export default function OutgateReports() {
         </HStack>
       </Flex>
 
-      {/* Stats — match ConfirmExit layout but replaced/updated */}
-      <SimpleGrid columns={{ base: 1, md: 4 }} spacing={4} mb={6}>
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.a.bg, color: '#041124', border: vividCards.a.border }}>
+      {/* Stats — now includes Discrepancy card */}
+      <SimpleGrid columns={{ base: 1, md: 5 }} spacing={4} mb={6}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ ...statCardStyle }}>
           <StatLabel>Total SADs</StatLabel>
           <StatNumber>{totalSADs != null ? totalSADs : '—'}</StatNumber>
           <StatHelpText>Total registered SAD declarations</StatHelpText>
         </Stat>
 
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.b.bg, color: '#041124', border: vividCards.b.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ ...statCardStyle }}>
           <StatLabel>Confirmed Exits</StatLabel>
           <StatNumber>{exitedCount}</StatNumber>
           <StatHelpText>Total Exited Trucks</StatHelpText>
         </Stat>
 
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.c.bg, color: '#041124', border: vividCards.c.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ ...statCardStyle }}>
           <StatLabel>Total Declared Weight</StatLabel>
           <StatNumber>{totalDeclaredWeight != null ? `${formatWeight(totalDeclaredWeight)} kg` : '—'}</StatNumber>
           <StatHelpText>Sum of all declared weights</StatHelpText>
         </Stat>
 
-        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ background: vividCards.d.bg, color: '#041124', border: vividCards.d.border }}>
+        <Stat borderRadius="md" p={4} className="panel-3d" sx={{ ...statCardStyle }}>
           <StatLabel>Total Discharged Weight</StatLabel>
           <StatNumber>{totalDischargedWeight != null ? `${formatWeight(totalDischargedWeight)} kg` : '—'}</StatNumber>
           <StatHelpText>Sum of all discharged (Nets)</StatHelpText>
+        </Stat>
+
+        {/* Discrepancy stat card with dynamic background colors */}
+        <Stat
+          borderRadius="md"
+          p={4}
+          className="panel-3d"
+          sx={{
+            borderRadius: 12,
+            p: 4,
+            boxShadow: '0 8px 30px rgba(99,102,241,0.06), inset 0 -6px 18px rgba(255,255,255,0.18)',
+            color: '#041124',
+            background: discrepancyBg,
+            border: '1px solid rgba(2,6,23,0.04)',
+          }}
+        >
+          <StatLabel>{discrepancyLabel}</StatLabel>
+          <StatNumber fontWeight="700" fontSize="1.4rem">{discrepancyValueDisplay}</StatNumber>
+          <StatHelpText>{(declaredNum !== null && dischargedNum !== null) ? `Declared ${formatWeight(declaredNum)} kg • Discharged ${formatWeight(dischargedNum)} kg` : 'Totals unavailable'}</StatHelpText>
         </Stat>
       </SimpleGrid>
 
       {/* SAD mini-stats when searching */}
       { (searchTerm && (sadResults.length > 0 || sadDeclaration.exists)) && (
         <SimpleGrid columns={{ base: 1, md: 3 }} spacing={3} mb={6}>
-          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(79,70,229,0.06)', bg: 'linear-gradient(135deg,#fff 0%, #fff8ef 100%)' }}>
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(79,70,229,0.06)', bg: 'white', border: '1px solid rgba(2,6,23,0.06)' }}>
             <StatLabel>Declared Weight</StatLabel>
             <StatNumber>{formatWeight(sadDeclaration.declaredWeight)}</StatNumber>
             <StatHelpText>{sadDeclaration.exists ? 'From SAD declaration' : 'No declaration found'}</StatHelpText>
           </Stat>
 
-          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(6,182,212,0.06)', bg: 'linear-gradient(135deg,#f0f9ff 0%, #ecfeff 100%)' }}>
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(6,182,212,0.06)', bg: 'white', border: '1px solid rgba(2,6,23,0.06)' }}>
             <StatLabel>Discharged Weight</StatLabel>
             <StatNumber>{formatWeight(sadTotalsMemo.cumulativeNet)} kg</StatNumber>
             <StatHelpText>Sum of Nets from all transactions</StatHelpText>
           </Stat>
 
-          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(16,185,129,0.06)', bg: 'linear-gradient(135deg,#f0fff4 0%, #e6ffef 100%)' }}>
+          <Stat sx={{ p: 4, borderRadius: 12, boxShadow: '0 6px 20px rgba(16,185,129,0.06)', bg: 'white', border: '1px solid rgba(2,6,23,0.06)' }}>
             <StatLabel>SAD Status</StatLabel>
             <StatNumber>{sadDeclaration.status || (sadResults.length ? 'In Progress' : 'Unknown')}</StatNumber>
             <StatHelpText>{sadDeclaration.exists ? 'Declaration row found' : (sadResults.length ? 'No declaration - tickets found' : 'No data')}</StatHelpText>
