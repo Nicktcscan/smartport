@@ -1819,6 +1819,42 @@ export default function WeightReports() {
   };
 
   // ---------- Render ----------
+  // Discrepancy calculations (for Stat card)
+  const declaredValRaw = reportMeta?.declaredWeight ?? null;
+  const declaredVal = numericValue(declaredValRaw);
+  const dischargedValRaw = (reportMeta && (reportMeta.dischargedWeight !== undefined && reportMeta.dischargedWeight !== null)) ? reportMeta.dischargedWeight : cumulativeNetWeight;
+  const dischargedVal = numericValue(dischargedValRaw) ?? 0;
+  let discrepancyDiff = null;
+  if (declaredVal !== null) {
+    discrepancyDiff = Number(dischargedVal) - Number(declaredVal);
+  }
+
+  let discBg = 'gray.50';
+  let discColor = 'gray.800';
+  let discLabel = 'N/A';
+  if (declaredVal === null) {
+    discBg = 'gray.50';
+    discColor = 'gray.800';
+    discLabel = 'Declared not available';
+  } else {
+    if (discrepancyDiff > 0) {
+      // discharged exceeds declared -> red
+      discBg = 'red.100';
+      discColor = 'red.800';
+      discLabel = `Over by ${formatNumber(String(Math.abs(discrepancyDiff)))} kg`;
+    } else if (discrepancyDiff < 0) {
+      // discharged less than declared -> blue
+      discBg = 'blue.50';
+      discColor = 'blue.800';
+      discLabel = `Under by ${formatNumber(String(Math.abs(discrepancyDiff)))} kg`;
+    } else {
+      // equal -> green
+      discBg = 'green.50';
+      discColor = 'green.800';
+      discLabel = `Equal (${formatNumber(String(Math.abs(discrepancyDiff || 0)))} kg)`;
+    }
+  }
+
   return (
     <Container maxW="8xl" py={{ base: 4, md: 8 }} className="wr-container">
       <Box mb={6} className="panel-3d">
@@ -1963,9 +1999,9 @@ export default function WeightReports() {
           </Flex>
         </Box>
 
-        {/* Re-introduced SAD stat cards (Declared / Discharged / SAD Status) */}
+        {/* Re-introduced SAD stat cards (Declared / Discharged / SAD Status / Discrepancy) */}
         {(reportMeta?.sad || originalTickets.length > 0) && (
-          <SimpleGrid columns={{ base: 1, md: 3 }} gap={3} mb={4}>
+          <SimpleGrid columns={{ base: 1, md: 4 }} gap={3} mb={4}>
             <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
               <StatLabel>Declared Weight</StatLabel>
               <StatNumber>{reportMeta.declaredWeight != null ? formatNumber(String(reportMeta.declaredWeight)) : 'N/A'}</StatNumber>
@@ -1974,7 +2010,7 @@ export default function WeightReports() {
 
             <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
               <StatLabel>Discharged Weight</StatLabel>
-              <StatNumber>{reportMeta.dischargedWeight != null ? formatNumber(String(reportMeta.dischargedWeight)) : (formatNumber(String(cumulativeNetWeight)) || '0')}</StatNumber>
+              <StatNumber>{(reportMeta.dischargedWeight != null ? formatNumber(String(reportMeta.dischargedWeight)) : (formatNumber(String(cumulativeNetWeight)) || '0'))}</StatNumber>
               <StatHelpText>Sum of ticket nets (fetched)</StatHelpText>
             </Stat>
 
@@ -1982,6 +2018,12 @@ export default function WeightReports() {
               <StatLabel>SAD Status</StatLabel>
               <StatNumber>{reportMeta.sadStatus || (reportMeta.sadExists ? 'In Progress' : 'Unknown')}</StatNumber>
               <StatHelpText>{reportMeta.sadExists ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
+            </Stat>
+
+            <Stat bg={discBg} color={discColor} px={4} py={3} borderRadius="md" boxShadow="sm">
+              <StatLabel>Discrepancy</StatLabel>
+              <StatNumber>{declaredVal === null ? 'N/A' : `${formatNumber(String(Math.abs(discrepancyDiff || 0)))} kg`}</StatNumber>
+              <StatHelpText>{discLabel}</StatHelpText>
             </Stat>
           </SimpleGrid>
         )}
