@@ -204,12 +204,15 @@ async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7
 
 async function getNextTicketNoFromDB(localHistory = []) {
   try {
+    // Fetch *all* M- tickets (or as many as the DB returns) to compute highest numeric suffix.
+    // We deliberately avoid capping at 1000 to satisfy the user's request that counts aren't limited.
+    // Use a large range to encourage Supabase to return many rows; adjust if you have pagination on the DB.
     const { data, error } = await supabase
       .from('tickets')
       .select('ticket_no')
       .ilike('ticket_no', 'M-%')
       .order('submitted_at', { ascending: false })
-      .limit(1000);
+      .range(0, 1000000); // large range to avoid accidental 1000 cap
 
     if (error) {
       console.warn('Could not fetch ticket_no from DB; falling back to local history', error);
@@ -669,7 +672,7 @@ export default function ManualEntry() {
         .from('tickets')
         .select('*')
         .order('submitted_at', { ascending: false })
-        .limit(2000);
+        .range(0, 1000000); // remove the 2000 cap — fetch a very large range so counts aren't artificially limited
 
       if (error) {
         console.warn('Error loading tickets', error);
