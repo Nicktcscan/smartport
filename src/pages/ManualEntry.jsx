@@ -204,18 +204,16 @@ async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7
 
 async function getNextTicketNoFromDB(localHistory = []) {
   try {
-    // Fetch *all* M- tickets (or as many as the DB returns) to compute highest numeric suffix.
-    // We deliberately avoid capping at 1000 to satisfy the user's request that counts aren't limited.
-    // Use a large range to encourage Supabase to return many rows; adjust if you have pagination on the DB.
+    // Fetch latest M- ticket (if any) to determine next number.
     const { data, error } = await supabase
       .from('tickets')
       .select('ticket_no')
       .ilike('ticket_no', 'M-%')
       .order('submitted_at', { ascending: false })
-      .range(0, 1000000); // large range to avoid accidental 1000 cap
+      .limit(1);
 
     if (error) {
-      console.warn('Could not fetch ticket_no from DB; falling back to local history', error);
+      console.warn('Could not fetch latest M- ticket_no from DB; falling back to local history', error);
     }
 
     const candidates = (data && data.map((r) => r.ticket_no).filter(Boolean)) || localHistory.map((h) => h.data?.ticketNo).filter(Boolean);
@@ -373,6 +371,9 @@ export default function ManualEntry() {
 
   // authoritative manual count (tickets table where ticket_no starts with M-)
   const [manualCount, setManualCount] = useState(0);
+
+  // authoritative total tickets count (all tickets)
+  const [totalTicketsAll, setTotalTicketsAll] = useState(0);
 
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
@@ -668,11 +669,12 @@ export default function ManualEntry() {
   ----------------------- */
   const fetchHistory = useCallback(async () => {
     try {
+      // Fetch recent tickets for the UI (kept limited for performance).
       const { data, error } = await supabase
         .from('tickets')
         .select('*')
         .order('submitted_at', { ascending: false })
-        .range(0, 1000000); // remove the 2000 cap — fetch a very large range so counts aren't artificially limited
+        .limit(2000);
 
       if (error) {
         console.warn('Error loading tickets', error);
@@ -683,6 +685,7 @@ export default function ManualEntry() {
       if (!Array.isArray(data)) {
         setHistory([]);
         setManualCount(0);
+        setTotalTicketsAll(0);
         return;
       }
 
@@ -732,15 +735,48 @@ export default function ManualEntry() {
       setHistory(deduped);
       setPage(1);
 
-      // authoritative manual count: tickets where ticket_no starts with "M-"
+      // authoritative manual count: use a precise count query (uncapped)
       try {
+        const { count: manualCnt, error: manualErr } = await supabase
+          .from('tickets')
+          .select('id', { head: true, count: 'exact' })
+          .ilike('ticket_no', 'M-%');
+
+        if (manualErr) {
+          console.warn('manual count query failed', manualErr);
+          // fallback to local calc
+          const manualRows = (data || []).filter((r) => {
+            const tn = (r.ticket_no ?? '').toString();
+            return /^M-/i.test(tn);
+          });
+          setManualCount(manualRows.length);
+        } else {
+          setManualCount(manualCnt || 0);
+        }
+      } catch (e) {
+        console.warn('manual count fallback', e);
         const manualRows = (data || []).filter((r) => {
           const tn = (r.ticket_no ?? '').toString();
           return /^M-/i.test(tn);
         });
         setManualCount(manualRows.length);
+      }
+
+      // authoritative total tickets count (uncapped)
+      try {
+        const { count: totalCnt, error: totalErr } = await supabase
+          .from('tickets')
+          .select('id', { head: true, count: 'exact' });
+
+        if (totalErr) {
+          console.warn('total tickets count query failed', totalErr);
+          setTotalTicketsAll(data.length);
+        } else {
+          setTotalTicketsAll(totalCnt || data.length);
+        }
       } catch (e) {
-        setManualCount(0);
+        console.warn('total count fallback', e);
+        setTotalTicketsAll(data.length);
       }
     } catch (err) {
       console.error('fetchHistory error', err);
@@ -1677,7 +1713,7 @@ export default function ManualEntry() {
 
         <Spacer />
 
-        <Text fontSize="sm" color="gray.500">Showing {filteredHistory.length} tickets</Text>
+        <Text fontSize="sm" color="gray.500">Showing {filteredHistory.length} tickets (DB total: {totalTicketsAll})</Text>
       </Flex>
 
       {/* History */}
@@ -1843,7 +1879,7 @@ export default function ManualEntry() {
               <Button size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} isDisabled={page === totalPages}>Next</Button>
             </Flex>
 
-            <Text>Page {page} of {totalPages} ({totalTickets} tickets)</Text>
+            <Text>Page {page} of {totalPages} ({totalTickets} shown — DB total: {totalTicketsAll})</Text>
 
             <Box>
               <Text fontSize="sm" color="gray.600">{/* placeholder */}</Text>
