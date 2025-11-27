@@ -204,16 +204,15 @@ async function insertTicketWithRetry(insertData, historyRef = [], retryLimit = 7
 
 async function getNextTicketNoFromDB(localHistory = []) {
   try {
-    // Fetch latest M- ticket (if any) to determine next number.
     const { data, error } = await supabase
       .from('tickets')
       .select('ticket_no')
       .ilike('ticket_no', 'M-%')
       .order('submitted_at', { ascending: false })
-      .limit(1);
+      .limit(1000);
 
     if (error) {
-      console.warn('Could not fetch latest M- ticket_no from DB; falling back to local history', error);
+      console.warn('Could not fetch ticket_no from DB; falling back to local history', error);
     }
 
     const candidates = (data && data.map((r) => r.ticket_no).filter(Boolean)) || localHistory.map((h) => h.data?.ticketNo).filter(Boolean);
@@ -372,8 +371,8 @@ export default function ManualEntry() {
   // authoritative manual count (tickets table where ticket_no starts with M-)
   const [manualCount, setManualCount] = useState(0);
 
-  // authoritative total tickets count (all tickets)
-  const [totalTicketsAll, setTotalTicketsAll] = useState(0);
+  // authoritative totals for manual tickets (server-wide)
+  const [manualTotals, setManualTotals] = useState({ count: 0, totalGross: 0, totalNet: 0 });
 
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
@@ -667,9 +666,61 @@ export default function ManualEntry() {
   /* -----------------------
      Load tickets and operator at mount (and expose as fetchHistory to refresh after edits)
   ----------------------- */
+
+  // New: batched aggregator for all manual tickets -> computes authoritative manualCount, totalGross, totalNet
+  const computeManualTotalsFromDB = useCallback(async () => {
+    try {
+      const batchSize = 1000;
+      let from = 0;
+      let hasMore = true;
+      let count = 0;
+      let totalGross = 0;
+      let totalNet = 0;
+
+      while (hasMore) {
+        const to = from + batchSize - 1;
+        const { data, error } = await supabase
+          .from('tickets')
+          .select('ticket_no, gross, net')
+          .range(from, to);
+
+        if (error) {
+          // If there's an error, bail and keep previous totals
+          console.warn('computeManualTotalsFromDB fetch error', error);
+          break;
+        }
+
+        if (!data || data.length === 0) {
+          break;
+        }
+
+        for (const r of data) {
+          const tn = (r.ticket_no ?? '').toString();
+          if (/^M-/i.test(tn)) {
+            count += 1;
+            const g = numericValue(r.gross);
+            const n = numericValue(r.net);
+            if (g !== null) totalGross += g;
+            if (n !== null) totalNet += n;
+          }
+        }
+
+        if (data.length < batchSize) {
+          hasMore = false;
+        } else {
+          from += batchSize;
+        }
+      }
+
+      setManualTotals({ count, totalGross, totalNet });
+      setManualCount(count);
+    } catch (err) {
+      console.error('computeManualTotalsFromDB error', err);
+    }
+  }, []);
+
   const fetchHistory = useCallback(async () => {
     try {
-      // Fetch recent tickets for the UI (kept limited for performance).
       const { data, error } = await supabase
         .from('tickets')
         .select('*')
@@ -685,7 +736,7 @@ export default function ManualEntry() {
       if (!Array.isArray(data)) {
         setHistory([]);
         setManualCount(0);
-        setTotalTicketsAll(0);
+        setManualTotals({ count: 0, totalGross: 0, totalNet: 0 });
         return;
       }
 
@@ -735,53 +786,12 @@ export default function ManualEntry() {
       setHistory(deduped);
       setPage(1);
 
-      // authoritative manual count: use a precise count query (uncapped)
-      try {
-        const { count: manualCnt, error: manualErr } = await supabase
-          .from('tickets')
-          .select('id', { head: true, count: 'exact' })
-          .ilike('ticket_no', 'M-%');
-
-        if (manualErr) {
-          console.warn('manual count query failed', manualErr);
-          // fallback to local calc
-          const manualRows = (data || []).filter((r) => {
-            const tn = (r.ticket_no ?? '').toString();
-            return /^M-/i.test(tn);
-          });
-          setManualCount(manualRows.length);
-        } else {
-          setManualCount(manualCnt || 0);
-        }
-      } catch (e) {
-        console.warn('manual count fallback', e);
-        const manualRows = (data || []).filter((r) => {
-          const tn = (r.ticket_no ?? '').toString();
-          return /^M-/i.test(tn);
-        });
-        setManualCount(manualRows.length);
-      }
-
-      // authoritative total tickets count (uncapped)
-      try {
-        const { count: totalCnt, error: totalErr } = await supabase
-          .from('tickets')
-          .select('id', { head: true, count: 'exact' });
-
-        if (totalErr) {
-          console.warn('total tickets count query failed', totalErr);
-          setTotalTicketsAll(data.length);
-        } else {
-          setTotalTicketsAll(totalCnt || data.length);
-        }
-      } catch (e) {
-        console.warn('total count fallback', e);
-        setTotalTicketsAll(data.length);
-      }
+      // compute authoritative manual totals in background (batched)
+      computeManualTotalsFromDB().catch((e) => console.warn('computeManualTotalsFromDB error', e));
     } catch (err) {
       console.error('fetchHistory error', err);
     }
-  }, [toast]);
+  }, [toast, computeManualTotalsFromDB]);
 
   useEffect(() => {
     let mounted = true;
@@ -809,7 +819,7 @@ export default function ManualEntry() {
     })();
 
     return () => { mounted = false; };
-  }, [fetchHistory]);
+  }, [fetchHistory, computeManualTotalsFromDB]);
 
   /* Submit form (optimistic UI + DB) */
   const handleSubmit = async () => {
@@ -971,6 +981,9 @@ export default function ManualEntry() {
       // replace temp with persisted entry in UI; then refresh full history from DB
       await fetchHistory();
 
+      // recalc authoritative manual totals
+      computeManualTotalsFromDB().catch((e) => console.warn('computeManualTotalsFromDB error', e));
+
       toast({ title: 'Ticket saved', description: `Ticket ${newTicketNo} created`, status: 'success', duration: 3000, isClosable: true });
 
       // Reset form after success
@@ -1068,17 +1081,14 @@ export default function ManualEntry() {
     setPage(n);
   };
 
-  // Stats: TOTAL GROSS and TOTAL NET for manual tickets
+  // Stats: TOTAL GROSS and TOTAL NET for manual tickets — now authoritative from manualTotals
   const stats = useMemo(() => {
-    const manualOnly = history.filter((h) => h.data.manual && String(h.data.manual).toLowerCase() === 'yes');
-    const count = manualOnly.length;
-    if (count === 0) return { count: 0, totalGross: null, totalNet: null };
-    const grossVals = manualOnly.map((m) => numericValue(m.data.gross)).filter((n) => n !== null);
-    const netVals = manualOnly.map((m) => numericValue(m.data.net)).filter((n) => n !== null);
-    const totalGross = grossVals.length ? grossVals.reduce((a, b) => a + b, 0) : null;
-    const totalNet = netVals.length ? netVals.reduce((a, b) => a + b, 0) : null;
-    return { count, totalGross, totalNet };
-  }, [history]);
+    return {
+      count: manualTotals.count || 0,
+      totalGross: manualTotals.totalGross || null,
+      totalNet: manualTotals.totalNet || null,
+    };
+  }, [manualTotals]);
 
   const isMobile = useBreakpointValue({ base: true, md: false });
 
@@ -1260,6 +1270,9 @@ export default function ManualEntry() {
 
       await fetchHistory();
 
+      // recalc authoritative manual totals
+      computeManualTotalsFromDB().catch((e) => console.warn('computeManualTotalsFromDB error', e));
+
       toast({ title: 'Saved', description: `Ticket updated`, status: 'success', duration: 2500 });
       setEditingRowId(null);
       setEditRowData({});
@@ -1437,6 +1450,9 @@ export default function ManualEntry() {
         }
 
         await fetchHistory();
+
+        // recompute authoritative manual totals after edits
+        computeManualTotalsFromDB().catch((e) => console.warn('computeManualTotalsFromDB error', e));
       } catch (err) {
         console.error('Save view edit failed', err);
         toast({ title: 'Save failed', description: err?.message || 'Unexpected', status: 'error', duration: 5000 });
@@ -1665,7 +1681,7 @@ export default function ManualEntry() {
           }}
         >
           <StatLabel>Total Manual Tickets</StatLabel>
-          <StatNumber>{manualCount}</StatNumber>
+          <StatNumber>{manualTotals.count ?? manualCount ?? 0}</StatNumber>
           <StatHelpText>Tickets with ticket_no starting with "M-"</StatHelpText>
         </Stat>
 
@@ -1680,7 +1696,7 @@ export default function ManualEntry() {
           }}
         >
           <StatLabel>Total Gross</StatLabel>
-          <StatNumber>{stats.totalGross ? `${formatNumber(String(stats.totalGross))} kg` : '—'}</StatNumber>
+          <StatNumber>{(manualTotals.totalGross !== null && manualTotals.totalGross !== undefined) ? `${formatNumber(String(manualTotals.totalGross))} kg` : '—'}</StatNumber>
           <StatHelpText>Sum of gross weights for manual tickets</StatHelpText>
         </Stat>
 
@@ -1695,7 +1711,7 @@ export default function ManualEntry() {
           }}
         >
           <StatLabel>Total Net</StatLabel>
-          <StatNumber>{stats.totalNet ? `${formatNumber(String(stats.totalNet))} kg` : '—'}</StatNumber>
+          <StatNumber>{(manualTotals.totalNet !== null && manualTotals.totalNet !== undefined) ? `${formatNumber(String(manualTotals.totalNet))} kg` : '—'}</StatNumber>
           <StatHelpText>Sum of net weights for manual tickets</StatHelpText>
         </Stat>
       </SimpleGrid>
@@ -1713,7 +1729,7 @@ export default function ManualEntry() {
 
         <Spacer />
 
-        <Text fontSize="sm" color="gray.500">Showing {filteredHistory.length} tickets (DB total: {totalTicketsAll})</Text>
+        <Text fontSize="sm" color="gray.500">Showing {filteredHistory.length} tickets</Text>
       </Flex>
 
       {/* History */}
@@ -1879,7 +1895,7 @@ export default function ManualEntry() {
               <Button size="sm" onClick={() => setPage((p) => Math.min(totalPages, p + 1))} isDisabled={page === totalPages}>Next</Button>
             </Flex>
 
-            <Text>Page {page} of {totalPages} ({totalTickets} shown — DB total: {totalTicketsAll})</Text>
+            <Text>Page {page} of {totalPages} ({totalTickets} tickets)</Text>
 
             <Box>
               <Text fontSize="sm" color="gray.600">{/* placeholder */}</Text>
