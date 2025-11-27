@@ -1,4 +1,5 @@
 // src/pages/AdminPanel.jsx
+/* eslint-disable no-unused-vars */
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import {
   Box,
@@ -80,6 +81,33 @@ const MotionStatNumber = motion(StatNumber);
 
 const shadows = { md: 'rgba(0,0,0,0.08) 0px 4px 12px', lg: 'rgba(0,0,0,0.12) 0px 10px 24px' };
 const DEFAULT_CHART_DAYS = 7;
+
+/* -----------------------
+   Helpers: Paged fetch for Supabase (uncapped)
+   - pages with range(from,to) retrieving all rows
+   - accepts optional filterFn(query)
+----------------------- */
+async function fetchAllPagedSupabase(tableName, selectCols = '*', orderBy = null, ascending = false, filterFn = null) {
+  const pageSize = 1000;
+  let from = 0;
+  const out = [];
+  while (true) {
+    const to = from + pageSize - 1;
+    let baseQuery = supabase.from(tableName).select(selectCols);
+    if (typeof filterFn === 'function') {
+      baseQuery = filterFn(baseQuery);
+    } else if (orderBy) {
+      baseQuery = baseQuery.order(orderBy, { ascending });
+    }
+    const { data, error } = await baseQuery.range(from, to);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    out.push(...data);
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  return out;
+}
 
 /* small debounce hook */
 function useDebounce(value, delay = 250) {
@@ -272,9 +300,11 @@ export default function AdminPanel() {
     });
     const trucksExited = exitedSet.size;
 
-    const gateOpsToday = (ticketsArr || []).filter((r) =>
-      isToday(r.date || r.submitted_at) && statusCountsAsGateOp(r.status)
-    ).length;
+    // Gate Ops Today: count every transaction that happens TODAY
+    // -> tickets recorded today + outgates recorded today (counts rows; a ticket + exit both count)
+    const ticketsTodayCount = (ticketsArr || []).filter((r) => isToday(r.submitted_at || r.date || r.created_at)).length;
+    const outgatesTodayCount = (outgatesArr || []).filter((r) => isToday(r.created_at || r.outgate_at)).length;
+    const gateOpsToday = ticketsTodayCount + outgatesTodayCount;
 
     // reportsGenerated derived from reportsArr length (single source)
     const reportsGenerated = (reportsArr || []).length;
@@ -287,7 +317,6 @@ export default function AdminPanel() {
         }
       } catch (e) {
         // swallow if animation cannot start (safety)
-        // console.debug('trucksAnim.start failed', e);
       }
 
       try {
@@ -295,7 +324,7 @@ export default function AdminPanel() {
           reportsAnim.start({ scale: [1, 1.06, 1], transition: { duration: 0.6 } });
         }
       } catch (e) {
-        // console.debug('reportsAnim.start failed', e);
+        // swallow
       }
     }
 
@@ -311,32 +340,32 @@ export default function AdminPanel() {
     }));
   }, [reportsAnim, trucksAnim]);
 
-  // initial fetch (parallel)
+  // initial fetch (parallel) using fetchAllPagedSupabase — uncapped
   const fetchData = useCallback(async () => {
     setLoadingData(true);
     setLoadingUsers(true);
     setLoadingReports(true);
     try {
       // fetch in parallel to reduce time
-      const [usersRes, ticketsRes, outRes, reportsRes] = await Promise.all([
-        supabase.from('users').select('id, username, email, role, updated_at'),
-        supabase.from('tickets').select('ticket_id, ticket_no, gnsw_truck_no, date, submitted_at, sad_no, gross, tare, net, file_url, driver, status, operation').order('submitted_at', { ascending: false }).limit(2000),
-        supabase.from('outgate').select('id, ticket_id, ticket_no, vehicle_number, driver, sad_no, gross, tare, net, created_at').order('created_at', { ascending: false }).limit(2000),
-        supabase.from('reports_generated').select('id, report_type, generated_by, generated_at, file_url').order('generated_at', { ascending: false }).limit(2000),
+      const [
+        usersRes,
+        ticketsRes,
+        outRes,
+        reportsRes,
+      ] = await Promise.all([
+        fetchAllPagedSupabase('users', 'id, username, email, role, updated_at', 'updated_at', false),
+        fetchAllPagedSupabase('tickets', 'ticket_id, ticket_no, gnsw_truck_no, date, submitted_at, sad_no, gross, tare, net, file_url, driver, status, operation', 'submitted_at', false),
+        fetchAllPagedSupabase('outgate', 'id, ticket_id, ticket_no, vehicle_number, driver, sad_no, gross, tare, net, created_at', 'created_at', false),
+        fetchAllPagedSupabase('reports_generated', 'id, report_type, generated_by, generated_at, file_url', 'generated_at', false),
       ]);
 
-      if (usersRes.error) throw usersRes.error;
-      if (ticketsRes.error) throw ticketsRes.error;
-      if (outRes.error) throw outRes.error;
-      if (reportsRes.error) throw reportsRes.error;
-
-      setUsers(usersRes.data || []);
-      setTickets(ticketsRes.data || []);
-      setOutgates(outRes.data || []);
-      setReports(reportsRes.data || []);
+      setUsers(usersRes || []);
+      setTickets(ticketsRes || []);
+      setOutgates(outRes || []);
+      setReports(reportsRes || []);
 
       // recompute analytics
-      recomputeAnalytics(ticketsRes.data || [], outRes.data || [], reportsRes.data || []);
+      recomputeAnalytics(ticketsRes || [], outRes || [], reportsRes || []);
     } catch (err) {
       console.error('Admin panel fetch error', err);
       toast({ title: 'Error fetching dashboard data', description: err?.message || 'Unexpected error', status: 'error', duration: 6000, isClosable: true });
@@ -581,8 +610,6 @@ export default function AdminPanel() {
       ],
     };
   }, [tickets, chartDays]);
-
-  // pie chart for users
 
   // ActivityItem component (keeps popovers contained)
   const ActivityItem = ({ item }) => {
@@ -895,6 +922,7 @@ export default function AdminPanel() {
     }
   };
 
+  // Render (UI part)
   return (
     <Box mt={8} px={{ base: '6', md: '12' }} pb={12} fontFamily="Inter, system-ui, -apple-system, 'Segoe UI', Roboto, Arial" maxW="1600px" mx="auto">
       <Heading mb={6} textAlign="center" fontWeight="extrabold">Admin Panel</Heading>

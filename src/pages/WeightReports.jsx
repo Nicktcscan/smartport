@@ -2451,7 +2451,7 @@ export default function WeightReports() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialogOverlay>
-      </AlertDialog>
+      </AlertDialog> 
 
       {/* Crystal Orb (floating) */}
       <Box className="floating-orb" onClick={handleMagicGenerate} role="button" aria-label="Magic Generate">
