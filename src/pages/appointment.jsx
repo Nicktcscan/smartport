@@ -147,26 +147,23 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
-async function generateCode39DataUrl(payloadStr, width = 420, height = 64) {
+async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   try {
     await ensureJsBarcodeLoaded();
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-    // Use displayValue: true so the human-readable payload appears under the barcode
     window.JsBarcode(svgEl, String(payloadStr || ''), {
       format: 'CODE39',
-      displayValue: true,
-      lineColor: '#000000',
-      background: '#ffffff',
+      displayValue: false,
       height: height,
-      width: 2,
-      margin: 6,
-      font: 'monospace',
-      fontSize: 14,
+      width: 3,
+      margin: 10,
+      background: '#ffffff',
+      lineColor: '#000000',
       flat: true,
     });
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height + 28); // extra height for text
+    const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     return pngDataUrl;
   } catch (e) {
     console.error('generateCode39DataUrl failed', e);
@@ -221,7 +218,7 @@ function AppointmentPdf({ ticket }) {
     weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
     agentTin: t.agentTin || t.agent_tin || '',
     agentName: t.agentName || t.agent_name || '',
-    warehouse: t.warehouseLabel || t.warehouse || t.warehouse_label || '',
+    warehouse: t.warehouseLabel || t.warehouse || '',
     pickupDate: t.pickupDate || t.pickup_date || '',
     consolidated: t.consolidated || t.consolidated || '',
     truckNumber: t.truckNumber || t.truck_number || '',
@@ -321,12 +318,12 @@ function AppointmentPdf({ ticket }) {
 
         <PdfView style={pdfStyles.barcodeContainer}>
           {t.barcodeImage ? (
-            <PdfImage src={t.barcodeImage} style={{ width: 420, height: 64 }} />
+            <PdfImage src={t.barcodeImage} style={{ width: 420, height: 48 }} />
           ) : (
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
           <PdfText style={{ fontSize: 9, marginTop: 8, color: '#111827' }}>
-            APPT: {ticketData.appointmentNumber} {ticketData.weighbridgeNumber ? `  |  WB: ${ticketData.weighbridgeNumber}` : ''}
+            Appointment: {ticketData.appointmentNumber} {ticketData.weighbridgeNumber ? `  |  Weighbridge: ${ticketData.weighbridgeNumber}` : ''}
           </PdfText>
         </PdfView>
 
@@ -908,13 +905,11 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Build a barcode payload that includes labels for clarity but uses Code39-safe chars.
-    // Example payload: "APPT2511160009797/WB251100009963"
-    const barcodePayload = weighbridgeNum ? `APPT${appointmentNum}/${weighbridgeNum}` : `APPT${appointmentNum}`;
+    const barcodePayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
 
     let barcodeDataUrl = null;
     try {
-      barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 420, 64);
+      barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 420, 48);
     } catch (e) {
       console.warn('barcode generation failed', e);
       barcodeDataUrl = null;
@@ -1158,7 +1153,6 @@ export default function AppointmentPage() {
     }
   };
 
-  // Compute packing types used
   const packingTypesUsed = useMemo(() => (t1s || []).map(t => t.packingType), [t1s]);
 
   const renderRecords = () => {
