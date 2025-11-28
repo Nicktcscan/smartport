@@ -1105,7 +1105,7 @@ export default function AppointmentsPage() {
         <Stat p={4} borderRadius="md" boxShadow="sm" bg="linear-gradient(90deg,#f97316,#f59e0b)" color="white">
           <StatLabel>Total Posted</StatLabel>
           <StatNumber>{loadingStats ? <Spinner size="sm" color="white" /> : totalPosted}</StatNumber>
-          <StatHelpText>Appointments with status Posted (includes Imported)</StatHelpText>
+          <StatHelpText>Appointments with status Posted (In Progress)</StatHelpText>
           <Box mt={2}><Sparkline data={sparkPostedRatio} /></Box>
         </Stat>
 

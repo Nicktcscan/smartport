@@ -668,55 +668,131 @@ export default function AppointmentPage() {
 
   // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
-    const maxAttempts = 10;
-    const d = new Date(pickupDateValue);
-    const YY = String(d.getFullYear()).slice(-2);
-    const MM = String(d.getMonth() + 1).padStart(2, '0');
-    const DD = String(d.getDate()).padStart(2, '0');
+    // This implementation preserves the digit width already in use for:
+    //  - appointment_number: YYMMDD + <seq digits>
+    //  - weighbridge_number: WBYYMM + <seq digits>
+    // It determines the width by inspecting existing DB values for the same date,
+    // computes the numeric max suffix, and returns the next padded value.
+    try {
+      const d = new Date(pickupDateValue);
+      const YY = String(d.getFullYear()).slice(-2);
+      const MM = String(d.getMonth() + 1).padStart(2, '0');
+      const DD = String(d.getDate()).padStart(2, '0');
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        const { count } = await supabase
-          .from('appointments')
-          .select('id', { head: true, count: 'exact' })
-          .eq('pickup_date', pickupDateValue);
+      // --- Appointment number (YYMMDD + seq) ---
+      const apptPrefix = `${YY}${MM}${DD}`;
+      // fetch existing appointment_numbers for this date (attempt to retrieve many so we can detect width)
+      const { data: appts = [], error: apptErr } = await supabase
+        .from('appointments')
+        .select('appointment_number')
+        .ilike('appointment_number', `${apptPrefix}%`)
+        .limit(2000);
 
-        const existing = Number(count || 0);
-        const seq = existing + 1 + attempt;
-        const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
-        const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
+      if (apptErr) {
+        console.warn('generateUniqueNumbers: failed to fetch appointment_numbers', apptErr);
+      }
 
-        const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
-        const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
-
-        const { count: wbCount } = await supabase
-          .from('appointments')
-          .select('id', { head: true, count: 'exact' })
-          .eq('weighbridge_number', weighbridgeNumber);
-
-        const { count: apptCount } = await supabase
-          .from('appointments')
-          .select('id', { head: true, count: 'exact' })
-          .eq('appointment_number', appointmentNumber);
-
-        if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
-          return { appointmentNumber, weighbridgeNumber };
+      // determine suffix width and numeric max
+      let apptWidth = 4; // default
+      let apptMax = 0;
+      if (Array.isArray(appts) && appts.length > 0) {
+        // collect only those with a numeric suffix after the prefix
+        const numericSuffixes = [];
+        for (const r of appts) {
+          const val = r && r.appointment_number ? String(r.appointment_number) : '';
+          if (!val || !val.startsWith(apptPrefix)) continue;
+          const suffix = val.slice(apptPrefix.length);
+          if (/^\d+$/.test(suffix)) {
+            numericSuffixes.push({ suffix, n: parseInt(suffix, 10) });
+            if (suffix.length > apptWidth) apptWidth = suffix.length;
+          }
         }
-      } catch (e) {
-        console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
+        if (numericSuffixes.length > 0) {
+          apptMax = numericSuffixes.reduce((acc, x) => Math.max(acc, x.n), 0);
+        }
+      }
+      // ensure width can accommodate next number
+      const nextApptCandidate = apptMax + 1;
+      const neededWidth = String(nextApptCandidate).length;
+      if (neededWidth > apptWidth) apptWidth = neededWidth;
+
+      const appointmentNumber = `${apptPrefix}${String(nextApptCandidate).padStart(apptWidth, '0')}`;
+
+      // --- Weighbridge number (WB + YYMM + seq) ---
+      const wbPrefix = `WB${YY}${MM}`;
+      const { data: wbs = [], error: wbErr } = await supabase
+        .from('appointments')
+        .select('weighbridge_number')
+        .ilike('weighbridge_number', `${wbPrefix}%`)
+        .limit(2000);
+
+      if (wbErr) {
+        console.warn('generateUniqueNumbers: failed to fetch weighbridge_numbers', wbErr);
+      }
+
+      let wbWidth = 5; // default
+      let wbMax = 0;
+      if (Array.isArray(wbs) && wbs.length > 0) {
+        const numericSuffixes = [];
+        for (const r of wbs) {
+          const val = r && r.weighbridge_number ? String(r.weighbridge_number) : '';
+          if (!val || !val.startsWith(wbPrefix)) continue;
+          const suffix = val.slice(wbPrefix.length);
+          if (/^\d+$/.test(suffix)) {
+            numericSuffixes.push({ suffix, n: parseInt(suffix, 10) });
+            if (suffix.length > wbWidth) wbWidth = suffix.length;
+          }
+        }
+        if (numericSuffixes.length > 0) wbMax = numericSuffixes.reduce((acc, x) => Math.max(acc, x.n), 0);
+      }
+
+      const nextWbCandidate = wbMax + 1;
+      const neededWbWidth = String(nextWbCandidate).length;
+      if (neededWbWidth > wbWidth) wbWidth = neededWbWidth;
+
+      const weighbridgeNumber = `${wbPrefix}${String(nextWbCandidate).padStart(wbWidth, '0')}`;
+
+      // Final check: ensure uniqueness (quick existence checks)
+      const [{ data: apptExists = [] } = {}] = await Promise.all([
+        supabase.from('appointments').select('id').eq('appointment_number', appointmentNumber).limit(1),
+      ]).catch(() => [{ data: [] }]);
+
+      // if exists, fallback to scanning + incrementing until free (rare path)
+      if (Array.isArray(apptExists) && apptExists.length > 0) {
+        // increment numeric suffix until unique; cap attempts to avoid infinite loop
+        let attempt = 0;
+        let candidateNum = nextApptCandidate;
+        let candidate;
+        while (attempt < 50) {
+          candidate = `${apptPrefix}${String(candidateNum).padStart(apptWidth, '0')}`;
+          const { data: exists } = await supabase.from('appointments').select('id').eq('appointment_number', candidate).limit(1);
+          if (!exists || exists.length === 0) {
+            return { appointmentNumber: candidate, weighbridgeNumber };
+          }
+          candidateNum += 1;
+          attempt += 1;
+        }
+        // if still colliding, fallback to timestamp approach (keeps prefix but extends)
         const ts = Date.now();
         return {
-          appointmentNumber: `${YY}${MM}${DD}${ts}`,
-          weighbridgeNumber: `WB${YY}${MM}${ts}`,
+          appointmentNumber: `${apptPrefix}${String(ts)}`.slice(0, Math.max(apptPrefix.length + apptWidth, apptPrefix.length + 10)),
+          weighbridgeNumber,
         };
       }
-    }
 
-    const ts2 = Date.now();
-    return {
-      appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-    };
+      return { appointmentNumber, weighbridgeNumber };
+    } catch (e) {
+      console.warn('generateUniqueNumbers: unexpected error, falling back to timestamp-based numbers', e);
+      const d = new Date(pickupDateValue || new Date().toISOString().slice(0, 10));
+      const YY = String(d.getFullYear()).slice(-2);
+      const MM = String(d.getMonth() + 1).padStart(2, '0');
+      const DD = String(d.getDate()).padStart(2, '0');
+      const ts = Date.now();
+      return {
+        appointmentNumber: `${YY}${MM}${DD}${String(ts)}`,
+        weighbridgeNumber: `WB${YY}${MM}${String(ts)}`,
+      };
+    }
   }
 
   async function generateNumbersUsingSupabase(pickupDateValue) {
