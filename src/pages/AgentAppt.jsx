@@ -1376,7 +1376,7 @@ export default function AgentApptPage() {
   // ---------- rest of UI rendering ----------
   return (
     <Container maxW="container.lg" py={8} ref={containerRef}>
-      <Heading mb={4}>Weighbridge Appointment — Self Service</Heading>
+      <Heading mb={4}>Create Appointment</Heading>
 
       <Box p={6} className="appt-glass" mb={6} borderRadius="lg">
         <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
