@@ -118,24 +118,44 @@ async function ensureJsBarcodeLoaded() {
   });
 }
 
+// Render SVG string into a high-DPI PNG data URL so scanners can reliably read the bars.
 async function svgStringToPngDataUrl(svgString, width, height) {
   return await new Promise((resolve, reject) => {
     try {
       const img = new Image();
+      // keep charset utf-8 and URI encode
       const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
       img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(width);
-        canvas.height = Math.round(height);
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         try {
-          const png = canvas.toDataURL('image/png');
-          resolve(png);
-        } catch (e) {
-          reject(e);
+          // use devicePixelRatio (or at least 2x) to render a crisp PNG
+          const DPR = Math.max(2, (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 2);
+          const canvas = document.createElement('canvas');
+          // scaled pixel dimensions
+          canvas.width = Math.round(width * DPR);
+          canvas.height = Math.round(height * DPR);
+          // CSS size - keep original width/height so drawing scales correctly
+          canvas.style.width = `${width}px`;
+          canvas.style.height = `${height}px`;
+          const ctx = canvas.getContext('2d');
+
+          // white background so scanners don't get transparency artifacts
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+          // scale drawing operations to DPR
+          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+          // draw the image into the canvas at logical size
+          ctx.drawImage(img, 0, 0, width, height);
+
+          // produce PNG
+          try {
+            const png = canvas.toDataURL('image/png');
+            resolve(png);
+          } catch (e) {
+            reject(e);
+          }
+        } catch (err) {
+          reject(err);
         }
       };
       img.onerror = (err) => reject(err);
@@ -146,22 +166,44 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
+// sanitize value to allowed Code39 characters and force uppercase
+function sanitizeForCode39(s) {
+  if (!s && s !== 0) return '';
+  const raw = String(s || '');
+  // Code39 allowed: 0-9, A-Z, space, -, ., $, /, +, %
+  // remove any other characters and convert to uppercase
+  return raw.toUpperCase().replace(/[^0-9A-Z \-.\\$\\/\\+\\%]/g, '');
+}
+
 async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   try {
     await ensureJsBarcodeLoaded();
+    // sanitize and uppercase payload for CODE39
+    const sanitized = sanitizeForCode39(payloadStr);
+
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-    window.JsBarcode(svgEl, String(payloadStr || ''), {
+
+    // Use JsBarcode to render SVG (CODE39)
+    // tuned options for robust scanning:
+    // - format: CODE39 (explicit)
+    // - addQuietZone: true (important for scanners)
+    // - flat: false (avoid forcing too-narrow bars)
+    // - displayValue: false (we still preserve machine readability; human text optional)
+    window.JsBarcode(svgEl, String(sanitized || ''), {
       format: 'CODE39',
       displayValue: false,
-      height: height,
-      width: 3,
+      height: Math.max(36, height), // ensure adequate bar height
+      width: 2, // base bar width
       margin: 10,
       background: '#ffffff',
       lineColor: '#000000',
-      flat: true,
+      flat: false,
+      addQuietZone: true,
     });
+
     const svgString = new XMLSerializer().serializeToString(svgEl);
+    // Render to high-DPI PNG for embedding into PDF and for reliable scanner reads
     const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     return pngDataUrl;
   } catch (e) {
@@ -668,131 +710,55 @@ export default function AppointmentPage() {
 
   // --- New helper: generate unique numbers with checks ---
   async function generateUniqueNumbers(pickupDateValue) {
-    // This implementation preserves the digit width already in use for:
-    //  - appointment_number: YYMMDD + <seq digits>
-    //  - weighbridge_number: WBYYMM + <seq digits>
-    // It determines the width by inspecting existing DB values for the same date,
-    // computes the numeric max suffix, and returns the next padded value.
-    try {
-      const d = new Date(pickupDateValue);
-      const YY = String(d.getFullYear()).slice(-2);
-      const MM = String(d.getMonth() + 1).padStart(2, '0');
-      const DD = String(d.getDate()).padStart(2, '0');
+    const maxAttempts = 10;
+    const d = new Date(pickupDateValue);
+    const YY = String(d.getFullYear()).slice(-2);
+    const MM = String(d.getMonth() + 1).padStart(2, '0');
+    const DD = String(d.getDate()).padStart(2, '0');
 
-      // --- Appointment number (YYMMDD + seq) ---
-      const apptPrefix = `${YY}${MM}${DD}`;
-      // fetch existing appointment_numbers for this date (attempt to retrieve many so we can detect width)
-      const { data: appts = [], error: apptErr } = await supabase
-        .from('appointments')
-        .select('appointment_number')
-        .ilike('appointment_number', `${apptPrefix}%`)
-        .limit(2000);
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const { count } = await supabase
+          .from('appointments')
+          .select('id', { head: true, count: 'exact' })
+          .eq('pickup_date', pickupDateValue);
 
-      if (apptErr) {
-        console.warn('generateUniqueNumbers: failed to fetch appointment_numbers', apptErr);
-      }
+        const existing = Number(count || 0);
+        const seq = existing + 1 + attempt;
+        const appointmentNumberBase = `${YY}${MM}${DD}${String(seq).padStart(4, '0')}`;
+        const appointmentNumber = attempt === 0 ? appointmentNumberBase : `${appointmentNumberBase}${String(Math.floor(Math.random() * 900) + 100)}`;
 
-      // determine suffix width and numeric max
-      let apptWidth = 4; // default
-      let apptMax = 0;
-      if (Array.isArray(appts) && appts.length > 0) {
-        // collect only those with a numeric suffix after the prefix
-        const numericSuffixes = [];
-        for (const r of appts) {
-          const val = r && r.appointment_number ? String(r.appointment_number) : '';
-          if (!val || !val.startsWith(apptPrefix)) continue;
-          const suffix = val.slice(apptPrefix.length);
-          if (/^\d+$/.test(suffix)) {
-            numericSuffixes.push({ suffix, n: parseInt(suffix, 10) });
-            if (suffix.length > apptWidth) apptWidth = suffix.length;
-          }
+        const weighbridgeBase = `WB${YY}${MM}${String(seq).padStart(5, '0')}`;
+        const weighbridgeNumber = attempt === 0 ? weighbridgeBase : `${weighbridgeBase}${String(Math.floor(Math.random() * 900) + 100)}`;
+
+        const { count: wbCount } = await supabase
+          .from('appointments')
+          .select('id', { head: true, count: 'exact' })
+          .eq('weighbridge_number', weighbridgeNumber);
+
+        const { count: apptCount } = await supabase
+          .from('appointments')
+          .select('id', { head: true, count: 'exact' })
+          .eq('appointment_number', appointmentNumber);
+
+        if ((Number(wbCount || 0) === 0) && (Number(apptCount || 0) === 0)) {
+          return { appointmentNumber, weighbridgeNumber };
         }
-        if (numericSuffixes.length > 0) {
-          apptMax = numericSuffixes.reduce((acc, x) => Math.max(acc, x.n), 0);
-        }
-      }
-      // ensure width can accommodate next number
-      const nextApptCandidate = apptMax + 1;
-      const neededWidth = String(nextApptCandidate).length;
-      if (neededWidth > apptWidth) apptWidth = neededWidth;
-
-      const appointmentNumber = `${apptPrefix}${String(nextApptCandidate).padStart(apptWidth, '0')}`;
-
-      // --- Weighbridge number (WB + YYMM + seq) ---
-      const wbPrefix = `WB${YY}${MM}`;
-      const { data: wbs = [], error: wbErr } = await supabase
-        .from('appointments')
-        .select('weighbridge_number')
-        .ilike('weighbridge_number', `${wbPrefix}%`)
-        .limit(2000);
-
-      if (wbErr) {
-        console.warn('generateUniqueNumbers: failed to fetch weighbridge_numbers', wbErr);
-      }
-
-      let wbWidth = 5; // default
-      let wbMax = 0;
-      if (Array.isArray(wbs) && wbs.length > 0) {
-        const numericSuffixes = [];
-        for (const r of wbs) {
-          const val = r && r.weighbridge_number ? String(r.weighbridge_number) : '';
-          if (!val || !val.startsWith(wbPrefix)) continue;
-          const suffix = val.slice(wbPrefix.length);
-          if (/^\d+$/.test(suffix)) {
-            numericSuffixes.push({ suffix, n: parseInt(suffix, 10) });
-            if (suffix.length > wbWidth) wbWidth = suffix.length;
-          }
-        }
-        if (numericSuffixes.length > 0) wbMax = numericSuffixes.reduce((acc, x) => Math.max(acc, x.n), 0);
-      }
-
-      const nextWbCandidate = wbMax + 1;
-      const neededWbWidth = String(nextWbCandidate).length;
-      if (neededWbWidth > wbWidth) wbWidth = neededWbWidth;
-
-      const weighbridgeNumber = `${wbPrefix}${String(nextWbCandidate).padStart(wbWidth, '0')}`;
-
-      // Final check: ensure uniqueness (quick existence checks)
-      const [{ data: apptExists = [] } = {}] = await Promise.all([
-        supabase.from('appointments').select('id').eq('appointment_number', appointmentNumber).limit(1),
-      ]).catch(() => [{ data: [] }]);
-
-      // if exists, fallback to scanning + incrementing until free (rare path)
-      if (Array.isArray(apptExists) && apptExists.length > 0) {
-        // increment numeric suffix until unique; cap attempts to avoid infinite loop
-        let attempt = 0;
-        let candidateNum = nextApptCandidate;
-        let candidate;
-        while (attempt < 50) {
-          candidate = `${apptPrefix}${String(candidateNum).padStart(apptWidth, '0')}`;
-          const { data: exists } = await supabase.from('appointments').select('id').eq('appointment_number', candidate).limit(1);
-          if (!exists || exists.length === 0) {
-            return { appointmentNumber: candidate, weighbridgeNumber };
-          }
-          candidateNum += 1;
-          attempt += 1;
-        }
-        // if still colliding, fallback to timestamp approach (keeps prefix but extends)
+      } catch (e) {
+        console.warn('generateUniqueNumbers: check failed, falling back to timestamp', e);
         const ts = Date.now();
         return {
-          appointmentNumber: `${apptPrefix}${String(ts)}`.slice(0, Math.max(apptPrefix.length + apptWidth, apptPrefix.length + 10)),
-          weighbridgeNumber,
+          appointmentNumber: `${YY}${MM}${DD}${ts}`,
+          weighbridgeNumber: `WB${YY}${MM}${ts}`,
         };
       }
-
-      return { appointmentNumber, weighbridgeNumber };
-    } catch (e) {
-      console.warn('generateUniqueNumbers: unexpected error, falling back to timestamp-based numbers', e);
-      const d = new Date(pickupDateValue || new Date().toISOString().slice(0, 10));
-      const YY = String(d.getFullYear()).slice(-2);
-      const MM = String(d.getMonth() + 1).padStart(2, '0');
-      const DD = String(d.getDate()).padStart(2, '0');
-      const ts = Date.now();
-      return {
-        appointmentNumber: `${YY}${MM}${DD}${String(ts)}`,
-        weighbridgeNumber: `WB${YY}${MM}${String(ts)}`,
-      };
     }
+
+    const ts2 = Date.now();
+    return {
+      appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+    };
   }
 
   async function generateNumbersUsingSupabase(pickupDateValue) {
@@ -980,18 +946,20 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    const barcodePayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
+    // compose barcode payload and sanitize it for Code39
+    const rawPayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
+    const sanitizedPayload = sanitizeForCode39(rawPayload);
 
     let barcodeDataUrl = null;
     try {
-      barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 420, 48);
+      barcodeDataUrl = await generateCode39DataUrl(sanitizedPayload, 420, 48);
     } catch (e) {
       console.warn('barcode generation failed', e);
       barcodeDataUrl = null;
     }
 
     ticket.barcodeImage = barcodeDataUrl;
-    ticket.barcodePayload = barcodePayload;
+    ticket.barcodePayload = sanitizedPayload;
     return ticket;
   }
 
