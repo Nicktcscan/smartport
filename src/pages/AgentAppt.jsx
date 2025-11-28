@@ -1,5 +1,7 @@
-// pages/AgentAppt.jsx
+/* eslint-disable no-useless-escape */
 /* eslint-disable no-dupe-keys */
+/* eslint-disable react/jsx-no-undef */
+// pages/AgentAppt.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Box, Button, Container, Heading, Input as ChakraInput, Select, Text, SimpleGrid,
@@ -113,45 +115,29 @@ async function ensureJsBarcodeLoaded() {
     const s = document.createElement('script');
     s.src = 'https://cdn.jsdelivr.net/npm/jsbarcode@3.11.5/dist/JsBarcode.all.min.js';
     s.onload = () => resolve();
-    s.onerror = () => reject(new Error('Failed to load JsBarcode'));
+    s.onerror = (e) => reject(new Error('Failed to load JsBarcode'));
     document.head.appendChild(s);
   });
 }
 
-// convert SVG -> PNG at high DPR for crisp bars (makes scanners happier)
 async function svgStringToPngDataUrl(svgString, width, height) {
   return await new Promise((resolve, reject) => {
     try {
       const img = new Image();
       const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
       img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width);
+        canvas.height = Math.round(height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         try {
-          // force at least 2x DPR, prefer 3x for printed barcodes
-          const DPR = Math.max(2, (typeof window !== 'undefined' && window.devicePixelRatio) ? Math.ceil(window.devicePixelRatio) : 3);
-          const canvas = document.createElement('canvas');
-          canvas.width = Math.round(width * DPR);
-          canvas.height = Math.round(height * DPR);
-          canvas.style.width = `${width}px`;
-          canvas.style.height = `${height}px`;
-          const ctx = canvas.getContext('2d');
-
-          // solid white background
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-          // scale to DPR so image draws crisply
-          ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-          ctx.drawImage(img, 0, 0, width, height);
-
-          // export PNG
-          try {
-            const png = canvas.toDataURL('image/png');
-            resolve(png);
-          } catch (e) {
-            reject(e);
-          }
-        } catch (err) {
-          reject(err);
+          const png = canvas.toDataURL('image/png');
+          resolve(png);
+        } catch (e) {
+          reject(e);
         }
       };
       img.onerror = (err) => reject(err);
@@ -162,53 +148,70 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
-// sanitize for Code39 allowed characters and uppercase
-function sanitizeForCode39(s) {
-  if (!s && s !== 0) return '';
-  const raw = String(s || '');
-  // allowed: 0-9, A-Z, space, -, ., $, /, +, %
-  return raw.toUpperCase().replace(/[^0-9A-Z \-.$/+%]/g, '');
+/**
+ * Fallback generator: draw the payload text onto a canvas (large text)
+ * so scanners that read images of text (rare) may still see it; mostly
+ * this is a graceful fallback so PDF contains an image when JsBarcode fails.
+ */
+async function generateFallbackDataUrl(payloadStr, width = 420, height = 48) {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(width);
+    canvas.height = Math.round(height);
+    const ctx = canvas.getContext('2d');
+    // white background
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // draw a black rectangle to mimic a barcode area
+    ctx.fillStyle = '#000';
+    const pad = 6;
+    ctx.fillRect(pad, pad, canvas.width - pad * 2, canvas.height - pad * 2);
+
+    // overlay payload as white text (centered)
+    ctx.fillStyle = '#fff';
+    const fontSize = Math.max(10, Math.floor((canvas.height - pad * 2) * 0.35));
+    ctx.font = `${fontSize}px monospace`;
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    const txt = String(payloadStr || '').toUpperCase();
+    ctx.fillText(txt, canvas.width / 2, canvas.height / 2);
+
+    return canvas.toDataURL('image/png');
+  } catch (e) {
+    console.warn('generateFallbackDataUrl failed', e);
+    return null;
+  }
 }
 
-async function generateCode39DataUrl(payloadStr, width = 520, height = 96) {
+async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
   try {
     await ensureJsBarcodeLoaded();
-    const sanitized = sanitizeForCode39(payloadStr || '');
-
-    // small safety: if sanitized becomes empty, bail
-    if (!sanitized) return null;
-
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
-
-    // Tuned JsBarcode options for maximum scanner compatibility:
-    // - addQuietZone: true + large margin
-    // - flat: true to produce simpler vertical bars (some printers/scanners like this)
-    // - displayValue: true to show human-readable text under barcode
-    // - width: base bar width (bump it up for printed sheets)
-    // - height: tall bars to help 2D/handheld scanners
-    window.JsBarcode(svgEl, String(sanitized), {
+    window.JsBarcode(svgEl, String(payloadStr || ''), {
       format: 'CODE39',
-      displayValue: true,
-      height: Math.max(60, height),
-      width: 3.2,          // wider bars for robust scanning
-      margin: 30,          // large quiet zone
+      displayValue: false,
+      height: height,
+      width: 3,
+      margin: 10,
       background: '#ffffff',
       lineColor: '#000000',
       flat: true,
-      addQuietZone: true,
-      textAlign: 'center',
-      fontSize: 18,
-      textMargin: 6,
     });
-
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    // Render to high-dpi PNG
     const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
-    return pngDataUrl;
+    if (pngDataUrl) return pngDataUrl;
+    // fallback to canvas-based PNG if conversion failed
+    return await generateFallbackDataUrl(payloadStr, width, height);
   } catch (e) {
-    console.error('generateCode39DataUrl failed', e);
-    return null;
+    console.warn('generateCode39DataUrl failed, falling back', e);
+    try {
+      return await generateFallbackDataUrl(payloadStr, width, height);
+    } catch (ee) {
+      console.error('generateCode39DataUrl fallback failed', ee);
+      return null;
+    }
   }
 }
 
@@ -259,7 +262,7 @@ function AppointmentPdf({ ticket }) {
     weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
     agentTin: t.agentTin || t.agent_tin || '',
     agentName: t.agentName || t.agent_name || '',
-    warehouse: t.warehouseLabel || t.warehouse || '',
+    warehouse: t.warehouseLabel || t.warehouse || t.warehouse_label || '',
     pickupDate: t.pickupDate || t.pickup_date || '',
     consolidated: t.consolidated || t.consolidated || '',
     truckNumber: t.truckNumber || t.truck_number || '',
@@ -359,12 +362,13 @@ function AppointmentPdf({ ticket }) {
 
         <PdfView style={pdfStyles.barcodeContainer}>
           {t.barcodeImage ? (
-            <PdfImage src={t.barcodeImage} style={{ width: 520, height: 96 }} />
+            <PdfImage src={t.barcodeImage} style={{ width: 420, height: 48 }} />
           ) : (
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
           <PdfText style={{ fontSize: 9, marginTop: 8, color: '#111827' }}>
-            Appointment: {ticketData.appointmentNumber} {ticketData.weighbridgeNumber ? `  |  Weighbridge: ${ticketData.weighbridgeNumber}` : ''}
+            Appointment: {ticketData.appointmentNumber}
+            {ticketData.weighbridgeNumber ? `  |  Weighbridge: ${ticketData.weighbridgeNumber}` : ''}
           </PdfText>
         </PdfView>
 
@@ -377,7 +381,7 @@ function AppointmentPdf({ ticket }) {
 }
 
 // ---------- Main page component ----------
-export default function AppointmentPage() {
+export default function AgentApptPage() {
   const toast = useToast();
   const { user } = useAuth() || {}; // capture user to set created_by and logs
 
@@ -757,7 +761,7 @@ export default function AppointmentPage() {
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
     };
   }
 
@@ -788,6 +792,11 @@ export default function AppointmentPage() {
         weighbridgeNumber = nums.weighbridgeNumber;
       }
 
+      // Build a Code39-safe barcode_payload to persist server-side
+      const cleanApptForBarcode = String(appointmentNumber || '').toUpperCase().replace(/[^A-Z0-9\-\.\$\+%\/ ]/g, '');
+      const cleanWbForBarcode = String(weighbridgeNumber || '').toUpperCase().replace(/[^A-Z0-9\-\.\$\+%\/ ]/g, '');
+      const barcodePayload = cleanWbForBarcode ? `APPT${cleanApptForBarcode}/WB${cleanWbForBarcode}` : `APPT${cleanApptForBarcode}`;
+
       const appointmentInsert = {
         appointment_number: appointmentNumber,
         weighbridge_number: weighbridgeNumber,
@@ -805,6 +814,7 @@ export default function AppointmentPage() {
         barcode: null,
         pdf_url: null,
         created_by: user?.id || null, // capture owner
+        barcode_payload: barcodePayload, // <-- persist server-side
       };
 
       try {
@@ -856,6 +866,7 @@ export default function AppointmentPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
+          // even if fetch failed, return data based on inserted values (including barcode_payload)
           return {
             appointment: {
               id: appointmentId,
@@ -873,8 +884,9 @@ export default function AppointmentPage() {
               regime: appointmentInsert.regime,
               totalDocumentedWeight: appointmentInsert.total_documented_weight,
               t1s: t1Rows.map(r => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
-              createdAt: inserted.created_at,
+              createdAt: inserted?.created_at || new Date().toISOString(),
               id: appointmentId,
+              barcode_payload: appointmentInsert.barcode_payload || '',
             }
           };
         }
@@ -898,6 +910,7 @@ export default function AppointmentPage() {
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
             id: fullAppointment.id,
+            barcode_payload: fullAppointment.barcode_payload || appointmentInsert.barcode_payload || '',
           }
         };
       } catch (finalErr) {
@@ -946,85 +959,95 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Compose payload in a compact Code39-safe format: appt/wb
-    // e.g. "2511280027203/WB251100027173"
-    const rawPayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
-    const sanitizedPayload = sanitizeForCode39(rawPayload);
+    // Prefer server-side stored barcode_payload if available (this ensures DB <-> PDF validation)
+    let barcodePayload = (dbAppointment.barcode_payload || dbAppointment.barcodePayload || '').trim();
 
+    if (!barcodePayload) {
+      // Build a Code39-safe payload. Code39 supports A-Z, 0-9 and a few symbols (space - . $ / + %)
+      const cleanAppt = String(appointmentNum || '').toUpperCase().replace(/[^A-Z0-9\-\.\$\+%\/ ]/g, '');
+      const cleanWb = String(weighbridgeNum || '').toUpperCase().replace(/[^A-Z0-9\-\.\$\+%\/ ]/g, '');
+      barcodePayload = cleanWb ? `APPT${cleanAppt}/WB${cleanWb}` : `APPT${cleanAppt}`;
+    }
+
+    // Attempt to generate a barcode image (PNG data URL). If that fails, fallback to a canvas text-based image.
     let barcodeDataUrl = null;
     try {
-      barcodeDataUrl = await generateCode39DataUrl(sanitizedPayload, 520, 96);
+      barcodeDataUrl = await generateCode39DataUrl(barcodePayload, 420, 48);
     } catch (e) {
       console.warn('barcode generation failed', e);
       barcodeDataUrl = null;
     }
 
+    // final fallback: ensure there is at least a text image
+    if (!barcodeDataUrl) {
+      try {
+        barcodeDataUrl = await generateFallbackDataUrl(barcodePayload, 420, 48);
+      } catch (e) {
+        console.warn('final barcode fallback failed', e);
+        barcodeDataUrl = null;
+      }
+    }
+
     ticket.barcodeImage = barcodeDataUrl;
-    ticket.barcodePayload = sanitizedPayload; // useful for diagnostics
+    ticket.barcodePayload = barcodePayload;
     return ticket;
   }
 
-  // ---------- PDF upload helper (robust) ----------
+  // ---------- PDF upload helper (appointments bucket) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
-    if (!blob) return { publicUrl: null, path: null, error: 'no-blob' };
+    if (!blob) return { publicUrl: null, path: null };
 
-    const bucketName = 'appointments'; // user requested bucket
+    const bucketName = 'appointments';
+
     const filename = `WeighbridgeTicket-${appointmentNumber || `appt-${Date.now()}`}.pdf`;
     const path = `tickets/${filename}`;
 
     try {
-      // make File if possible (Browser)
       let fileForUpload;
       try {
         fileForUpload = new File([blob], filename, { type: 'application/pdf' });
       } catch (e) {
-        // fallback: try to convert to Uint8Array
-        try {
-          const arrayBuffer = await blob.arrayBuffer();
-          const uint8 = new Uint8Array(arrayBuffer);
-          fileForUpload = uint8;
-        } catch (err) {
-          console.error('uploadPdfToStorage: converting blob fallback failed', err);
-          return { publicUrl: null, path: null, error: err };
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        fileForUpload = uint8;
+      }
+
+      let uploadRes;
+      try {
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from(bucketName)
+          .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
+
+        uploadRes = { data: uploadData, error: uploadError };
+        if (uploadError) {
+          console.warn('uploadPdfToStorage upload error', uploadError);
         }
-      }
-
-      // Attempt upload with upsert (safe if same name exists)
-      const { error: uploadError } = await supabase.storage
-        .from(bucketName)
-        .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
-
-      if (uploadError) {
-        console.warn('uploadPdfToStorage upload error', uploadError);
-        // return error info so caller can react
-        return { publicUrl: null, path: null, error: uploadError };
-      }
-
-      // Try to get a public URL
-      try {
-        const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
-        const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
-        if (publicUrl) return { publicUrl, path, error: null };
       } catch (e) {
-        console.warn('uploadPdfToStorage getPublicUrl failed', e);
+        console.warn('uploadPdfToStorage upload threw', e);
+        // eslint-disable-next-line no-unused-vars
+        uploadRes = { data: null, error: e };
       }
 
-      // If bucket is private, create signed URL (best-effort)
       try {
-        const signedSeconds = 60 * 60; // 1 hour
+        const getPub = await supabase.storage.from(bucketName).getPublicUrl(path);
+        const publicUrl = getPub?.data?.publicUrl || getPub?.public_url || null;
+        if (publicUrl) {
+          return { publicUrl, path };
+        }
+      } catch (e) { /* ignore */ }
+
+      try {
+        const signedSeconds = 60 * 60;
         const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
         if (!signedErr && signedData?.signedUrl) {
-          return { publicUrl: signedData.signedUrl, path, error: null };
+          return { publicUrl: signedData.signedUrl, path };
         }
-      } catch (e) {
-        console.warn('uploadPdfToStorage createSignedUrl failed', e);
-      }
+      } catch (e) { /* ignore */ }
 
-      // fallback: return path so caller can decide what to persist
-      return { publicUrl: null, path, error: null };
+      return { publicUrl: null, path };
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
-      return { publicUrl: null, path: null, error: e };
+      return { publicUrl: null, path: null };
     }
   }
 
@@ -1116,6 +1139,7 @@ export default function AppointmentPage() {
         driverLicense: dbAppointment.driverLicense || dbAppointment.driver_license_no,
         t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
         createdAt: dbAppointment.createdAt || dbAppointment.created_at,
+        barcode_payload: dbAppointment.barcode_payload || dbAppointment.barcodePayload || '',
       });
 
       // generate PDF & download & upload
@@ -1124,51 +1148,26 @@ export default function AppointmentPage() {
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
 
-        if (!blob || blob.size === 0) {
-          throw new Error('Generated PDF blob is empty');
+        // Download client-side for user convenience
+        try {
+          const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
+          downloadBlob(blob, filename);
+        } catch (e) {
+          console.warn('download client-side failed', e);
         }
-
-        // Download client-side (optional)
-        const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
-        try { downloadBlob(blob, filename); } catch (e) { console.warn('client download failed', e); }
 
         // Try upload to Supabase storage (appointments bucket) and update appointment.pdf_url
         try {
-          const uploadRes = await uploadPdfToStorage(blob, printable.appointmentNumber);
-          if (uploadRes.error) {
-            console.warn('uploadPdfToStorage returned error', uploadRes.error);
-            toast({ title: 'PDF saved locally', description: 'Upload failed — appointment saved without pdf_url. See console for details.', status: 'warning' });
-          } else {
-            const publicUrl = uploadRes.publicUrl || null;
-            const storedPath = uploadRes.path || null;
-
-            if (publicUrl && dbAppointment.id) {
-              // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
-              const { error: upErr } = await supabase.from('appointments').update({ pdf_url: publicUrl, updated_at: new Date().toISOString() }).eq('id', dbAppointment.id);
-              if (upErr) {
-                console.warn('Failed to persist publicUrl to appointment row', upErr);
-                toast({ title: 'Uploaded PDF but DB update failed', status: 'warning' });
-              } else {
-                toast({ title: 'Appointment created & PDF uploaded', description: 'PDF is now in storage.', status: 'success' });
-                // update local state (if needed)
-              }
-            } else if (storedPath && dbAppointment.id) {
-              // store path as fallback if you want — here we attempt to update pdf_url with the storage path
-              const { error: upErr2 } = await supabase.from('appointments').update({ pdf_url: storedPath, updated_at: new Date().toISOString() }).eq('id', dbAppointment.id);
-              if (upErr2) {
-                console.warn('Failed to persist storage path to appointment row', upErr2);
-                toast({ title: 'Uploaded PDF but DB update failed', status: 'warning' });
-              } else {
-                toast({ title: 'Appointment created & PDF uploaded (path)', description: 'PDF uploaded. pdf_url holds storage path.', status: 'success' });
-              }
-            } else {
-              // neither publicUrl nor path - upload succeeded but we couldn't determine a usable URL
-              toast({ title: 'PDF uploaded', description: 'Uploaded but no public URL available. You may need to create a signed URL to view.', status: 'info' });
-            }
+          const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
+          if (publicUrl && dbAppointment.id) {
+            // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
+            await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+          } else if (path && dbAppointment.id) {
+            // store path as fallback
+            await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
-          console.error('PDF storage/upload failed', e);
-          toast({ title: 'Appointment created', description: 'Saved but PDF upload failed', status: 'warning' });
+          console.warn('PDF storage/update failed', e);
         }
       } catch (pdfErr) {
         console.error('PDF generation after DB create failed', pdfErr);
@@ -1591,7 +1590,7 @@ export default function AppointmentPage() {
 
                   <HStack mb={2} spacing={3}>
                     <Text fontWeight="semibold" minW="150px">Appointment No:</Text>
-                    <Text	color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
+                    <Text color="blue.600" flex="1" wordBreak="break-all">{previewAppointmentNumber}</Text>
                     <Button size="xs" variant="outline" onClick={() => { navigator.clipboard.writeText(previewAppointmentNumber); toast({ status: 'success', title: 'Copied' }); }}>Copy</Button>
                   </HStack>
 

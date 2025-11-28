@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import {
   Box,
   Input,
@@ -15,13 +15,11 @@ import {
   useColorMode,
   useColorModeValue,
   Text,
-  Link,
   Spinner,
 } from "@chakra-ui/react";
 import { useAuth } from "../context/AuthContext";
 import { ViewIcon, ViewOffIcon, SunIcon, MoonIcon } from "@chakra-ui/icons";
 import { motion } from "framer-motion";
-import { Link as RouterLink } from "react-router-dom";
 import logo from "../assets/logo.png";
 import { supabase } from "../supabaseClient";
 
@@ -334,20 +332,7 @@ function Login() {
           </Button>
 
           {/* Public appointment link (no login required) */}
-          <Box textAlign="center" mt={2}>
-            <Text fontSize="sm" color={useColorModeValue("gray.600", "gray.300")}>
-              Need to create an appointment?{" "}
-              <Link
-                as={RouterLink}
-                to="/appointment"
-                color="teal.500"
-                fontWeight="semibold"
-                aria-label="Create appointment (no login required)"
-              >
-                Create appointment (no login required)
-              </Link>
-            </Text>
-          </Box>
+         
         </VStack>
       </MotionBox>
     </Box>
