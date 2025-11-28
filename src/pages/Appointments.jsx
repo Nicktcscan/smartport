@@ -207,32 +207,48 @@ export default function AppointmentsPage() {
   async function resolvePdfUrl(pdfVal, fallbackName) {
     if (!pdfVal && !fallbackName) return null;
 
+    // If it's already a data URL (base64) return it
+    if (pdfVal && /^data:application\/pdf;/.test(String(pdfVal))) return pdfVal;
+
     // if full URL already, use it
     if (pdfVal && /^https?:\/\//i.test(pdfVal)) return pdfVal;
 
     const bucket = 'appointments'; // your bucket
 
+    // normalize helpers
+    const stripLeadingSlash = (s) => String(s || '').replace(/^\/+/, '');
+    const ensureTicketsPrefix = (s) => {
+      if (!s) return s;
+      if (s.startsWith('tickets/')) return s;
+      return `tickets/${s}`;
+    };
+
     // Build candidate paths (same candidates used for download fallback)
     const buildCandidates = () => {
       const candidates = [];
       if (pdfVal && !/^https?:\/\//i.test(pdfVal)) {
-        candidates.push(pdfVal);
-        candidates.push(pdfVal.replace(/^\/+/, ''));
-        if (!pdfVal.includes('/')) {
-          candidates.push(`tickets/${pdfVal}`);
-          candidates.push(`tickets/${pdfVal.replace(/^\/+/, '')}`);
+        const raw = String(pdfVal || '');
+        candidates.push(stripLeadingSlash(raw));
+        // if contains bucket prefix, try removing it
+        if (raw.startsWith(`${bucket}/`)) candidates.push(stripLeadingSlash(raw.replace(`${bucket}/`, '')));
+        // try tickets/filename and bare filename
+        if (!raw.includes('/')) {
+          candidates.push(ensureTicketsPrefix(raw));
+          candidates.push(stripLeadingSlash(raw));
+        } else {
+          candidates.push(ensureTicketsPrefix(raw.split('/').pop()));
         }
       }
       if (fallbackName) {
         const fn = String(fallbackName).trim();
         if (fn) {
           const filename = `${fn}.pdf`;
-          candidates.push(filename);
-          candidates.push(`tickets/${filename}`);
+          candidates.push(stripLeadingSlash(filename));
+          candidates.push(ensureTicketsPrefix(filename));
           candidates.push(`${fn}/${filename}`);
         }
       }
-      // unique
+      // dedupe but keep order
       const seen = new Set();
       return candidates.filter(c => {
         if (!c) return false;
@@ -246,24 +262,25 @@ export default function AppointmentsPage() {
     // try to get public url or signed url for a candidate path
     const tryPathForUrl = async (path) => {
       if (!path) return null;
-      const normalized = path.replace(/^\/+/, '');
+      const normalized = stripLeadingSlash(path);
 
-      // 1) try public url (getPublicUrl returns synchronously but keep it tidy)
+      // 1) try public url (getPublicUrl may return { data: { publicUrl } })
       try {
-        const pubResp = supabase.storage.from(bucket).getPublicUrl(normalized);
-        const publicUrl = pubResp?.data?.publicUrl || pubResp?.data?.public_url || null;
+        const pubResp = await supabase.storage.from(bucket).getPublicUrl(normalized);
+        // Supabase SDK sometimes returns { data: { publicUrl } } or { publicUrl }
+        const publicUrl = pubResp?.data?.publicUrl || pubResp?.data?.public_url || pubResp?.publicUrl || pubResp?.public_url || null;
         if (publicUrl) return publicUrl;
       } catch (e) {
-        // ignore
+        // ignore and continue
       }
 
       // 2) try signed url (1 hour)
       try {
         const expiresIn = 60 * 60;
-        const { data: signedData, error: signedErr } = await supabase.storage.from(bucket).createSignedUrl(normalized, expiresIn);
-        if (!signedErr && signedData && (signedData.signedUrl || signedData.signedURL)) {
-          return signedData.signedUrl || signedData.signedURL;
-        }
+        const signedResp = await supabase.storage.from(bucket).createSignedUrl(normalized, expiresIn);
+        // signedResp.data.signedUrl || signedResp.data.signedURL or signedResp.signedUrl
+        const signedUrl = signedResp?.data?.signedUrl || signedResp?.data?.signedURL || signedResp?.data?.signed_url || signedResp?.signedUrl || signedResp?.signedURL || null;
+        if (signedUrl) return signedUrl;
       } catch (e) {
         // ignore
       }
@@ -300,22 +317,31 @@ export default function AppointmentsPage() {
   // Try to download a blob from storage using candidate paths (fallback when signed/public URL not available)
   async function fetchBlobFromStorageCandidates(pdfVal, fallbackName) {
     const bucket = 'appointments';
+    const stripLeadingSlash = (s) => String(s || '').replace(/^\/+/, '');
+    const ensureTicketsPrefix = (s) => {
+      if (!s) return s;
+      if (s.startsWith('tickets/')) return s;
+      return `tickets/${s}`;
+    };
+
     const buildCandidates = () => {
       const candidates = [];
       if (pdfVal && !/^https?:\/\//i.test(pdfVal)) {
-        candidates.push(pdfVal);
-        candidates.push(pdfVal.replace(/^\/+/, ''));
-        if (!pdfVal.includes('/')) {
-          candidates.push(`tickets/${pdfVal}`);
-          candidates.push(`tickets/${pdfVal.replace(/^\/+/, '')}`);
+        const raw = String(pdfVal || '');
+        candidates.push(stripLeadingSlash(raw));
+        if (raw.startsWith(`${bucket}/`)) candidates.push(stripLeadingSlash(raw.replace(`${bucket}/`, '')));
+        if (!raw.includes('/')) {
+          candidates.push(ensureTicketsPrefix(raw));
+        } else {
+          candidates.push(ensureTicketsPrefix(raw.split('/').pop()));
         }
       }
       if (fallbackName) {
         const fn = String(fallbackName).trim();
         if (fn) {
           const filename = `${fn}.pdf`;
-          candidates.push(filename);
-          candidates.push(`tickets/${filename}`);
+          candidates.push(stripLeadingSlash(filename));
+          candidates.push(ensureTicketsPrefix(filename));
           candidates.push(`${fn}/${filename}`);
         }
       }
@@ -349,7 +375,7 @@ export default function AppointmentsPage() {
   async function fetchUrlAsBlob(url) {
     try {
       const r = await fetch(url, { cache: 'no-store' });
-      if (!r.ok) throw new Error('Failed to fetch file');
+      if (!r.ok) throw new Error(`Failed to fetch file: ${r.status}`);
       const blob = await r.blob();
       return blob;
     } catch (e) {
@@ -365,11 +391,12 @@ export default function AppointmentsPage() {
     const pdfVal = appt.pdf_url;
     const fallbackName = appt.appointment_number || appt.appointmentNumber || appt.weighbridge_number || appt.id;
     const filenameGuess = `${fallbackName || 'ticket'}.pdf`;
+
     try {
       // 1) If pdfVal already full URL
       if (pdfVal && /^https?:\/\//i.test(pdfVal)) {
         if (mode === 'open') {
-          window.open(pdfVal, '_blank');
+          window.open(pdfVal, '_blank', 'noopener,noreferrer');
           return;
         }
         // download mode: try to fetch then download blob (to preserve download attribute)
@@ -379,7 +406,7 @@ export default function AppointmentsPage() {
           return;
         }
         // fallback to opening the url if fetch fails
-        window.open(pdfVal, '_blank');
+        window.open(pdfVal, '_blank', 'noopener,noreferrer');
         return;
       }
 
@@ -387,7 +414,7 @@ export default function AppointmentsPage() {
       const resolved = await resolvePdfUrl(pdfVal, fallbackName);
       if (resolved) {
         if (mode === 'open') {
-          window.open(resolved, '_blank');
+          window.open(resolved, '_blank', 'noopener,noreferrer');
           return;
         }
         // download mode: try to fetch resolved URL and download
@@ -397,7 +424,7 @@ export default function AppointmentsPage() {
           return;
         }
         // fallback: open URL
-        window.open(resolved, '_blank');
+        window.open(resolved, '_blank', 'noopener,noreferrer');
         return;
       }
 
@@ -407,7 +434,7 @@ export default function AppointmentsPage() {
         if (mode === 'open') {
           // open blob in new tab
           const objUrl = URL.createObjectURL(fetched.blob);
-          window.open(objUrl, '_blank');
+          window.open(objUrl, '_blank', 'noopener,noreferrer');
           // revoke after short time
           setTimeout(() => URL.revokeObjectURL(objUrl), 1000 * 8);
           return;
