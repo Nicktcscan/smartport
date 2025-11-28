@@ -118,36 +118,32 @@ async function ensureJsBarcodeLoaded() {
   });
 }
 
-// Render SVG string into a high-DPI PNG data URL so scanners can reliably read the bars.
+// convert SVG -> PNG at high DPR for crisp bars (makes scanners happier)
 async function svgStringToPngDataUrl(svgString, width, height) {
   return await new Promise((resolve, reject) => {
     try {
       const img = new Image();
-      // keep charset utf-8 and URI encode
       const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
       img.onload = () => {
         try {
-          // use devicePixelRatio (or at least 2x) to render a crisp PNG
-          const DPR = Math.max(2, (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 2);
+          // force at least 2x DPR, prefer 3x for printed barcodes
+          const DPR = Math.max(2, (typeof window !== 'undefined' && window.devicePixelRatio) ? Math.ceil(window.devicePixelRatio) : 3);
           const canvas = document.createElement('canvas');
-          // scaled pixel dimensions
           canvas.width = Math.round(width * DPR);
           canvas.height = Math.round(height * DPR);
-          // CSS size - keep original width/height so drawing scales correctly
           canvas.style.width = `${width}px`;
           canvas.style.height = `${height}px`;
           const ctx = canvas.getContext('2d');
 
-          // white background so scanners don't get transparency artifacts
+          // solid white background
           ctx.fillStyle = '#ffffff';
           ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-          // scale drawing operations to DPR
+          // scale to DPR so image draws crisply
           ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-          // draw the image into the canvas at logical size
           ctx.drawImage(img, 0, 0, width, height);
 
-          // produce PNG
+          // export PNG
           try {
             const png = canvas.toDataURL('image/png');
             resolve(png);
@@ -166,44 +162,48 @@ async function svgStringToPngDataUrl(svgString, width, height) {
   });
 }
 
-// sanitize value to allowed Code39 characters and force uppercase
+// sanitize for Code39 allowed characters and uppercase
 function sanitizeForCode39(s) {
   if (!s && s !== 0) return '';
   const raw = String(s || '');
-  // Code39 allowed: 0-9, A-Z, space, -, ., $, /, +, %
-  // remove any other characters and convert to uppercase
-  return raw.toUpperCase().replace(/[^0-9A-Z \-.\\$\\/\\+\\%]/g, '');
+  // allowed: 0-9, A-Z, space, -, ., $, /, +, %
+  return raw.toUpperCase().replace(/[^0-9A-Z \-.$/+%]/g, '');
 }
 
-async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
+async function generateCode39DataUrl(payloadStr, width = 520, height = 96) {
   try {
     await ensureJsBarcodeLoaded();
-    // sanitize and uppercase payload for CODE39
-    const sanitized = sanitizeForCode39(payloadStr);
+    const sanitized = sanitizeForCode39(payloadStr || '');
+
+    // small safety: if sanitized becomes empty, bail
+    if (!sanitized) return null;
 
     const svgNS = 'http://www.w3.org/2000/svg';
     const svgEl = document.createElementNS(svgNS, 'svg');
 
-    // Use JsBarcode to render SVG (CODE39)
-    // tuned options for robust scanning:
-    // - format: CODE39 (explicit)
-    // - addQuietZone: true (important for scanners)
-    // - flat: false (avoid forcing too-narrow bars)
-    // - displayValue: false (we still preserve machine readability; human text optional)
-    window.JsBarcode(svgEl, String(sanitized || ''), {
+    // Tuned JsBarcode options for maximum scanner compatibility:
+    // - addQuietZone: true + large margin
+    // - flat: true to produce simpler vertical bars (some printers/scanners like this)
+    // - displayValue: true to show human-readable text under barcode
+    // - width: base bar width (bump it up for printed sheets)
+    // - height: tall bars to help 2D/handheld scanners
+    window.JsBarcode(svgEl, String(sanitized), {
       format: 'CODE39',
-      displayValue: false,
-      height: Math.max(36, height), // ensure adequate bar height
-      width: 2, // base bar width
-      margin: 10,
+      displayValue: true,
+      height: Math.max(60, height),
+      width: 3.2,          // wider bars for robust scanning
+      margin: 30,          // large quiet zone
       background: '#ffffff',
       lineColor: '#000000',
-      flat: false,
+      flat: true,
       addQuietZone: true,
+      textAlign: 'center',
+      fontSize: 18,
+      textMargin: 6,
     });
 
     const svgString = new XMLSerializer().serializeToString(svgEl);
-    // Render to high-DPI PNG for embedding into PDF and for reliable scanner reads
+    // Render to high-dpi PNG
     const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     return pngDataUrl;
   } catch (e) {
@@ -359,7 +359,7 @@ function AppointmentPdf({ ticket }) {
 
         <PdfView style={pdfStyles.barcodeContainer}>
           {t.barcodeImage ? (
-            <PdfImage src={t.barcodeImage} style={{ width: 420, height: 48 }} />
+            <PdfImage src={t.barcodeImage} style={{ width: 520, height: 96 }} />
           ) : (
             <PdfText style={{ fontSize: 9, color: '#6b7280' }}>Barcode not available</PdfText>
           )}
@@ -946,20 +946,21 @@ export default function AppointmentPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // compose barcode payload and sanitize it for Code39
+    // Compose payload in a compact Code39-safe format: appt/wb
+    // e.g. "2511280027203/WB251100027173"
     const rawPayload = weighbridgeNum ? `${appointmentNum}/${weighbridgeNum}` : String(appointmentNum || '');
     const sanitizedPayload = sanitizeForCode39(rawPayload);
 
     let barcodeDataUrl = null;
     try {
-      barcodeDataUrl = await generateCode39DataUrl(sanitizedPayload, 420, 48);
+      barcodeDataUrl = await generateCode39DataUrl(sanitizedPayload, 520, 96);
     } catch (e) {
       console.warn('barcode generation failed', e);
       barcodeDataUrl = null;
     }
 
     ticket.barcodeImage = barcodeDataUrl;
-    ticket.barcodePayload = sanitizedPayload;
+    ticket.barcodePayload = sanitizedPayload; // useful for diagnostics
     return ticket;
   }
 
@@ -1002,7 +1003,6 @@ export default function AppointmentPage() {
       // Try to get a public URL
       try {
         const { data: pubRes } = supabase.storage.from(bucketName).getPublicUrl(path);
-        // pubRes might be { publicUrl } or { public_url } depending on sdk
         const publicUrl = pubRes?.publicUrl || pubRes?.public_url || null;
         if (publicUrl) return { publicUrl, path, error: null };
       } catch (e) {
