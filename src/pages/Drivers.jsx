@@ -41,6 +41,11 @@ function DriversPage() {
   const [previewUrl, setPreviewUrl] = useState(null);
   const createFileRef = useRef();
 
+  // create-phone inline validation state
+  const [createPhoneStatus, setCreatePhoneStatus] = useState(null); // null | 'checking' | 'available' | 'taken' | 'badprefix'
+  const createPhoneTimerRef = useRef(null);
+  const lastCreateCheckedPhoneRef = useRef('');
+
   // view modal (open from action)
   const { isOpen: isViewOpen, onOpen: onViewOpen, onClose: onViewClose } = useDisclosure();
   const [viewDriver, setViewDriver] = useState(null);
@@ -49,6 +54,11 @@ function DriversPage() {
   const [viewPictureFile, setViewPictureFile] = useState(null);
   const [viewPreviewUrl, setViewPreviewUrl] = useState(null);
   const [isUpdatingView, setIsUpdatingView] = useState(false);
+
+  // view-phone inline validation state
+  const [viewPhoneStatus, setViewPhoneStatus] = useState(null);
+  const viewPhoneTimerRef = useRef(null);
+  const lastViewCheckedPhoneRef = useRef('');
 
   // suspend confirmation dialog
   const { isOpen: isSuspendOpen, onOpen: onSuspendOpen, onClose: onSuspendClose } = useDisclosure();
@@ -80,6 +90,7 @@ function DriversPage() {
       .spark { width:18px; height:18px; border-radius:999px; background: radial-gradient(circle at 30% 30%, #fff, rgba(255,255,255,0.12)); }
       .muted { color: #6b7280; }
       .suspended-badge { background: rgba(220,38,38,0.06); color: #dc2626; padding: 4px 8px; border-radius: 6px; font-weight: 600; font-size: 0.8rem; }
+      .phone-helper { font-size: 0.85rem; margin-top: 6px; }
     `;
     const id = 'drivers-page-styles';
     let el = document.getElementById(id);
@@ -146,7 +157,6 @@ function DriversPage() {
     try {
       const uploadRes = await supabase.storage.from('drivers').upload(path, file, { upsert: true, contentType: file.type });
       if (uploadRes.error) {
-        // if already exists due to race, continue
         console.warn('upload driver picture error', uploadRes.error);
       }
       // Attempt public URL
@@ -193,16 +203,31 @@ function DriversPage() {
   // ---------- small helper to detect unique-phone DB errors ----------
   function isPhoneDuplicateError(err) {
     if (!err) return false;
-    // supabase error object sometimes has `code`, `message`. For Postgres unique violation code is '23505'.
     const code = String(err?.code || '').toLowerCase();
     const msg = String(err?.message || err || '').toLowerCase();
     if (code === '23505') {
-      // check if message references phone or drivers_phone_unique
       return msg.includes('phone') || msg.includes('drivers_phone_unique') || msg.includes('drivers_phone');
     }
-    // fallback checks
-    if (msg.includes('drivers_phone_unique') || msg.includes('phone') && msg.includes('duplicate')) return true;
+    if (msg.includes('drivers_phone_unique') || (msg.includes('phone') && msg.includes('duplicate'))) return true;
     return false;
+  }
+
+  // ---------- phone availability check helpers (debounced) ----------
+  async function checkPhoneAvailabilityOnServer(phone, excludeId = null) {
+    if (!phone) return null;
+    try {
+      const { data, error } = await supabase.from('drivers').select('id').eq('phone', phone).maybeSingle();
+      if (error) {
+        console.warn('phone availability server check error', error);
+        return null;
+      }
+      if (!data) return true; // available
+      if (excludeId && data.id === excludeId) return true; // the same record
+      return false; // taken
+    } catch (e) {
+      console.warn('checkPhoneAvailabilityOnServer threw', e);
+      return null;
+    }
   }
 
   // ---------- openCreate helper (prefill + open) ----------
@@ -210,8 +235,53 @@ function DriversPage() {
     setForm({ name: '', phone: '+220', license_number: '' });
     setPictureFile(null);
     setPreviewUrl(null);
+    setCreatePhoneStatus(null);
     onCreateOpen();
   };
+
+  // live validation: watch form.phone and check (debounced)
+  useEffect(() => {
+    if (!isCreateOpen) {
+      if (createPhoneTimerRef.current) clearTimeout(createPhoneTimerRef.current);
+      lastCreateCheckedPhoneRef.current = '';
+      setCreatePhoneStatus(null);
+      return;
+    }
+    const phone = String(form.phone || '').trim();
+    // basic prefix validation
+    if (!phone.startsWith('+220')) {
+      setCreatePhoneStatus('badprefix');
+      if (createPhoneTimerRef.current) clearTimeout(createPhoneTimerRef.current);
+      lastCreateCheckedPhoneRef.current = '';
+      return;
+    }
+    if (phone.length < 5) {
+      setCreatePhoneStatus(null);
+      return;
+    }
+    // debounce server check
+    setCreatePhoneStatus('checking');
+    if (createPhoneTimerRef.current) clearTimeout(createPhoneTimerRef.current);
+    const current = phone;
+    createPhoneTimerRef.current = setTimeout(async () => {
+      lastCreateCheckedPhoneRef.current = current;
+      const avail = await checkPhoneAvailabilityOnServer(current, null);
+      // ensure user hasn't changed input since the check started
+      if (lastCreateCheckedPhoneRef.current !== current) return;
+      if (avail === null) {
+        setCreatePhoneStatus(null);
+      } else if (avail === true) {
+        setCreatePhoneStatus('available');
+      } else {
+        setCreatePhoneStatus('taken');
+      }
+    }, 700);
+
+    return () => {
+      if (createPhoneTimerRef.current) clearTimeout(createPhoneTimerRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.phone, isCreateOpen]);
 
   // create driver
   const createDriver = async () => {
@@ -219,11 +289,15 @@ function DriversPage() {
     if (!form.phone.trim()) return toast({ status: 'warning', title: 'Phone required' });
     // license is optional now
 
+    // quick local guard against known "taken"
+    if (createPhoneStatus === 'taken') {
+      return toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+    }
     setIsSaving(true);
     try {
       const phoneToCheck = String(form.phone || '').trim();
 
-      // check duplicate phone first (friendly UX)
+      // double-check server-side for race conditions
       try {
         const { data: existingPhone, error: phoneErr } = await supabase.from('drivers').select('id').eq('phone', phoneToCheck).maybeSingle();
         if (phoneErr) {
@@ -231,6 +305,7 @@ function DriversPage() {
         } else if (existingPhone && existingPhone.id) {
           setIsSaving(false);
           toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          setCreatePhoneStatus('taken');
           return;
         }
       } catch (e) {
@@ -247,6 +322,7 @@ function DriversPage() {
       if (error) {
         if (isPhoneDuplicateError(error)) {
           toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          setCreatePhoneStatus('taken');
           setIsSaving(false);
           return;
         }
@@ -271,6 +347,7 @@ function DriversPage() {
       // reset & refresh
       setForm({ name: '', phone: '+220', license_number: '' });
       setPictureFile(null); setPreviewUrl(null);
+      setCreatePhoneStatus(null);
       onCreateClose();
       fetchDrivers(1, pageSize);
       setPage(1);
@@ -278,6 +355,7 @@ function DriversPage() {
       console.error('createDriver error', err);
       if (isPhoneDuplicateError(err)) {
         toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+        setCreatePhoneStatus('taken');
       } else {
         toast({ status: 'error', title: 'Save failed', description: err?.message || String(err) });
       }
@@ -293,8 +371,47 @@ function DriversPage() {
     setIsEditingInView(false);
     setViewPreviewUrl(driver.picture_url || null);
     setViewPictureFile(null);
+    setViewPhoneStatus(null);
     onViewOpen();
   };
+
+  // live validation for viewDriver.phone
+  useEffect(() => {
+    if (!isViewOpen) {
+      if (viewPhoneTimerRef.current) clearTimeout(viewPhoneTimerRef.current);
+      lastViewCheckedPhoneRef.current = '';
+      setViewPhoneStatus(null);
+      return;
+    }
+    if (!viewDriver) return;
+    const phone = String(viewDriver.phone || '').trim();
+    if (!phone.startsWith('+220')) {
+      setViewPhoneStatus('badprefix');
+      if (viewPhoneTimerRef.current) clearTimeout(viewPhoneTimerRef.current);
+      lastViewCheckedPhoneRef.current = '';
+      return;
+    }
+    if (phone.length < 5) {
+      setViewPhoneStatus(null);
+      return;
+    }
+    setViewPhoneStatus('checking');
+    if (viewPhoneTimerRef.current) clearTimeout(viewPhoneTimerRef.current);
+    const current = phone;
+    viewPhoneTimerRef.current = setTimeout(async () => {
+      lastViewCheckedPhoneRef.current = current;
+      const avail = await checkPhoneAvailabilityOnServer(current, viewDriver.id);
+      if (lastViewCheckedPhoneRef.current !== current) return;
+      if (avail === null) setViewPhoneStatus(null);
+      else if (avail === true) setViewPhoneStatus('available');
+      else setViewPhoneStatus('taken');
+    }, 700);
+
+    return () => {
+      if (viewPhoneTimerRef.current) clearTimeout(viewPhoneTimerRef.current);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewDriver?.phone, isViewOpen]);
 
   // handle file change for create modal
   const onCreateFileChange = (ev) => {
@@ -317,6 +434,11 @@ function DriversPage() {
   // update driver from view modal (after confirmation)
   const performUpdateViewDriver = async () => {
     if (!viewDriver) return;
+    // guard for phone 'taken' status
+    if (viewPhoneStatus === 'taken') {
+      return toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+    }
+
     setIsUpdatingView(true);
     try {
       const phoneToCheck = String(viewDriver.phone || '').trim();
@@ -333,6 +455,7 @@ function DriversPage() {
         } else if (dup && dup.id) {
           setIsUpdatingView(false);
           toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          setViewPhoneStatus('taken');
           return;
         }
       } catch (e) {
@@ -350,6 +473,7 @@ function DriversPage() {
       if (updErr) {
         if (isPhoneDuplicateError(updErr)) {
           toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          setViewPhoneStatus('taken');
           setIsUpdatingView(false);
           return;
         }
@@ -369,7 +493,6 @@ function DriversPage() {
       }
 
       toast({ status: 'success', title: 'Driver updated' });
-      // refresh UI
       fetchDrivers(page, pageSize);
       setIsEditingInView(false);
       onUpdateConfirmClose();
@@ -378,6 +501,7 @@ function DriversPage() {
       console.error('performUpdateViewDriver error', err);
       if (isPhoneDuplicateError(err)) {
         toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+        setViewPhoneStatus('taken');
       } else {
         toast({ status: 'error', title: 'Update failed', description: err?.message || String(err) });
       }
@@ -402,14 +526,12 @@ function DriversPage() {
         // fallback: try setting status = 'suspended'
         const { error: e2 } = await supabase.from('drivers').update({ status: 'suspended' }).eq('id', driver.id);
         if (e2) {
-          // neither column available — inform admin
           toast({
             status: 'warning',
             title: 'Could not suspend driver server-side',
             description: 'No suspend column in DB. To persist suspensions add an "is_suspended boolean" or "status text" column to drivers table.',
             duration: 8000,
           });
-          // still reflect client-side state
           setDrivers((prev) => prev.map((d) => (d.id === driver.id ? { ...d, _suspendedClient: true } : d)));
           onSuspendClose();
           return;
@@ -596,7 +718,7 @@ function DriversPage() {
       </Box>
 
       {/* ---------- Create Modal (floating orb) ---------- */}
-      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '+220', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }} size={modalSize}>
+      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '+220', license_number: '' }); setPictureFile(null); setPreviewUrl(null); setCreatePhoneStatus(null); }} size={modalSize}>
         <ModalOverlay />
         <AnimatePresence>
           {isCreateOpen && (
@@ -619,6 +741,8 @@ function DriversPage() {
                     <FormControl isRequired>
                       <FormLabel>Phone</FormLabel>
                       <Input value={form.phone} onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))} placeholder="+220 1234 567" />
+                      {/* Inline phone helper */}
+                      <PhoneHelper status={createPhoneStatus} />
                     </FormControl>
 
                     <FormControl>
@@ -629,9 +753,6 @@ function DriversPage() {
                     <FormControl>
                       <FormLabel>Picture</FormLabel>
                       <HStack spacing={3} wrap="wrap">
-                        <VisuallyHidden as="input">
-                          {/* keep for a11y fallback */}
-                        </VisuallyHidden>
                         <input
                           ref={createFileRef}
                           type="file"
@@ -650,7 +771,7 @@ function DriversPage() {
 
                 <ModalFooter>
                   <Button colorScheme="teal" mr={3} isLoading={isSaving} onClick={createDriver}>{isSaving ? 'Creating...' : 'Create Driver'}</Button>
-                  <Button variant="ghost" onClick={() => { onCreateClose(); setForm({ name: '', phone: '+220', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }}>Cancel</Button>
+                  <Button variant="ghost" onClick={() => { onCreateClose(); setForm({ name: '', phone: '+220', license_number: '' }); setPictureFile(null); setPreviewUrl(null); setCreatePhoneStatus(null); }}>Cancel</Button>
                 </ModalFooter>
               </ModalContent>
             </MotionBox>
@@ -659,7 +780,7 @@ function DriversPage() {
       </Modal>
 
       {/* ---------- View Modal (with inline edit) ---------- */}
-      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewDriver(null); setIsEditingInView(false); setViewPictureFile(null); setViewPreviewUrl(null); }} size={modalSize}>
+      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewDriver(null); setIsEditingInView(false); setViewPictureFile(null); setViewPreviewUrl(null); setViewPhoneStatus(null); }} size={modalSize}>
         <ModalOverlay />
         <AnimatePresence>
           {isViewOpen && viewDriver && (
@@ -704,6 +825,8 @@ function DriversPage() {
                       <FormControl isRequired>
                         <FormLabel>Phone</FormLabel>
                         <Input value={viewDriver.phone || ''} onChange={(e) => setViewDriver((p) => ({ ...p, phone: e.target.value }))} />
+                        {/* Inline phone helper for view/edit */}
+                        <PhoneHelper status={viewPhoneStatus} />
                       </FormControl>
                       <FormControl>
                         <FormLabel>License Number (optional)</FormLabel>
@@ -774,6 +897,38 @@ function DriversPage() {
       </AlertDialog>
     </Container>
   );
+}
+
+// small Avatar preview component
+function AvatarPreview({ src }) {
+  return (
+    <Box borderRadius="md" overflow="hidden" boxShadow="sm">
+      <Image src={src} alt="preview" boxSize="72px" objectFit="cover" />
+    </Box>
+  );
+}
+
+// Phone helper UI component
+function PhoneHelper({ status }) {
+  // status: null | 'checking' | 'available' | 'taken' | 'badprefix'
+  if (!status) {
+    return (
+      <Text className="phone-helper muted">Phone should start with country code <b>+220</b>. We check availability as you type.</Text>
+    );
+  }
+  if (status === 'badprefix') {
+    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>Please include your country code <b>+220</b> at the start.</Text>;
+  }
+  if (status === 'checking') {
+    return <Text className="phone-helper" style={{ color: '#b45309' }}>Checking phone availability…</Text>;
+  }
+  if (status === 'taken') {
+    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>The Phone number is already used, try another one.</Text>;
+  }
+  if (status === 'available') {
+    return <Text className="phone-helper" style={{ color: '#15803d' }}>Phone number looks good — available.</Text>;
+  }
+  return null;
 }
 
 export default DriversPage;
