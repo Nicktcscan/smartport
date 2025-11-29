@@ -147,35 +147,89 @@ function DriversPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
-  // helpers: upload picture to storage 'drivers' and return public URL or path
+  // ---------- Robust uploadDriverPicture ----------
+  /**
+   * Upload a driver picture to the 'drivers' bucket and return either:
+   * - a public URL (if available),
+   * - a signed URL (if bucket is private),
+   * - or the path string to the object (so server-side can resolve later).
+   *
+   * This function:
+   * - Uploads to the bucket root (no 'photos/' folder) to match your setup.
+   * - Tries File upload first, then falls back to uploading a Uint8Array if upload returns an error.
+   */
   async function uploadDriverPicture(file, driverId) {
     if (!file) return null;
+    const bucketName = 'drivers';
     const ext = (file.name || '').split('.').pop() || 'jpg';
     const filename = `${driverId || Date.now()}-${Math.floor(Math.random() * 9000) + 1000}.${ext}`;
-    const path = `photos/${filename}`;
+    // upload to root (no subfolder) because you said bucket has no subfolders
+    const path = `${filename}`;
 
-    try {
-      const uploadRes = await supabase.storage.from('drivers').upload(path, file, { upsert: true, contentType: file.type });
-      if (uploadRes.error) {
-        console.warn('upload driver picture error', uploadRes.error);
-      }
-      // Attempt public URL
+    // helper to attempt getPublicUrl / createSignedUrl / list check
+    const resolveUrlOrPath = async () => {
+      // attempt public url
       try {
-        const { data } = supabase.storage.from('drivers').getPublicUrl(path);
-        if (data?.publicUrl) return data.publicUrl;
+        const pub = await supabase.storage.from(bucketName).getPublicUrl(path);
+        const publicUrl = pub?.data?.publicUrl || pub?.public_url || pub?.publicUrl;
+        if (publicUrl) return publicUrl;
       } catch (e) {
-        // fallback to signed url
+        // ignore
       }
+
+      // attempt signed url (1 hour)
       try {
-        const { data: signedData, error: signedErr } = await supabase.storage.from('drivers').createSignedUrl(path, 60 * 60);
+        const signedSeconds = 60 * 60;
+        const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
         if (!signedErr && signedData?.signedUrl) return signedData.signedUrl;
       } catch (e) {
-        console.warn('signed url failed', e);
+        // ignore
       }
-      // return path as fallback so server-side can resolve later
-      return path;
+
+      // final fallback: verify the object exists via list()
+      try {
+        const listRes = await supabase.storage.from(bucketName).list('', { search: filename, limit: 1000 });
+        if (!listRes.error && Array.isArray(listRes.data) && listRes.data.length > 0) {
+          // return path for server-side resolution
+          return path;
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      return null;
+    };
+
+    try {
+      // First attempt: upload File directly
+      const up1 = await supabase.storage.from(bucketName).upload(path, file, { upsert: true, contentType: file.type });
+      if (!up1.error && up1.data) {
+        const resolved = await resolveUrlOrPath();
+        return resolved || path;
+      }
+
+      // If the first upload returned an error, try fallback uploading a Uint8Array (ArrayBuffer)
+      // (some environments accept typed arrays better)
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const uint8 = new Uint8Array(arrayBuffer);
+        const up2 = await supabase.storage.from(bucketName).upload(path, uint8, { upsert: true, contentType: file.type });
+        if (!up2.error && up2.data) {
+          const resolved = await resolveUrlOrPath();
+          return resolved || path;
+        } else {
+          console.warn('uploadDriverPicture: second (Uint8Array) upload failed', up2.error);
+        }
+      } catch (e) {
+        console.warn('uploadDriverPicture: fallback upload threw', e);
+      }
+
+      // If both attempts failed, surface the original error (prefer up1.error)
+      const err = (up1 && up1.error) ? up1.error : new Error('Upload failed');
+      console.error('uploadDriverPicture failed', err);
+      return null;
     } catch (e) {
-      console.error('uploadDriverPicture failed', e);
+      console.error('uploadDriverPicture final catch', e);
       return null;
     }
   }
@@ -334,7 +388,10 @@ function DriversPage() {
         try {
           const pictureUrl = await uploadDriverPicture(pictureFile, driverId);
           if (pictureUrl) {
+            // NB: only update DB if upload succeeded and returned a usable url/path
             await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
+          } else {
+            console.warn('Picture upload returned null; skipping picture_url update.');
           }
         } catch (e) {
           console.warn('upload picture after create failed', e);
