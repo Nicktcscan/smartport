@@ -45,7 +45,6 @@ import SADDeclaration from './pages/SADDeclaration';
 import Settings from './pages/Settings';
 
 // NEW: Appointment page (public route)
-import Appointment from './pages/appointment';
 
 /**
  * ProtectedRoute
