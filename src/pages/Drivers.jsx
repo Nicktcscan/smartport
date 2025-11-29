@@ -11,7 +11,7 @@ import {
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AddIcon, SearchIcon, DeleteIcon, EditIcon } from '@chakra-ui/icons';
-import { FaCamera, FaUpload, FaChevronLeft, FaChevronRight, FaEye, FaBan } from 'react-icons/fa';
+import { FaCamera, FaUpload, FaChevronLeft, FaChevronRight, FaEye, FaBan, FaCheckCircle } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 
 const MotionBox = motion(Box);
@@ -64,6 +64,11 @@ function DriversPage() {
   const { isOpen: isSuspendOpen, onOpen: onSuspendOpen, onClose: onSuspendClose } = useDisclosure();
   const suspendTargetRef = useRef(null);
   const suspendCancelRef = useRef();
+
+  // activate confirmation dialog
+  const { isOpen: isActivateOpen, onOpen: onActivateOpen, onClose: onActivateClose } = useDisclosure();
+  const activateTargetRef = useRef(null);
+  const activateCancelRef = useRef();
 
   // update confirmation (for saving edits inside view modal)
   const { isOpen: isUpdateConfirmOpen, onOpen: onUpdateConfirmOpen, onClose: onUpdateConfirmClose } = useDisclosure();
@@ -148,68 +153,40 @@ function DriversPage() {
   }, [page]);
 
   // ---------- Robust uploadDriverPicture ----------
-  /**
-   * Upload a driver picture to the 'drivers' bucket and return either:
-   * - a public URL (if available),
-   * - a signed URL (if bucket is private),
-   * - or the path string to the object (so server-side can resolve later).
-   *
-   * This function:
-   * - Uploads to the bucket root (no 'photos/' folder) to match your setup.
-   * - Tries File upload first, then falls back to uploading a Uint8Array if upload returns an error.
-   */
   async function uploadDriverPicture(file, driverId) {
     if (!file) return null;
     const bucketName = 'drivers';
     const ext = (file.name || '').split('.').pop() || 'jpg';
     const filename = `${driverId || Date.now()}-${Math.floor(Math.random() * 9000) + 1000}.${ext}`;
-    // upload to root (no subfolder) because you said bucket has no subfolders
     const path = `${filename}`;
 
-    // helper to attempt getPublicUrl / createSignedUrl / list check
     const resolveUrlOrPath = async () => {
-      // attempt public url
       try {
         const pub = await supabase.storage.from(bucketName).getPublicUrl(path);
         const publicUrl = pub?.data?.publicUrl || pub?.public_url || pub?.publicUrl;
         if (publicUrl) return publicUrl;
-      } catch (e) {
-        // ignore
-      }
-
-      // attempt signed url (1 hour)
+      } catch (e) {}
       try {
         const signedSeconds = 60 * 60;
         const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
         if (!signedErr && signedData?.signedUrl) return signedData.signedUrl;
-      } catch (e) {
-        // ignore
-      }
-
-      // final fallback: verify the object exists via list()
+      } catch (e) {}
       try {
         const listRes = await supabase.storage.from(bucketName).list('', { search: filename, limit: 1000 });
         if (!listRes.error && Array.isArray(listRes.data) && listRes.data.length > 0) {
-          // return path for server-side resolution
           return path;
         }
-      } catch (e) {
-        // ignore
-      }
-
+      } catch (e) {}
       return null;
     };
 
     try {
-      // First attempt: upload File directly
       const up1 = await supabase.storage.from(bucketName).upload(path, file, { upsert: true, contentType: file.type });
       if (!up1.error && up1.data) {
         const resolved = await resolveUrlOrPath();
         return resolved || path;
       }
 
-      // If the first upload returned an error, try fallback uploading a Uint8Array (ArrayBuffer)
-      // (some environments accept typed arrays better)
       try {
         const arrayBuffer = await file.arrayBuffer();
         const uint8 = new Uint8Array(arrayBuffer);
@@ -224,7 +201,6 @@ function DriversPage() {
         console.warn('uploadDriverPicture: fallback upload threw', e);
       }
 
-      // If both attempts failed, surface the original error (prefer up1.error)
       const err = (up1 && up1.error) ? up1.error : new Error('Upload failed');
       console.error('uploadDriverPicture failed', err);
       return null;
@@ -276,7 +252,7 @@ function DriversPage() {
         return null;
       }
       if (!data) return true; // available
-      if (excludeId && data.id === excludeId) return true; // the same record
+      if (excludeId && data.id === excludeId) return true; // same record
       return false; // taken
     } catch (e) {
       console.warn('checkPhoneAvailabilityOnServer threw', e);
@@ -302,7 +278,6 @@ function DriversPage() {
       return;
     }
     const phone = String(form.phone || '').trim();
-    // basic prefix validation
     if (!phone.startsWith('+220')) {
       setCreatePhoneStatus('badprefix');
       if (createPhoneTimerRef.current) clearTimeout(createPhoneTimerRef.current);
@@ -313,22 +288,16 @@ function DriversPage() {
       setCreatePhoneStatus(null);
       return;
     }
-    // debounce server check
     setCreatePhoneStatus('checking');
     if (createPhoneTimerRef.current) clearTimeout(createPhoneTimerRef.current);
     const current = phone;
     createPhoneTimerRef.current = setTimeout(async () => {
       lastCreateCheckedPhoneRef.current = current;
       const avail = await checkPhoneAvailabilityOnServer(current, null);
-      // ensure user hasn't changed input since the check started
       if (lastCreateCheckedPhoneRef.current !== current) return;
-      if (avail === null) {
-        setCreatePhoneStatus(null);
-      } else if (avail === true) {
-        setCreatePhoneStatus('available');
-      } else {
-        setCreatePhoneStatus('taken');
-      }
+      if (avail === null) setCreatePhoneStatus(null);
+      else if (avail === true) setCreatePhoneStatus('available');
+      else setCreatePhoneStatus('taken');
     }, 700);
 
     return () => {
@@ -341,9 +310,7 @@ function DriversPage() {
   const createDriver = async () => {
     if (!form.name.trim()) return toast({ status: 'warning', title: 'Name required' });
     if (!form.phone.trim()) return toast({ status: 'warning', title: 'Phone required' });
-    // license is optional now
 
-    // quick local guard against known "taken"
     if (createPhoneStatus === 'taken') {
       return toast({ status: 'error', title: 'The Phone number is already used, try another one' });
     }
@@ -351,7 +318,6 @@ function DriversPage() {
     try {
       const phoneToCheck = String(form.phone || '').trim();
 
-      // double-check server-side for race conditions
       try {
         const { data: existingPhone, error: phoneErr } = await supabase.from('drivers').select('id').eq('phone', phoneToCheck).maybeSingle();
         if (phoneErr) {
@@ -388,7 +354,6 @@ function DriversPage() {
         try {
           const pictureUrl = await uploadDriverPicture(pictureFile, driverId);
           if (pictureUrl) {
-            // NB: only update DB if upload succeeded and returned a usable url/path
             await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
           } else {
             console.warn('Picture upload returned null; skipping picture_url update.');
@@ -491,7 +456,6 @@ function DriversPage() {
   // update driver from view modal (after confirmation)
   const performUpdateViewDriver = async () => {
     if (!viewDriver) return;
-    // guard for phone 'taken' status
     if (viewPhoneStatus === 'taken') {
       return toast({ status: 'error', title: 'The Phone number is already used, try another one' });
     }
@@ -500,7 +464,6 @@ function DriversPage() {
     try {
       const phoneToCheck = String(viewDriver.phone || '').trim();
 
-      // check uniqueness of phone excluding current driver
       try {
         const { data: dup, error: dupErr } = await supabase.from('drivers')
           .select('id')
@@ -525,7 +488,6 @@ function DriversPage() {
         license_number: (viewDriver.license_number || '') ? viewDriver.license_number.trim() : null,
       };
 
-      // server update
       const { data: updated, error: updErr } = await supabase.from('drivers').update(payload).eq('id', viewDriver.id).select().maybeSingle();
       if (updErr) {
         if (isPhoneDuplicateError(updErr)) {
@@ -537,7 +499,6 @@ function DriversPage() {
         throw updErr;
       }
 
-      // upload picture if changed
       if (viewPictureFile && viewDriver.id) {
         try {
           const pictureUrl = await uploadDriverPicture(viewPictureFile, viewDriver.id);
@@ -575,12 +536,13 @@ function DriversPage() {
 
   const performSuspend = async () => {
     const driver = suspendTargetRef.current;
-    if (!driver) return onSuspendClose();
+    if (!driver) {
+      onSuspendClose();
+      return;
+    }
     try {
-      // Try to update is_suspended boolean first
       const { error } = await supabase.from('drivers').update({ is_suspended: true }).eq('id', driver.id);
       if (error) {
-        // fallback: try setting status = 'suspended'
         const { error: e2 } = await supabase.from('drivers').update({ status: 'suspended' }).eq('id', driver.id);
         if (e2) {
           toast({
@@ -596,6 +558,7 @@ function DriversPage() {
       }
 
       toast({ status: 'success', title: 'Driver suspended' });
+      // refresh list so UI reflects persisted state
       fetchDrivers(page, pageSize);
     } catch (err) {
       console.error('performSuspend error', err);
@@ -603,6 +566,46 @@ function DriversPage() {
     } finally {
       onSuspendClose();
       suspendTargetRef.current = null;
+    }
+  };
+
+  // ---------- ACTIVATE logic ----------
+  const openActivateConfirm = (driver) => {
+    activateTargetRef.current = driver;
+    onActivateOpen();
+  };
+
+  const performActivate = async () => {
+    const driver = activateTargetRef.current;
+    if (!driver) {
+      onActivateClose();
+      return;
+    }
+    try {
+      const { error } = await supabase.from('drivers').update({ is_suspended: false }).eq('id', driver.id);
+      if (error) {
+        const { error: e2 } = await supabase.from('drivers').update({ status: 'active' }).eq('id', driver.id);
+        if (e2) {
+          toast({
+            status: 'warning',
+            title: 'Could not activate driver server-side',
+            description: 'Server did not accept activation. Please check DB schema.',
+            duration: 8000,
+          });
+          setDrivers((prev) => prev.map((d) => (d.id === driver.id ? { ...d, _suspendedClient: false } : d)));
+          onActivateClose();
+          return;
+        }
+      }
+
+      toast({ status: 'success', title: 'Driver activated' });
+      fetchDrivers(page, pageSize);
+    } catch (err) {
+      console.error('performActivate error', err);
+      toast({ status: 'error', title: 'Activate failed', description: err?.message || String(err) });
+    } finally {
+      onActivateClose();
+      activateTargetRef.current = null;
     }
   };
 
@@ -645,9 +648,16 @@ function DriversPage() {
                 <Tooltip label="View">
                   <IconButton size="sm" icon={<FaEye />} aria-label="View" onClick={() => openView(d)} />
                 </Tooltip>
-                <Tooltip label="Suspend">
-                  <IconButton size="sm" colorScheme="red" icon={<FaBan />} aria-label="Suspend" onClick={() => openSuspendConfirm(d)} />
-                </Tooltip>
+
+                {isDriverSuspended(d) ? (
+                  <Tooltip label="Activate">
+                    <IconButton size="sm" colorScheme="green" icon={<FaCheckCircle />} aria-label="Activate" onClick={() => openActivateConfirm(d)} />
+                  </Tooltip>
+                ) : (
+                  <Tooltip label="Suspend">
+                    <IconButton size="sm" colorScheme="red" icon={<FaBan />} aria-label="Suspend" onClick={() => openSuspendConfirm(d)} />
+                  </Tooltip>
+                )}
               </HStack>
             </VStack>
           </Flex>
@@ -685,7 +695,12 @@ function DriversPage() {
               <Td>
                 <HStack spacing={2} wrap="wrap">
                   <Button size="sm" leftIcon={<FaEye />} onClick={() => openView(d)}>View</Button>
-                  <Button size="sm" colorScheme="red" leftIcon={<FaBan />} onClick={() => openSuspendConfirm(d)}>Suspend</Button>
+
+                  {isDriverSuspended(d) ? (
+                    <Button size="sm" colorScheme="green" leftIcon={<FaCheckCircle />} onClick={() => openActivateConfirm(d)}>Activate</Button>
+                  ) : (
+                    <Button size="sm" colorScheme="red" leftIcon={<FaBan />} onClick={() => openSuspendConfirm(d)}>Suspend</Button>
+                  )}
                 </HStack>
               </Td>
             </Tr>
@@ -943,6 +958,22 @@ function DriversPage() {
             <AlertDialogFooter>
               <Button ref={suspendCancelRef} onClick={onSuspendClose}>Cancel</Button>
               <Button colorScheme="red" onClick={performSuspend} ml={3}>Suspend</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
+
+      {/* ---------- Activate Confirmation AlertDialog ---------- */}
+      <AlertDialog isOpen={isActivateOpen} leastDestructiveRef={activateCancelRef} onClose={onActivateClose} isCentered>
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Activate Driver</AlertDialogHeader>
+            <AlertDialogBody>
+              Are you sure you want to activate <b>{activateTargetRef.current?.name || 'this driver'}</b>? This will re-enable the driver for assignments.
+            </AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={activateCancelRef} onClick={onActivateClose}>Cancel</Button>
+              <Button colorScheme="green" onClick={performActivate} ml={3}>Activate</Button>
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialogOverlay>
