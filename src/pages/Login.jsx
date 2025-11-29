@@ -238,7 +238,7 @@ function Login() {
           fontSize="lg"
           userSelect="none"
         >
-          SmartPort Ai-Powered WBM System
+          NICK TC-SCAN (GAMBIA) LTD. WB System
         </Text>
 
         <VStack spacing={6} align="stretch" as="form" onSubmit={handleSubmit}>
