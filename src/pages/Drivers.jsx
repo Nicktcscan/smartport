@@ -36,7 +36,7 @@ function DriversPage() {
   // create modal / form state (floating orb)
   const { isOpen: isCreateOpen, onOpen: onCreateOpen, onClose: onCreateClose } = useDisclosure();
   const [isSaving, setIsSaving] = useState(false);
-  const [form, setForm] = useState({ name: '', phone: '', license_number: '' });
+  const [form, setForm] = useState({ name: '', phone: '+220', license_number: '' });
   const [pictureFile, setPictureFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
   const createFileRef = useRef();
@@ -190,24 +190,54 @@ function DriversPage() {
     }
   }
 
+  // ---------- openCreate helper (prefill + open) ----------
+  const openCreate = () => {
+    setForm({ name: '', phone: '+220', license_number: '' });
+    setPictureFile(null);
+    setPreviewUrl(null);
+    onCreateOpen();
+  };
+
   // create driver
   const createDriver = async () => {
     if (!form.name.trim()) return toast({ status: 'warning', title: 'Name required' });
     if (!form.phone.trim()) return toast({ status: 'warning', title: 'Phone required' });
-    if (!form.license_number.trim()) return toast({ status: 'warning', title: 'License number required' });
+    // license is optional now
 
     setIsSaving(true);
     try {
+      const phoneToCheck = String(form.phone || '').trim();
+
+      // check duplicate phone first
+      try {
+        const { data: existingPhone, error: phoneErr } = await supabase.from('drivers').select('id').eq('phone', phoneToCheck).maybeSingle();
+        if (phoneErr) {
+          console.warn('phone uniqueness check failed', phoneErr);
+        } else if (existingPhone && existingPhone.id) {
+          setIsSaving(false);
+          toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          return;
+        }
+      } catch (e) {
+        console.warn('phone check threw', e);
+      }
+
       const payload = {
         name: form.name.trim(),
-        phone: form.phone.trim(),
-        license_number: form.license_number.trim(),
+        phone: phoneToCheck,
+        license_number: form.license_number.trim() || null,
       };
 
       const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
       if (error) {
         const msg = (error.message || '').toLowerCase();
         if (msg.includes('duplicate') || msg.includes('unique')) {
+          // check whether phone was the duplicate
+          if (msg.includes('phone') || msg.includes('duplicate') || msg.includes('unique')) {
+            toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+            setIsSaving(false);
+            return;
+          }
           throw new Error(error.message || 'Unique constraint violation');
         }
         throw error;
@@ -225,14 +255,20 @@ function DriversPage() {
       triggerConfetti(180);
 
       // reset & refresh
-      setForm({ name: '', phone: '', license_number: '' });
+      setForm({ name: '', phone: '+220', license_number: '' });
       setPictureFile(null); setPreviewUrl(null);
       onCreateClose();
       fetchDrivers(1, pageSize);
       setPage(1);
     } catch (err) {
       console.error('createDriver error', err);
-      toast({ status: 'error', title: 'Save failed', description: err?.message || String(err) });
+      // If DB unique constraint triggers and message contains phone -> friendly msg
+      const message = (err?.message || String(err)).toLowerCase();
+      if (message.includes('phone') || message.includes('duplicate') || message.includes('unique')) {
+        toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+      } else {
+        toast({ status: 'error', title: 'Save failed', description: err?.message || String(err) });
+      }
     } finally {
       setIsSaving(false);
     }
@@ -271,15 +307,43 @@ function DriversPage() {
     if (!viewDriver) return;
     setIsUpdatingView(true);
     try {
+      const phoneToCheck = String(viewDriver.phone || '').trim();
+
+      // check uniqueness of phone excluding current driver
+      try {
+        const { data: dup, error: dupErr } = await supabase.from('drivers')
+          .select('id')
+          .eq('phone', phoneToCheck)
+          .neq('id', viewDriver.id)
+          .maybeSingle();
+        if (dupErr) {
+          console.warn('update phone uniqueness check failed', dupErr);
+        } else if (dup && dup.id) {
+          setIsUpdatingView(false);
+          toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          return;
+        }
+      } catch (e) {
+        console.warn('update phone check threw', e);
+      }
+
       const payload = {
         name: (viewDriver.name || '').trim(),
-        phone: (viewDriver.phone || '').trim(),
-        license_number: (viewDriver.license_number || '').trim(),
+        phone: phoneToCheck,
+        license_number: (viewDriver.license_number || '') ? viewDriver.license_number.trim() : null,
       };
 
       // server update
       const { data: updated, error: updErr } = await supabase.from('drivers').update(payload).eq('id', viewDriver.id).select().maybeSingle();
-      if (updErr) throw updErr;
+      if (updErr) {
+        const msg = (updErr.message || '').toLowerCase();
+        if (msg.includes('phone') || msg.includes('duplicate') || msg.includes('unique')) {
+          toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          setIsUpdatingView(false);
+          return;
+        }
+        throw updErr;
+      }
 
       // upload picture if changed
       if (viewPictureFile && viewDriver.id) {
@@ -297,7 +361,12 @@ function DriversPage() {
       onViewClose();
     } catch (err) {
       console.error('performUpdateViewDriver error', err);
-      toast({ status: 'error', title: 'Update failed', description: err?.message || String(err) });
+      const message = (err?.message || String(err)).toLowerCase();
+      if (message.includes('phone') || message.includes('duplicate') || message.includes('unique')) {
+        toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+      } else {
+        toast({ status: 'error', title: 'Update failed', description: err?.message || String(err) });
+      }
     } finally {
       setIsUpdatingView(false);
     }
@@ -499,7 +568,7 @@ function DriversPage() {
       </Flex>
 
       {/* Floating crystal orb (create) */}
-      <Box className="floating-orb" onClick={() => { onCreateOpen(); }} role="button" aria-label="New Driver">
+      <Box className="floating-orb" onClick={() => { openCreate(); }} role="button" aria-label="New Driver">
         <MotionBox
           className="orb"
           whileHover={{ scale: 1.06, rotate: 6 }}
@@ -513,7 +582,7 @@ function DriversPage() {
       </Box>
 
       {/* ---------- Create Modal (floating orb) ---------- */}
-      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }} size={modalSize}>
+      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '+220', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }} size={modalSize}>
         <ModalOverlay />
         <AnimatePresence>
           {isCreateOpen && (
@@ -538,8 +607,8 @@ function DriversPage() {
                       <Input value={form.phone} onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))} placeholder="+220 1234 567" />
                     </FormControl>
 
-                    <FormControl isRequired>
-                      <FormLabel>License Number</FormLabel>
+                    <FormControl>
+                      <FormLabel>License Number (optional)</FormLabel>
                       <Input value={form.license_number} onChange={(e) => setForm((p) => ({ ...p, license_number: e.target.value }))} placeholder="License No" />
                     </FormControl>
 
@@ -567,7 +636,7 @@ function DriversPage() {
 
                 <ModalFooter>
                   <Button colorScheme="teal" mr={3} isLoading={isSaving} onClick={createDriver}>{isSaving ? 'Creating...' : 'Create Driver'}</Button>
-                  <Button variant="ghost" onClick={() => { onCreateClose(); setForm({ name: '', phone: '', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }}>Cancel</Button>
+                  <Button variant="ghost" onClick={() => { onCreateClose(); setForm({ name: '', phone: '+220', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }}>Cancel</Button>
                 </ModalFooter>
               </ModalContent>
             </MotionBox>
@@ -622,8 +691,8 @@ function DriversPage() {
                         <FormLabel>Phone</FormLabel>
                         <Input value={viewDriver.phone || ''} onChange={(e) => setViewDriver((p) => ({ ...p, phone: e.target.value }))} />
                       </FormControl>
-                      <FormControl isRequired>
-                        <FormLabel>License Number</FormLabel>
+                      <FormControl>
+                        <FormLabel>License Number (optional)</FormLabel>
                         <Input value={viewDriver.license_number || ''} onChange={(e) => setViewDriver((p) => ({ ...p, license_number: e.target.value }))} />
                       </FormControl>
                       <FormControl>
