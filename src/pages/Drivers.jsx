@@ -16,6 +16,15 @@ import { supabase } from '../supabaseClient';
 
 const MotionBox = motion(Box);
 
+/**
+ * DriversPage
+ *
+ * - Robust picture upload (uploads BEFORE DB insert so picture_url is stored reliably)
+ * - Attempts both File upload and Uint8Array fallback
+ * - Returns either publicUrl, signedUrl or path (if public/private)
+ * - Improved error handling & clear toasts when upload fails
+ * - Keeps all UX from previous iteration: inline phone validation, suspend/activate, responsive layout
+ */
 function DriversPage() {
   const toast = useToast();
 
@@ -152,85 +161,82 @@ function DriversPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
-  // ---------- Robust uploadDriverPicture ----------
-  async function uploadDriverPicture(file, driverId) {
+  // ---------- Improved uploadDriverPicture ----------
+  /**
+   * Upload file to 'drivers' bucket root and return a usable URL or path.
+   * Uploads BEFORE DB insert so we can include picture_url in the inserted row.
+   */
+  async function uploadDriverPictureBeforeInsert(file) {
     if (!file) return null;
     const bucketName = 'drivers';
     const ext = (file.name || '').split('.').pop() || 'jpg';
-    const filename = `${driverId || Date.now()}-${Math.floor(Math.random() * 9000) + 1000}.${ext}`;
-    const path = `${filename}`;
+    const filename = `${Date.now()}-${Math.floor(Math.random() * 9000) + 1000}.${ext}`;
+    const path = `${filename}`; // root of bucket
 
-    const resolveUrlOrPath = async () => {
+    // Try File upload; if fails try typed array fallback
+    try {
+      // Some browsers/environments require a Plain File object with a name — ensure that:
+      let toUpload = file;
+      if (!(file instanceof File)) {
+        // reconstruct File from Blob/ArrayBuffer if needed
+        const ab = await file.arrayBuffer();
+        toUpload = new File([ab], filename, { type: file.type || 'image/jpeg' });
+      }
+
+      const up = await supabase.storage.from(bucketName).upload(path, toUpload, { upsert: true, contentType: toUpload.type || 'image/jpeg' });
+      if (up.error) {
+        console.warn('Primary upload error', up.error);
+        // fallback to upload Uint8Array
+        try {
+          const buffer = await toUpload.arrayBuffer();
+          const uint8 = new Uint8Array(buffer);
+          const up2 = await supabase.storage.from(bucketName).upload(path, uint8, { upsert: true, contentType: toUpload.type || 'image/jpeg' });
+          if (up2.error) {
+            console.error('Fallback upload failed', up2.error);
+            throw up2.error;
+          }
+        } catch (e) {
+          console.error('Fallback upload exception', e);
+          throw e;
+        }
+      }
+
+      // Resolve public URL if possible
       try {
         const pub = await supabase.storage.from(bucketName).getPublicUrl(path);
-        const publicUrl = pub?.data?.publicUrl || pub?.public_url || pub?.publicUrl;
+        // v2: pub.data.publicUrl ; v1: pub.publicURL sometimes
+        const publicUrl = (pub && (pub.data?.publicUrl || pub.data?.public_url || pub.publicUrl || pub.public_url)) || null;
         if (publicUrl) return publicUrl;
-      } catch (e) {}
+      } catch (e) {
+        // ignore
+      }
+
+      // Try signed URL (1 hour)
       try {
         const signedSeconds = 60 * 60;
         const { data: signedData, error: signedErr } = await supabase.storage.from(bucketName).createSignedUrl(path, signedSeconds);
         if (!signedErr && signedData?.signedUrl) return signedData.signedUrl;
-      } catch (e) {}
+      } catch (e) {
+        // ignore
+      }
+
+      // Final: confirm existence via list and return path
       try {
         const listRes = await supabase.storage.from(bucketName).list('', { search: filename, limit: 1000 });
         if (!listRes.error && Array.isArray(listRes.data) && listRes.data.length > 0) {
           return path;
         }
       } catch (e) {}
-      return null;
-    };
 
-    try {
-      const up1 = await supabase.storage.from(bucketName).upload(path, file, { upsert: true, contentType: file.type });
-      if (!up1.error && up1.data) {
-        const resolved = await resolveUrlOrPath();
-        return resolved || path;
-      }
-
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const uint8 = new Uint8Array(arrayBuffer);
-        const up2 = await supabase.storage.from(bucketName).upload(path, uint8, { upsert: true, contentType: file.type });
-        if (!up2.error && up2.data) {
-          const resolved = await resolveUrlOrPath();
-          return resolved || path;
-        } else {
-          console.warn('uploadDriverPicture: second (Uint8Array) upload failed', up2.error);
-        }
-      } catch (e) {
-        console.warn('uploadDriverPicture: fallback upload threw', e);
-      }
-
-      const err = (up1 && up1.error) ? up1.error : new Error('Upload failed');
-      console.error('uploadDriverPicture failed', err);
-      return null;
-    } catch (e) {
-      console.error('uploadDriverPicture final catch', e);
+      // nothing found — treat as failure
+      throw new Error('Upload succeeded but could not resolve URL/path');
+    } catch (err) {
+      console.error('uploadDriverPictureBeforeInsert failed', err);
       return null;
     }
   }
 
-  // confetti helper (load dynamically)
-  async function triggerConfetti(count = 120) {
-    try {
-      if (typeof window !== 'undefined' && !window.confetti) {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script');
-          s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
-          s.onload = () => resolve();
-          s.onerror = reject;
-          document.head.appendChild(s);
-        });
-      }
-      if (window.confetti) {
-        window.confetti({ particleCount: Math.min(count, 300), spread: 160, origin: { y: 0.6 } });
-      }
-    } catch (e) {
-      console.debug('confetti load failed', e);
-    }
-  }
-
-  // ---------- small helper to detect unique-phone DB errors ----------
+  // small helper to detect unique-phone DB errors
   function isPhoneDuplicateError(err) {
     if (!err) return false;
     const code = String(err?.code || '').toLowerCase();
@@ -306,7 +312,7 @@ function DriversPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.phone, isCreateOpen]);
 
-  // create driver
+  // create driver (upload first, then insert with picture_url)
   const createDriver = async () => {
     if (!form.name.trim()) return toast({ status: 'warning', title: 'Name required' });
     if (!form.phone.trim()) return toast({ status: 'warning', title: 'Phone required' });
@@ -318,6 +324,7 @@ function DriversPage() {
     try {
       const phoneToCheck = String(form.phone || '').trim();
 
+      // server-side pre-check for race
       try {
         const { data: existingPhone, error: phoneErr } = await supabase.from('drivers').select('id').eq('phone', phoneToCheck).maybeSingle();
         if (phoneErr) {
@@ -332,14 +339,29 @@ function DriversPage() {
         console.warn('phone check threw', e);
       }
 
+      // If there's a picture, upload it first to ensure picture_url is available to insert
+      let pictureUrlOrPath = null;
+      if (pictureFile) {
+        toast({ status: 'info', title: 'Uploading picture...' });
+        pictureUrlOrPath = await uploadDriverPictureBeforeInsert(pictureFile);
+        if (!pictureUrlOrPath) {
+          // If upload fails, show friendly message and stop the flow (so user can retry)
+          toast({ status: 'error', title: 'Picture upload failed', description: 'Could not upload driver picture. Please try again or choose another image.' });
+          setIsSaving(false);
+          return;
+        }
+      }
+
       const payload = {
         name: form.name.trim(),
         phone: phoneToCheck,
         license_number: form.license_number.trim() || null,
+        picture_url: pictureUrlOrPath || null,
       };
 
       const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
       if (error) {
+        // If DB insert fails but picture already uploaded, consider deleting uploaded object?
         if (isPhoneDuplicateError(error)) {
           toast({ status: 'error', title: 'The Phone number is already used, try another one' });
           setCreatePhoneStatus('taken');
@@ -347,20 +369,6 @@ function DriversPage() {
           return;
         }
         throw error;
-      }
-
-      const driverId = data?.id;
-      if (pictureFile && driverId) {
-        try {
-          const pictureUrl = await uploadDriverPicture(pictureFile, driverId);
-          if (pictureUrl) {
-            await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
-          } else {
-            console.warn('Picture upload returned null; skipping picture_url update.');
-          }
-        } catch (e) {
-          console.warn('upload picture after create failed', e);
-        }
       }
 
       toast({ status: 'success', title: 'Driver registered' });
@@ -482,11 +490,25 @@ function DriversPage() {
         console.warn('update phone check threw', e);
       }
 
+      // If picture changed, upload first
+      let pictureUrlOrPath = null;
+      if (viewPictureFile) {
+        toast({ status: 'info', title: 'Uploading picture...' });
+        pictureUrlOrPath = await uploadDriverPictureBeforeInsert(viewPictureFile);
+        if (!pictureUrlOrPath) {
+          toast({ status: 'error', title: 'Picture upload failed', description: 'Could not upload driver picture. Please try again.' });
+          setIsUpdatingView(false);
+          return;
+        }
+      }
+
       const payload = {
         name: (viewDriver.name || '').trim(),
         phone: phoneToCheck,
         license_number: (viewDriver.license_number || '') ? viewDriver.license_number.trim() : null,
       };
+
+      if (pictureUrlOrPath) payload.picture_url = pictureUrlOrPath;
 
       const { data: updated, error: updErr } = await supabase.from('drivers').update(payload).eq('id', viewDriver.id).select().maybeSingle();
       if (updErr) {
@@ -497,17 +519,6 @@ function DriversPage() {
           return;
         }
         throw updErr;
-      }
-
-      if (viewPictureFile && viewDriver.id) {
-        try {
-          const pictureUrl = await uploadDriverPicture(viewPictureFile, viewDriver.id);
-          if (pictureUrl) {
-            await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', viewDriver.id);
-          }
-        } catch (e) {
-          console.warn('upload picture during update failed', e);
-        }
       }
 
       toast({ status: 'success', title: 'Driver updated' });
@@ -558,7 +569,6 @@ function DriversPage() {
       }
 
       toast({ status: 'success', title: 'Driver suspended' });
-      // refresh list so UI reflects persisted state
       fetchDrivers(page, pageSize);
     } catch (err) {
       console.error('performSuspend error', err);
