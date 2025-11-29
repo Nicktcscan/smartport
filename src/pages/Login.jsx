@@ -66,6 +66,9 @@ function Login() {
     );
   };
 
+    const currentYear = new Date().getFullYear();
+
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!validate()) return;
@@ -238,7 +241,7 @@ function Login() {
           fontSize="lg"
           userSelect="none"
         >
-          NICK TC-SCAN (GAMBIA) LTD. WB System
+          SmartPort Ai-Powered WBM System
         </Text>
 
         <VStack spacing={6} align="stretch" as="form" onSubmit={handleSubmit}>
@@ -331,8 +334,18 @@ function Login() {
             Log in
           </Button>
 
-          {/* Public appointment link (no login required) */}
-         
+{/* COPYRIGHT FOOTER */}
+      <Text
+        mt={10}
+        mb={4}
+        fontSize="sm"
+        color={useColorModeValue("gray.700", "gray.400")}
+        textAlign="center"
+        userSelect="none"
+      >
+        © {currentYear} NICK TC-SCAN (GAMBIA) LTD. All rights reserved.
+      </Text>
+
         </VStack>
       </MotionBox>
     </Box>
