@@ -29,6 +29,7 @@ import Appointments from './pages/Appointments';
 import AgentSAD from './pages/AgentSAD';
 import AgentAppt from './pages/AgentAppt';
 import AgentApptsCreated from './pages/AgentApptscreated';
+import Drivers from './pages/Drivers';
 
 import OutgateTicketDetails from './pages/OutgateTicketDetails';
 import OutgateSearchTickets from './pages/OutgateSearchTickets';
@@ -444,6 +445,20 @@ function App() {
                 </ProtectedRoute>
               }
             />
+
+            <Route
+              path="/drivers"
+              element={
+                <ProtectedRoute allowedRoles={['admin']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Drivers />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
             <Route
               path="/roles"
               element={

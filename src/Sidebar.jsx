@@ -9,6 +9,7 @@ import {
   FaUpload,
   FaEdit,
   FaListAlt,
+  FaIdCard,
   FaCheckCircle,
   FaFileInvoice,
   FaCog,
@@ -43,8 +44,13 @@ const adminNavItems = [
   { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
   { path: '/users', label: 'Manage Users', icon: FaUsers },
   { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
+
+  // ⭐ NEW — Drivers Page
+  { path: '/drivers', label: 'Manage Drivers', icon: FaIdCard }, // You can replace icon if needed
+
   { path: '/settings', label: 'System Settings', icon: FaCog },
 ];
+
 
 // Weighbridge menu
 const weighbridgeNavItems = [
