@@ -7,7 +7,7 @@ import {
   Avatar, Table, Thead, Tbody, Tr, Th, Td, Select, Spinner, useToast,
   Badge, Flex, Stack, Tooltip, Image, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter,
-  useBreakpointValue, VisuallyHidden
+  useBreakpointValue
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AddIcon, SearchIcon, DeleteIcon, EditIcon } from '@chakra-ui/icons';
@@ -645,6 +645,16 @@ function DriversPage() {
     setPage(p);
   };
 
+  // Reset search handler (new)
+  const resetSearch = () => {
+    setQName('');
+    setQPhone('');
+    setQLicense('');
+    setPage(1);
+    fetchDrivers(1, pageSize);
+    toast({ status: 'info', title: 'Search cleared' });
+  };
+
   return (
     <Container maxW="8xl" py={{ base: 6, md: 10 }} className="drivers-container">
       <Box mb={6}>
@@ -665,7 +675,8 @@ function DriversPage() {
               <option value={48}>48</option>
             </Select>
 
-            <Button leftIcon={<SearchIcon />} colorScheme="teal" onClick={() => fetchDrivers(1, pageSize)}>Search</Button>
+            <Button leftIcon={<SearchIcon />} colorScheme="teal" onClick={() => { fetchDrivers(1, pageSize); setPage(1); }}>Search</Button>
+            <Button variant="ghost" onClick={resetSearch}>Reset</Button>
           </HStack>
         </Flex>
       </Box>
