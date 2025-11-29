@@ -445,8 +445,7 @@ function DriversPage() {
       <Box mb={6}>
         <Flex align="center" gap={4} wrap="wrap">
           <Box flex="1">
-            <Heading size="lg">Drivers</Heading>
-            <Text className="muted" mt={1}>Register, search and manage drivers. Pictures stored in <b>drivers</b> storage.</Text>
+            <Heading size="lg">Manage Drivers</Heading>
           </Box>
 
           <HStack spacing={3}>
