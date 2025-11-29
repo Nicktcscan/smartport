@@ -1,5 +1,5 @@
 // src/pages/Drivers.jsx
-import React, { useEffect, useState, useRef, useMemo } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Box, Container, Heading, Input, Button, IconButton, Text, SimpleGrid,
   VStack, HStack, FormControl, FormLabel, Modal, ModalOverlay, ModalContent,
@@ -7,6 +7,7 @@ import {
   Avatar, Table, Thead, Tbody, Tr, Th, Td, Select, Spinner, useToast,
   Badge, Flex, Stack, Tooltip, Image, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter,
+  useBreakpointValue, VisuallyHidden
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AddIcon, SearchIcon, DeleteIcon, EditIcon } from '@chakra-ui/icons';
@@ -58,20 +59,25 @@ function DriversPage() {
   const { isOpen: isUpdateConfirmOpen, onOpen: onUpdateConfirmOpen, onClose: onUpdateConfirmClose } = useDisclosure();
   const updateCancelRef = useRef();
 
-  // responsive / styling
+  // responsive values
+  const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
+  const avatarSize = useBreakpointValue({ base: 'lg', md: 'xl' });
+  const gridCols = useBreakpointValue({ base: 1, md: 2, lg: 3 });
+  const isMobile = useBreakpointValue({ base: true, md: false });
+
+  // small style injection for visual polish (glass + orb)
   useEffect(() => {
-    // css injection to match sample styling (glassmorphism + orb + 3d)
     const css = `
-      .drivers-container { background: radial-gradient(circle at 10% 10%, rgba(99,102,241,0.03), transparent 10%), linear-gradient(180deg,#f0f9ff 0%, #ffffff 60%); padding-bottom: 80px; }
+      .drivers-container { background: radial-gradient(circle at 10% 10%, rgba(99,102,241,0.03), transparent 10%), linear-gradient(180deg,#f0f9ff 0%, #ffffff 60%); padding-bottom: 120px; }
       .glass-card { background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(255,255,255,0.7)); border-radius: 14px; border: 1px solid rgba(2,6,23,0.06); box-shadow: 0 10px 40px rgba(2,6,23,0.06); padding: 14px; }
       .panel-3d { perspective: 1400px; }
       .panel-3d .card { transform-style: preserve-3d; transition: transform 0.6s ease, box-shadow 0.6s ease; border-radius: 12px; }
       @media (min-width:1600px) {
         .panel-3d .card:hover { transform: rotateY(6deg) rotateX(3deg) translateZ(8px); box-shadow: 0 30px 80px rgba(2,6,23,0.12); }
       }
-      .floating-orb { position: fixed; right: 28px; bottom: 28px; z-index: 2200; cursor: pointer; }
-      .orb { width:72px;height:72px;border-radius:999px;display:flex;align-items:center;justify-content:center; box-shadow: 0 10px 30px rgba(59,130,246,0.18), inset 0 -6px 18px rgba(62,180,200,0.08); background: linear-gradient(90deg,#7b61ff,#3ef4d0); color: #fff; font-weight:700; }
-      .spark { width:24px; height:24px; border-radius:999px; background: radial-gradient(circle at 30% 30%, #fff, rgba(255,255,255,0.12)); }
+      .floating-orb { position: fixed; right: 20px; bottom: 20px; z-index: 2200; cursor: pointer; }
+      .orb { width:64px;height:64px;border-radius:999px;display:flex;align-items:center;justify-content:center; box-shadow: 0 10px 30px rgba(59,130,246,0.18), inset 0 -6px 18px rgba(62,180,200,0.08); background: linear-gradient(90deg,#7b61ff,#3ef4d0); color: #fff; font-weight:700; }
+      .spark { width:18px; height:18px; border-radius:999px; background: radial-gradient(circle at 30% 30%, #fff, rgba(255,255,255,0.12)); }
       .muted { color: #6b7280; }
       .suspended-badge { background: rgba(220,38,38,0.06); color: #dc2626; padding: 4px 8px; border-radius: 6px; font-weight: 600; font-size: 0.8rem; }
     `;
@@ -118,6 +124,7 @@ function DriversPage() {
     }
   };
 
+  // initial fetch & watch filters/pageSize
   useEffect(() => {
     fetchDrivers(1, pageSize);
     setPage(1);
@@ -358,70 +365,63 @@ function DriversPage() {
   const totalPages = Math.max(1, Math.ceil((totalCount || 0) / pageSize));
 
   // render rows/cards
-  const DriversGrid = () => {
-    // mobile cards
-    return (
-      <SimpleGrid columns={{ base: 1, md: 2, lg: 3 }} spacing={4}>
-        {drivers.map((d) => (
-          <Box key={d.id} className="card glass-card panel-3d" p={3}>
-            <Flex justify="space-between" align="start">
-              <HStack>
-                <Avatar name={d.name} src={d.picture_url || undefined} size="md" />
-                <Box>
-                  <Text fontWeight="bold">{d.name}</Text>
-                  <Text fontSize="sm" className="muted">{d.license_number}</Text>
-                  <Text fontSize="sm" className="muted">{d.phone}</Text>
-                  {isDriverSuspended(d) && <Box mt={2} className="suspended-badge">Suspended</Box>}
-                </Box>
-              </HStack>
+  const DriversGrid = () => (
+    <SimpleGrid columns={gridCols} spacing={4}>
+      {drivers.map((d) => (
+        <Box key={d.id} className="card glass-card panel-3d" p={4}>
+          <Flex direction={{ base: 'column', md: 'row' }} gap={3} align="start">
+            <Avatar name={d.name} src={d.picture_url || undefined} size={avatarSize} />
+            <Box flex="1" minW={0}>
+              <Text fontWeight="bold" isTruncated maxW="100%">{d.name}</Text>
+              <Text fontSize="sm" className="muted" isTruncated maxW="100%">{d.license_number}</Text>
+              <Text fontSize="sm" className="muted" isTruncated maxW="100%">{d.phone}</Text>
+              {isDriverSuspended(d) && <Box mt={2} className="suspended-badge">Suspended</Box>}
+            </Box>
 
-              <VStack spacing={2}>
+            <VStack spacing={2} align="stretch" minW={{ base: '100%', md: 'auto' }}>
+              <HStack spacing={2} wrap="wrap" justify={{ base: 'flex-start', md: 'flex-end' }}>
                 <Tooltip label="View">
                   <IconButton size="sm" icon={<FaEye />} aria-label="View" onClick={() => openView(d)} />
                 </Tooltip>
                 <Tooltip label="Suspend">
                   <IconButton size="sm" colorScheme="red" icon={<FaBan />} aria-label="Suspend" onClick={() => openSuspendConfirm(d)} />
                 </Tooltip>
-              </VStack>
-            </Flex>
-          </Box>
-        ))}
-      </SimpleGrid>
-    );
-  };
+              </HStack>
+            </VStack>
+          </Flex>
+        </Box>
+      ))}
+    </SimpleGrid>
+  );
 
   const DriversTable = () => (
     <Box overflowX="auto" className="glass-card p-2">
-      <Table variant="simple" size="sm">
+      <Table variant="simple" size="sm" minW="720px">
         <Thead>
           <Tr>
-            <Th>Photo</Th>
-            <Th>Name</Th>
-            <Th>Phone</Th>
-            <Th>License</Th>
-            <Th>Registered</Th>
-            <Th>Actions</Th>
+            <Th minW="72px">Photo</Th>
+            <Th minW="180px">Name</Th>
+            <Th minW="140px">Phone</Th>
+            <Th minW="160px">License</Th>
+            <Th minW="180px">Registered</Th>
+            <Th minW="160px">Actions</Th>
           </Tr>
         </Thead>
         <Tbody>
           {drivers.map((d) => (
             <Tr key={d.id} className="panel-3d card">
               <Td>
-                <Image src={d.picture_url || undefined} alt={d.name} boxSize="48px" objectFit="cover" borderRadius="md" />
+                <Image src={d.picture_url || undefined} alt={d.name} boxSize="56px" objectFit="cover" borderRadius="md" />
               </Td>
-              <Td>
-                <Flex align="center" gap={3}>
-                  <Box>
-                    <Text fontWeight="semibold">{d.name}</Text>
-                    {isDriverSuspended(d) && <Text fontSize="xs" color="red.500">Suspended</Text>}
-                  </Box>
-                </Flex>
+              <Td maxW="220px">
+                <Text fontWeight="semibold" isTruncated>{d.name}</Text>
+                {isDriverSuspended(d) && <Text fontSize="xs" color="red.500">Suspended</Text>}
               </Td>
-              <Td>{d.phone}</Td>
-              <Td>{d.license_number}</Td>
-              <Td>{d.created_at ? new Date(d.created_at).toLocaleString() : '—'}</Td>
+              <Td><Text isTruncated maxW="140px">{d.phone}</Text></Td>
+              <Td><Text isTruncated maxW="160px">{d.license_number}</Text></Td>
+              <Td><Text isTruncated maxW="180px">{d.created_at ? new Date(d.created_at).toLocaleString() : '—'}</Text></Td>
               <Td>
-                <HStack>
+                <HStack spacing={2} wrap="wrap">
                   <Button size="sm" leftIcon={<FaEye />} onClick={() => openView(d)}>View</Button>
                   <Button size="sm" colorScheme="red" leftIcon={<FaBan />} onClick={() => openSuspendConfirm(d)}>Suspend</Button>
                 </HStack>
@@ -444,15 +444,16 @@ function DriversPage() {
     <Container maxW="8xl" py={{ base: 6, md: 10 }} className="drivers-container">
       <Box mb={6}>
         <Flex align="center" gap={4} wrap="wrap">
-          <Box flex="1">
-            <Heading size="lg">Manage Drivers</Heading>
+          <Box flex="1" minW="220px">
+            <Heading size="lg">Drivers</Heading>
+            <Text className="muted" mt={1}>Register, search and manage drivers. Pictures stored in <b>drivers</b> storage.</Text>
           </Box>
 
-          <HStack spacing={3}>
-            <Input placeholder="Search name..." value={qName} onChange={(e) => setQName(e.target.value)} />
-            <Input placeholder="Search phone..." value={qPhone} onChange={(e) => setQPhone(e.target.value)} />
-            <Input placeholder="Search license..." value={qLicense} onChange={(e) => setQLicense(e.target.value)} />
-            <Select w="120px" value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+          <HStack spacing={2} flexWrap="wrap" align="center">
+            <Input placeholder="Search name..." value={qName} onChange={(e) => setQName(e.target.value)} maxW={{ base: '100%', md: '220px' }} />
+            <Input placeholder="Search phone..." value={qPhone} onChange={(e) => setQPhone(e.target.value)} maxW={{ base: '100%', md: '180px' }} />
+            <Input placeholder="Search license..." value={qLicense} onChange={(e) => setQLicense(e.target.value)} maxW={{ base: '100%', md: '180px' }} />
+            <Select w={{ base: '140px', md: '120px' }} value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
               <option value={6}>6</option>
               <option value={12}>12</option>
               <option value={24}>24</option>
@@ -481,14 +482,14 @@ function DriversPage() {
       </Box>
 
       {/* pagination */}
-      <Flex align="center" justify="space-between" className="glass-card" p={3} mb={8}>
-        <HStack>
+      <Flex align="center" justify="space-between" className="glass-card" p={3} mb={8} direction={{ base: 'column', md: 'row' }} gap={3}>
+        <HStack spacing={3} flexWrap="wrap">
           <Text fontWeight="bold">{totalCount}</Text>
           <Text className="muted">drivers</Text>
           <Badge colorScheme="purple">{pageSize} / page</Badge>
         </HStack>
 
-        <HStack>
+        <HStack spacing={2} align="center" wrap="wrap">
           <IconButton icon={<FaChevronLeft />} onClick={() => goPage(page - 1)} aria-label="Prev" />
           <Text>Page</Text>
           <Input value={page} onChange={(e) => goPage(Number(e.target.value || 1))} w="64px" />
@@ -512,16 +513,12 @@ function DriversPage() {
       </Box>
 
       {/* ---------- Create Modal (floating orb) ---------- */}
-      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }}>
-        <ModalOverlay bg="rgba(2,6,23,0.6)" />
+      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }} size={modalSize}>
+        <ModalOverlay />
         <AnimatePresence>
           {isCreateOpen && (
-            <MotionBox
-              initial={{ opacity: 0, y: 40, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 40, scale: 0.98 }}
-            >
-              <ModalContent borderRadius="2xl" bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" p={4}>
+            <MotionBox initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}>
+              <ModalContent borderRadius="2xl" p={4} mx={{ base: 0, md: 4 }}>
                 <ModalHeader>
                   <Flex align="center" justify="space-between">
                     <Text fontWeight="bold">Register New Driver</Text>
@@ -548,7 +545,10 @@ function DriversPage() {
 
                     <FormControl>
                       <FormLabel>Picture</FormLabel>
-                      <HStack spacing={3}>
+                      <HStack spacing={3} wrap="wrap">
+                        <VisuallyHidden as="input">
+                          {/* keep for a11y fallback */}
+                        </VisuallyHidden>
                         <input
                           ref={createFileRef}
                           type="file"
@@ -576,16 +576,12 @@ function DriversPage() {
       </Modal>
 
       {/* ---------- View Modal (with inline edit) ---------- */}
-      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewDriver(null); setIsEditingInView(false); setViewPictureFile(null); setViewPreviewUrl(null); }}>
-        <ModalOverlay bg="rgba(2,6,23,0.6)" />
+      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewDriver(null); setIsEditingInView(false); setViewPictureFile(null); setViewPreviewUrl(null); }} size={modalSize}>
+        <ModalOverlay />
         <AnimatePresence>
           {isViewOpen && viewDriver && (
-            <MotionBox
-              initial={{ opacity: 0, y: 40, scale: 0.98 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 40, scale: 0.98 }}
-            >
-              <ModalContent borderRadius="2xl" bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" p={4}>
+            <MotionBox initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}>
+              <ModalContent borderRadius="2xl" p={4} mx={{ base: 0, md: 4 }}>
                 <ModalHeader>
                   <Flex align="center" justify="space-between">
                     <Text fontWeight="bold">Driver Details</Text>
@@ -596,20 +592,20 @@ function DriversPage() {
                 <ModalBody>
                   {!isEditingInView ? (
                     <Stack spacing={4}>
-                      <HStack spacing={4}>
-                        <Avatar size="xl" name={viewDriver.name} src={viewPreviewUrl || viewDriver.picture_url || undefined} />
-                        <Box>
-                          <Text fontWeight="bold" fontSize="lg">{viewDriver.name}</Text>
-                          <Text className="muted">{viewDriver.license_number}</Text>
-                          <Text mt={2}>{viewDriver.phone}</Text>
+                      <Flex direction={{ base: 'column', md: 'row' }} gap={4}>
+                        <Avatar size={avatarSize} name={viewDriver.name} src={viewPreviewUrl || viewDriver.picture_url || undefined} />
+                        <Box minW={0}>
+                          <Text fontWeight="bold" fontSize="lg" isTruncated>{viewDriver.name}</Text>
+                          <Text className="muted" isTruncated>{viewDriver.license_number}</Text>
+                          <Text mt={2} isTruncated>{viewDriver.phone}</Text>
                           <Text className="muted" mt={2}>{viewDriver.created_at ? new Date(viewDriver.created_at).toLocaleString() : '—'}</Text>
                         </Box>
-                      </HStack>
+                      </Flex>
 
                       <Box>
                         <Text fontSize="sm" color="gray.600">Picture</Text>
                         {viewPreviewUrl || viewDriver.picture_url ? (
-                          <Image src={viewPreviewUrl || viewDriver.picture_url} alt="driver" boxSize="160px" objectFit="cover" borderRadius="md" mt={2} />
+                          <Image src={viewPreviewUrl || viewDriver.picture_url} alt="driver" boxSize={{ base: '100%', md: '240px' }} objectFit="cover" borderRadius="md" mt={2} />
                         ) : (
                           <Text className="muted" mt={2}>No picture available</Text>
                         )}
@@ -632,7 +628,7 @@ function DriversPage() {
                       </FormControl>
                       <FormControl>
                         <FormLabel>Picture</FormLabel>
-                        <HStack>
+                        <HStack wrap="wrap" spacing={3}>
                           <input ref={viewFileRef} type="file" accept="image/*" capture="environment" onChange={onViewFileChange} style={{ display: 'none' }} />
                           <Button leftIcon={<FaCamera />} onClick={() => viewFileRef.current && viewFileRef.current.click()}>Snap / Upload</Button>
                           <Button variant="ghost" leftIcon={<FaUpload />} onClick={() => viewFileRef.current && viewFileRef.current.click()}>Choose</Button>
