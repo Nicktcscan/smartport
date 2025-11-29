@@ -498,7 +498,7 @@ function App() {
             <Route
               path="/agentappt"
               element={
-                <ProtectedRoute allowedRoles={['admin', 'agent']}>
+                <ProtectedRoute allowedRoles={['admin', 'agent', 'weighbridge']}>
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <AgentAppt />
