@@ -190,6 +190,21 @@ function DriversPage() {
     }
   }
 
+  // ---------- small helper to detect unique-phone DB errors ----------
+  function isPhoneDuplicateError(err) {
+    if (!err) return false;
+    // supabase error object sometimes has `code`, `message`. For Postgres unique violation code is '23505'.
+    const code = String(err?.code || '').toLowerCase();
+    const msg = String(err?.message || err || '').toLowerCase();
+    if (code === '23505') {
+      // check if message references phone or drivers_phone_unique
+      return msg.includes('phone') || msg.includes('drivers_phone_unique') || msg.includes('drivers_phone');
+    }
+    // fallback checks
+    if (msg.includes('drivers_phone_unique') || msg.includes('phone') && msg.includes('duplicate')) return true;
+    return false;
+  }
+
   // ---------- openCreate helper (prefill + open) ----------
   const openCreate = () => {
     setForm({ name: '', phone: '+220', license_number: '' });
@@ -208,7 +223,7 @@ function DriversPage() {
     try {
       const phoneToCheck = String(form.phone || '').trim();
 
-      // check duplicate phone first
+      // check duplicate phone first (friendly UX)
       try {
         const { data: existingPhone, error: phoneErr } = await supabase.from('drivers').select('id').eq('phone', phoneToCheck).maybeSingle();
         if (phoneErr) {
@@ -230,24 +245,23 @@ function DriversPage() {
 
       const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
       if (error) {
-        const msg = (error.message || '').toLowerCase();
-        if (msg.includes('duplicate') || msg.includes('unique')) {
-          // check whether phone was the duplicate
-          if (msg.includes('phone') || msg.includes('duplicate') || msg.includes('unique')) {
-            toast({ status: 'error', title: 'The Phone number is already used, try another one' });
-            setIsSaving(false);
-            return;
-          }
-          throw new Error(error.message || 'Unique constraint violation');
+        if (isPhoneDuplicateError(error)) {
+          toast({ status: 'error', title: 'The Phone number is already used, try another one' });
+          setIsSaving(false);
+          return;
         }
         throw error;
       }
 
       const driverId = data?.id;
       if (pictureFile && driverId) {
-        const pictureUrl = await uploadDriverPicture(pictureFile, driverId);
-        if (pictureUrl) {
-          await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
+        try {
+          const pictureUrl = await uploadDriverPicture(pictureFile, driverId);
+          if (pictureUrl) {
+            await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
+          }
+        } catch (e) {
+          console.warn('upload picture after create failed', e);
         }
       }
 
@@ -262,9 +276,7 @@ function DriversPage() {
       setPage(1);
     } catch (err) {
       console.error('createDriver error', err);
-      // If DB unique constraint triggers and message contains phone -> friendly msg
-      const message = (err?.message || String(err)).toLowerCase();
-      if (message.includes('phone') || message.includes('duplicate') || message.includes('unique')) {
+      if (isPhoneDuplicateError(err)) {
         toast({ status: 'error', title: 'The Phone number is already used, try another one' });
       } else {
         toast({ status: 'error', title: 'Save failed', description: err?.message || String(err) });
@@ -336,8 +348,7 @@ function DriversPage() {
       // server update
       const { data: updated, error: updErr } = await supabase.from('drivers').update(payload).eq('id', viewDriver.id).select().maybeSingle();
       if (updErr) {
-        const msg = (updErr.message || '').toLowerCase();
-        if (msg.includes('phone') || msg.includes('duplicate') || msg.includes('unique')) {
+        if (isPhoneDuplicateError(updErr)) {
           toast({ status: 'error', title: 'The Phone number is already used, try another one' });
           setIsUpdatingView(false);
           return;
@@ -347,9 +358,13 @@ function DriversPage() {
 
       // upload picture if changed
       if (viewPictureFile && viewDriver.id) {
-        const pictureUrl = await uploadDriverPicture(viewPictureFile, viewDriver.id);
-        if (pictureUrl) {
-          await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', viewDriver.id);
+        try {
+          const pictureUrl = await uploadDriverPicture(viewPictureFile, viewDriver.id);
+          if (pictureUrl) {
+            await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', viewDriver.id);
+          }
+        } catch (e) {
+          console.warn('upload picture during update failed', e);
         }
       }
 
@@ -361,8 +376,7 @@ function DriversPage() {
       onViewClose();
     } catch (err) {
       console.error('performUpdateViewDriver error', err);
-      const message = (err?.message || String(err)).toLowerCase();
-      if (message.includes('phone') || message.includes('duplicate') || message.includes('unique')) {
+      if (isPhoneDuplicateError(err)) {
         toast({ status: 'error', title: 'The Phone number is already used, try another one' });
       } else {
         toast({ status: 'error', title: 'Update failed', description: err?.message || String(err) });
