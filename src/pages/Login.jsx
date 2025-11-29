@@ -343,7 +343,7 @@ function Login() {
         textAlign="center"
         userSelect="none"
       >
-        © {currentYear} NICK TC-SCAN (GAMBIA) LTD. All rights reserved.
+        {currentYear} © NICK TC-SCAN (GAMBIA) LTD. All rights reserved.
       </Text>
 
         </VStack>
