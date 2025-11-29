@@ -1,3 +1,5 @@
+/* eslint-disable no-unused-vars */
+/* eslint-disable react/jsx-no-undef */
 // src/pages/WeightReports.jsx
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import {
@@ -491,6 +493,8 @@ export default function WeightReports() {
   const [voiceActive, setVoiceActive] = useState(false);
   const recognitionRef = useRef(null);
 
+  const [searchPerformed, setSearchPerformed] = useState(false);
+
   const isMobile = useBreakpointValue({ base: true, md: false });
   const headingSize = useBreakpointValue({ base: 'md', md: 'lg' });
   const modalSize = useBreakpointValue({ base: 'full', md: 'lg' });
@@ -782,6 +786,7 @@ export default function WeightReports() {
       toast({ title: 'SAD Required', description: 'Please type a SAD number to generate the report.', status: 'warning', duration: 3000, isClosable: true });
       return;
     }
+    setSearchPerformed(true);
     setLoading(true);
     try {
       // --- NEW: page through Supabase results to fetch all matching tickets (no 1000-row cap) ---
@@ -1004,21 +1009,14 @@ export default function WeightReports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchDriver, searchTruck, dateFrom, dateTo, timeFrom, timeTo, sortBy, sortDir, originalTickets]);
 
-  // ---------- debounce auto-search for SAD as user types (dynamic experience) ----------
+  // If searchSAD is cleared by the user, clear results (but do NOT auto-run a search)
   useEffect(() => {
     if (!searchSAD || searchSAD.trim() === '') {
       setOriginalTickets([]);
       setFilteredTickets([]);
       setReportMeta({});
-      return;
+      setSearchPerformed(false);
     }
-
-    const handler = setTimeout(() => {
-      handleGenerateReport();
-    }, 600); // 600ms debounce
-
-    return () => clearTimeout(handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchSAD]);
 
   const applyRange = () => computeFilteredTickets();
@@ -1050,6 +1048,7 @@ export default function WeightReports() {
     setDateTo('');
     setTimeFrom('');
     setTimeTo('');
+    setSearchPerformed(false);
   };
 
   // ---------- recordReportGenerated helper (unchanged) ----------
@@ -2108,8 +2107,12 @@ export default function WeightReports() {
                         </HStack>
 
                         <HStack spacing={2} ml="auto">
-                          <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
-                          <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(t)} isDisabled={!isAdmin || !isTicketEditable(t)}>Edit</Button>
+                          <Box>
+                            <Button size="sm" variant="outline" leftIcon={<ArrowForwardIcon />} onClick={() => openModalWithTicket(t)}>View</Button>
+                          </Box>
+                          <Box>
+                            <Button size="sm" variant="ghost" leftIcon={<FaEdit />} onClick={() => startEditing(t)} isDisabled={!isAdmin || !isTicketEditable(t)}>Edit</Button>
+                          </Box>
                           {t.data.fileUrl && (
                             <Button size="sm" variant="ghost" colorScheme="red" leftIcon={<FaFilePdf />} onClick={() => window.open(t.data.fileUrl, '_blank', 'noopener')}>
                               Open PDF
@@ -2202,7 +2205,7 @@ export default function WeightReports() {
             )}
           </>
         ) : (
-          !loading && (searchSAD || searchDriver || searchTruck) && (
+          !loading && searchPerformed && (
             <Text mt={6} fontStyle="italic">
               No records found for: <Text as="span" fontWeight="bold"> {reportMeta?.sad || [searchSAD, searchDriver, searchTruck].filter(Boolean).join(', ')}</Text>
             </Text>
@@ -2451,7 +2454,7 @@ export default function WeightReports() {
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialogOverlay>
-      </AlertDialog> 
+      </AlertDialog>
 
       {/* Crystal Orb (floating) */}
       <Box className="floating-orb" onClick={handleMagicGenerate} role="button" aria-label="Magic Generate">
