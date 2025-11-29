@@ -44,6 +44,7 @@ const adminNavItems = [
   { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
   { path: '/users', label: 'Manage Users', icon: FaUsers },
   { path: '/drivers', label: 'Manage Drivers', icon: FaIdCard }, // You can replace icon if needed
+  { path: '/appointment', label: 'Create Appointments', icon: FaCalendarCheck },
   { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/settings', label: 'System Settings', icon: FaCog },
 ];
@@ -57,7 +58,7 @@ const weighbridgeNavItems = [
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },
   { path: '/weightreports', label: 'Ticket Records', icon: FaListAlt },
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
-  { path: '/agentappt', label: 'Create Appointments', icon: FaCalendarCheck },
+  { path: '/appointment', label: 'Create Appointments', icon: FaCalendarCheck },
   { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
 ];
 

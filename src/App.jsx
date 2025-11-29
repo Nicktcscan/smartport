@@ -26,6 +26,7 @@ import ExitTrucks from './pages/ExitTrucks';
 import Finance from './pages/FinanceDashboard';
 import FinanceSAD from './pages/FinanceSAD';
 import Appointments from './pages/Appointments';
+import Appointment from './pages/appointment';
 import AgentSAD from './pages/AgentSAD';
 import AgentAppt from './pages/AgentAppt';
 import AgentApptsCreated from './pages/AgentApptscreated';
@@ -286,6 +287,19 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <Appointments />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
+            <Route
+              path="/appointment"
+              element={
+                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Appointment />
                     </Box>
                   </Layout>
                 </ProtectedRoute>
