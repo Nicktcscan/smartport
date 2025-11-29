@@ -43,11 +43,8 @@ const adminNavItems = [
   { path: '/exit-trucks', label: 'Exited Trucks', icon: MdLocalShipping },
   { path: '/outgate/reports', label: 'Outgate Records', icon: FaFileInvoice },
   { path: '/users', label: 'Manage Users', icon: FaUsers },
-  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
-
-  // ⭐ NEW — Drivers Page
   { path: '/drivers', label: 'Manage Drivers', icon: FaIdCard }, // You can replace icon if needed
-
+  { path: '/appointments', label: 'Manage Appointments', icon: FaCalendarCheck },
   { path: '/settings', label: 'System Settings', icon: FaCog },
 ];
 
