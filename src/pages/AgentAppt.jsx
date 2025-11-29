@@ -254,6 +254,29 @@ async function triggerConfetti(count = 140) {
   }
 }
 
+// ---------- PhoneHelper component (reused) ----------
+function PhoneHelper({ status }) {
+  // status: null | 'checking' | 'available' | 'taken' | 'badprefix'
+  if (!status) {
+    return (
+      <Text className="phone-helper muted">Phone should start with country code <b>+220</b>. We check availability as you type.</Text>
+    );
+  }
+  if (status === 'badprefix') {
+    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>Please include your country code <b>+220</b> at the start.</Text>;
+  }
+  if (status === 'checking') {
+    return <Text className="phone-helper" style={{ color: '#b45309' }}>Checking phone availability…</Text>;
+  }
+  if (status === 'taken') {
+    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>This phone number already exists, try another one.</Text>;
+  }
+  if (status === 'available') {
+    return <Text className="phone-helper" style={{ color: '#15803d' }}>Phone number looks good — available.</Text>;
+  }
+  return null;
+}
+
 // ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
@@ -393,7 +416,7 @@ export default function AgentApptPage() {
   const [consolidated, setConsolidated] = useState('N');
   const [truckNumber, setTruckNumber] = useState('');
   const [driverName, setDriverName] = useState('');
-  const [driverLicense, setDriverLicense] = useState('');
+  const [driverLicense, setDriverLicense] = useState(''); // driver phone stored here
 
   const [t1s, setT1s] = useState([]);
   const [isT1ModalOpen, setT1ModalOpen] = useState(false);
@@ -404,6 +427,11 @@ export default function AgentApptPage() {
 
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
+
+  // driver phone check states
+  const [driverPhoneStatus, setDriverPhoneStatus] = useState(null); // null | 'checking' | 'available' | 'taken' | 'badprefix'
+  const driverPhoneTimerRef = useRef(null);
+  const lastCheckedDriverPhoneRef = useRef('');
 
   // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
@@ -496,6 +524,7 @@ export default function AgentApptPage() {
       .highlight-flash { box-shadow: 0 0 0 6px rgba(96,165,250,0.12) !important; transition: box-shadow 0.5s ease; }
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
       .muted { color: #6b7280; font-size: 0.9rem; }
+      .phone-helper { font-size: 0.85rem; margin-top: 6px; }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -549,6 +578,56 @@ export default function AgentApptPage() {
     setVoiceActive(false);
   };
 
+  // ---------- driver phone availability check (debounced) ----------
+  useEffect(() => {
+    // when driverLicense changes, check drivers table for existence
+    const phone = String(driverLicense || '').trim();
+
+    if (!phone) {
+      if (driverPhoneTimerRef.current) clearTimeout(driverPhoneTimerRef.current);
+      lastCheckedDriverPhoneRef.current = '';
+      setDriverPhoneStatus(null);
+      return;
+    }
+
+    if (!phone.startsWith('+220')) {
+      // enforce +220 prefix for consistency with drivers UI
+      setDriverPhoneStatus('badprefix');
+      if (driverPhoneTimerRef.current) clearTimeout(driverPhoneTimerRef.current);
+      lastCheckedDriverPhoneRef.current = '';
+      return;
+    }
+
+    if (phone.length < 5) {
+      setDriverPhoneStatus(null);
+      return;
+    }
+
+    setDriverPhoneStatus('checking');
+    if (driverPhoneTimerRef.current) clearTimeout(driverPhoneTimerRef.current);
+    const current = phone;
+    driverPhoneTimerRef.current = setTimeout(async () => {
+      lastCheckedDriverPhoneRef.current = current;
+      try {
+        const { data, error } = await supabase.from('drivers').select('id').eq('phone', current).maybeSingle();
+        if (error) {
+          console.warn('driver phone availability check error', error);
+          setDriverPhoneStatus(null);
+          return;
+        }
+        if (!data) setDriverPhoneStatus('available');
+        else setDriverPhoneStatus('taken');
+      } catch (e) {
+        console.warn('driver phone check threw', e);
+        setDriverPhoneStatus(null);
+      }
+    }, 700);
+
+    return () => {
+      if (driverPhoneTimerRef.current) clearTimeout(driverPhoneTimerRef.current);
+    };
+  }, [driverLicense]);
+
   const validateMainForm = () => {
     if (!agentTin.trim()) { toast({ status: 'error', title: 'Agent TIN required' }); return false; }
     if (!agentName.trim()) { toast({ status: 'error', title: 'Agent Name required' }); return false; }
@@ -556,7 +635,12 @@ export default function AgentApptPage() {
     if (!pickupDate) { toast({ status: 'error', title: 'Pick-up Date required' }); return false; }
     if (!truckNumber.trim()) { toast({ status: 'error', title: 'Truck Number required' }); return false; }
     if (!driverName.trim()) { toast({ status: 'error', title: 'Driver Name required' }); return false; }
-    if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver License required' }); return false; }
+    if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver Phone required' }); return false; }
+    // block if phone already exists
+    if (driverPhoneStatus === 'taken') {
+      toast({ status: 'error', title: 'This phone number already exists, try another one' });
+      return false;
+    }
     if (t1s.length === 0) { toast({ status: 'error', title: 'Please add at least one T1 record' }); return false; }
     if (consolidated === 'N' && t1s.length > 1) { toast({ status: 'error', title: 'Consolidated = N allows only one T1 record' }); return false; }
     if (blockedSads.length > 0) {
@@ -1055,6 +1139,23 @@ export default function AgentApptPage() {
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
+    // Additional server-side guard: check drivers table for phone existence before creating
+    try {
+      const phoneToCheck = String(driverLicense || '').trim();
+      if (phoneToCheck) {
+        const { data: existing, error: e } = await supabase.from('drivers').select('id').eq('phone', phoneToCheck).maybeSingle();
+        if (e) {
+          console.warn('driver phone existence check failed before create', e);
+        } else if (existing && existing.id) {
+          toast({ status: 'error', title: 'This phone number already exists, try another one' });
+          setDriverPhoneStatus('taken');
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('pre-create driver phone check threw', e);
+    }
+
     // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
@@ -1197,6 +1298,7 @@ export default function AgentApptPage() {
       setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
       setBlockedSads([]);
+      setDriverPhoneStatus(null);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
       const message = err?.message || String(err);
@@ -1436,7 +1538,12 @@ export default function AgentApptPage() {
 
           <FormControl isRequired>
             <FormLabel>Driver Phone Number</FormLabel>
-            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
+            <ChakraInput
+              value={driverLicense}
+              onChange={(e) => setDriverLicense(e.target.value)}
+              placeholder="Driver Phone Number (e.g. +220 1234 567)"
+            />
+            <PhoneHelper status={driverPhoneStatus} />
           </FormControl>
         </SimpleGrid>
 
@@ -1469,6 +1576,7 @@ export default function AgentApptPage() {
             setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
             setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
             setBlockedSads([]);
+            setDriverPhoneStatus(null);
             toast({ status: 'info', title: 'Form cleared' });
           }}>Clear</Button>
 
