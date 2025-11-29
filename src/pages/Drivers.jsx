@@ -5,8 +5,7 @@ import {
   VStack, HStack, FormControl, FormLabel, Modal, ModalOverlay, ModalContent,
   ModalHeader, ModalBody, ModalFooter, ModalCloseButton, useDisclosure,
   Avatar, Table, Thead, Tbody, Tr, Th, Td, Select, Spinner, useToast,
-  Badge, Flex, Stack, Tooltip, Image, AlertDialog, AlertDialogOverlay,
-  AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter,
+  Badge, Flex, Stack, Tooltip, Image, AlertDialog, AlertDialogOverlay, AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter,
   useBreakpointValue
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -248,6 +247,30 @@ function DriversPage() {
     return false;
   }
 
+  // ---------- Confetti helper (dynamically loads canvas-confetti) ----------
+  const triggerConfetti = async (count = 120) => {
+    try {
+      if (typeof window !== 'undefined' && !window.confetti) {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.5.1/dist/confetti.browser.min.js';
+          s.onload = () => resolve();
+          s.onerror = (e) => reject(e);
+          document.head.appendChild(s);
+        });
+      }
+      if (window.confetti) {
+        window.confetti({
+          particleCount: Math.min(count, 300),
+          spread: 160,
+          origin: { y: 0.6 },
+        });
+      }
+    } catch (e) {
+      console.debug('confetti load failed', e);
+    }
+  };
+
   // ---------- phone availability check helpers (debounced) ----------
   async function checkPhoneAvailabilityOnServer(phone, excludeId = null) {
     if (!phone) return null;
@@ -372,6 +395,7 @@ function DriversPage() {
       }
 
       toast({ status: 'success', title: 'Driver registered' });
+      // celebrate
       triggerConfetti(180);
 
       // reset & refresh
@@ -628,13 +652,6 @@ function DriversPage() {
     if (d._suspendedClient) return true;
     return false;
   };
-
-  // small Avatar preview component
-  const AvatarPreview = ({ src }) => (
-    <Box borderRadius="md" overflow="hidden" boxShadow="sm">
-      <Image src={src} alt="preview" boxSize="72px" objectFit="cover" />
-    </Box>
-  );
 
   // pagination calculations
   const totalPages = Math.max(1, Math.ceil((totalCount || 0) / pageSize));
@@ -1008,7 +1025,7 @@ function DriversPage() {
   );
 }
 
-// small Avatar preview component
+// Avatar preview component (single shared definition)
 function AvatarPreview({ src }) {
   return (
     <Box borderRadius="md" overflow="hidden" boxShadow="sm">
