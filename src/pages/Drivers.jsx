@@ -5,11 +5,12 @@ import {
   VStack, HStack, FormControl, FormLabel, Modal, ModalOverlay, ModalContent,
   ModalHeader, ModalBody, ModalFooter, ModalCloseButton, useDisclosure,
   Avatar, Table, Thead, Tbody, Tr, Th, Td, Select, Spinner, useToast,
-  Badge, Flex, Stack, Tooltip, Image
+  Badge, Flex, Stack, Tooltip, Image, AlertDialog, AlertDialogOverlay,
+  AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter,
 } from '@chakra-ui/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { AddIcon, SearchIcon, DeleteIcon, EditIcon } from '@chakra-ui/icons';
-import { FaCamera, FaUpload, FaChevronLeft, FaChevronRight } from 'react-icons/fa';
+import { FaCamera, FaUpload, FaChevronLeft, FaChevronRight, FaEye, FaBan } from 'react-icons/fa';
 import { supabase } from '../supabaseClient';
 
 const MotionBox = motion(Box);
@@ -31,16 +32,31 @@ function DriversPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(12);
 
-  // modal / form state
-  const { isOpen, onOpen, onClose } = useDisclosure();
+  // create modal / form state (floating orb)
+  const { isOpen: isCreateOpen, onOpen: onCreateOpen, onClose: onCreateClose } = useDisclosure();
   const [isSaving, setIsSaving] = useState(false);
   const [form, setForm] = useState({ name: '', phone: '', license_number: '' });
   const [pictureFile, setPictureFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
-  const fileInputRef = useRef();
+  const createFileRef = useRef();
 
-  // edit
-  const [editingId, setEditingId] = useState(null);
+  // view modal (open from action)
+  const { isOpen: isViewOpen, onOpen: onViewOpen, onClose: onViewClose } = useDisclosure();
+  const [viewDriver, setViewDriver] = useState(null);
+  const [isEditingInView, setIsEditingInView] = useState(false);
+  const viewFileRef = useRef();
+  const [viewPictureFile, setViewPictureFile] = useState(null);
+  const [viewPreviewUrl, setViewPreviewUrl] = useState(null);
+  const [isUpdatingView, setIsUpdatingView] = useState(false);
+
+  // suspend confirmation dialog
+  const { isOpen: isSuspendOpen, onOpen: onSuspendOpen, onClose: onSuspendClose } = useDisclosure();
+  const suspendTargetRef = useRef(null);
+  const suspendCancelRef = useRef();
+
+  // update confirmation (for saving edits inside view modal)
+  const { isOpen: isUpdateConfirmOpen, onOpen: onUpdateConfirmOpen, onClose: onUpdateConfirmClose } = useDisclosure();
+  const updateCancelRef = useRef();
 
   // responsive / styling
   useEffect(() => {
@@ -57,6 +73,7 @@ function DriversPage() {
       .orb { width:72px;height:72px;border-radius:999px;display:flex;align-items:center;justify-content:center; box-shadow: 0 10px 30px rgba(59,130,246,0.18), inset 0 -6px 18px rgba(62,180,200,0.08); background: linear-gradient(90deg,#7b61ff,#3ef4d0); color: #fff; font-weight:700; }
       .spark { width:24px; height:24px; border-radius:999px; background: radial-gradient(circle at 30% 30%, #fff, rgba(255,255,255,0.12)); }
       .muted { color: #6b7280; }
+      .suspended-badge { background: rgba(220,38,38,0.06); color: #dc2626; padding: 4px 8px; border-radius: 6px; font-weight: 600; font-size: 0.8rem; }
     `;
     const id = 'drivers-page-styles';
     let el = document.getElementById(id);
@@ -166,108 +183,66 @@ function DriversPage() {
     }
   }
 
-  // create or update driver
-  const saveDriver = async () => {
+  // create driver
+  const createDriver = async () => {
     if (!form.name.trim()) return toast({ status: 'warning', title: 'Name required' });
     if (!form.phone.trim()) return toast({ status: 'warning', title: 'Phone required' });
     if (!form.license_number.trim()) return toast({ status: 'warning', title: 'License number required' });
 
     setIsSaving(true);
     try {
-      // prepare payload
       const payload = {
         name: form.name.trim(),
         phone: form.phone.trim(),
         license_number: form.license_number.trim(),
       };
 
-      if (editingId) {
-        // update flow
-        const { data: updated, error: updateErr } = await supabase.from('drivers').update(payload).eq('id', editingId).select().maybeSingle();
-        if (updateErr) throw updateErr;
-        let pictureUrl = null;
-        if (pictureFile) {
-          pictureUrl = await uploadDriverPicture(pictureFile, editingId);
-          if (pictureUrl) {
-            await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', editingId);
-          }
+      const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
+      if (error) {
+        const msg = (error.message || '').toLowerCase();
+        if (msg.includes('duplicate') || msg.includes('unique')) {
+          throw new Error(error.message || 'Unique constraint violation');
         }
-        toast({ status: 'success', title: 'Driver updated' });
-      } else {
-        // insert
-        const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
-        if (error) {
-          // unique constraint handling
-          const msg = (error.message || '').toLowerCase();
-          if (msg.includes('duplicate') || msg.includes('unique')) {
-            throw new Error(error.message || 'Unique constraint violation');
-          }
-          throw error;
-        }
-        const driverId = data?.id;
-        let pictureUrl = null;
-        if (pictureFile && driverId) {
-          pictureUrl = await uploadDriverPicture(pictureFile, driverId);
-          if (pictureUrl) {
-            await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
-          }
-        }
-        toast({ status: 'success', title: 'Driver registered' });
-        // confetti
-        triggerConfetti(180);
+        throw error;
       }
 
-      // cleanup + refresh
+      const driverId = data?.id;
+      if (pictureFile && driverId) {
+        const pictureUrl = await uploadDriverPicture(pictureFile, driverId);
+        if (pictureUrl) {
+          await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', driverId);
+        }
+      }
+
+      toast({ status: 'success', title: 'Driver registered' });
+      triggerConfetti(180);
+
+      // reset & refresh
       setForm({ name: '', phone: '', license_number: '' });
-      setPictureFile(null); setPreviewUrl(null); setEditingId(null);
-      onClose();
-      // refetch first page (or keep current)
+      setPictureFile(null); setPreviewUrl(null);
+      onCreateClose();
       fetchDrivers(1, pageSize);
       setPage(1);
     } catch (err) {
-      console.error('saveDriver error', err);
+      console.error('createDriver error', err);
       toast({ status: 'error', title: 'Save failed', description: err?.message || String(err) });
     } finally {
       setIsSaving(false);
     }
   };
 
-  // delete driver (soft delete not implemented; this removes)
-  const deleteDriver = async (id) => {
-    if (!id) return;
-    if (!confirm('Delete driver? This cannot be undone.')) return;
-    try {
-      const { error } = await supabase.from('drivers').delete().eq('id', id);
-      if (error) throw error;
-      toast({ status: 'success', title: 'Driver deleted' });
-      // refresh
-      fetchDrivers(page, pageSize);
-    } catch (err) {
-      console.error('deleteDriver error', err);
-      toast({ status: 'error', title: 'Delete failed', description: err?.message || String(err) });
-    }
+  // ---------- VIEW modal / editing logic ----------
+  const openView = (driver) => {
+    if (!driver) return;
+    setViewDriver(driver);
+    setIsEditingInView(false);
+    setViewPreviewUrl(driver.picture_url || null);
+    setViewPictureFile(null);
+    onViewOpen();
   };
 
-  // open modal for create
-  const openCreate = () => {
-    setEditingId(null);
-    setForm({ name: '', phone: '', license_number: '' });
-    setPictureFile(null);
-    setPreviewUrl(null);
-    onOpen();
-  };
-
-  // open modal for edit
-  const openEdit = (driver) => {
-    setEditingId(driver.id);
-    setForm({ name: driver.name || '', phone: driver.phone || '', license_number: driver.license_number || '' });
-    setPreviewUrl(driver.picture_url || null);
-    setPictureFile(null);
-    onOpen();
-  };
-
-  // file change handler (upload or camera)
-  const onFileChange = (ev) => {
+  // handle file change for create modal
+  const onCreateFileChange = (ev) => {
     const f = ev.target.files && ev.target.files[0];
     if (!f) return;
     setPictureFile(f);
@@ -275,10 +250,109 @@ function DriversPage() {
     setPreviewUrl(url);
   };
 
-  // quick capture via device camera: just trigger file input with capture attribute
-  const triggerCamera = () => {
-    if (fileInputRef.current) fileInputRef.current.click();
+  // handle file change for view modal (editing)
+  const onViewFileChange = (ev) => {
+    const f = ev.target.files && ev.target.files[0];
+    if (!f) return;
+    setViewPictureFile(f);
+    const url = URL.createObjectURL(f);
+    setViewPreviewUrl(url);
   };
+
+  // update driver from view modal (after confirmation)
+  const performUpdateViewDriver = async () => {
+    if (!viewDriver) return;
+    setIsUpdatingView(true);
+    try {
+      const payload = {
+        name: (viewDriver.name || '').trim(),
+        phone: (viewDriver.phone || '').trim(),
+        license_number: (viewDriver.license_number || '').trim(),
+      };
+
+      // server update
+      const { data: updated, error: updErr } = await supabase.from('drivers').update(payload).eq('id', viewDriver.id).select().maybeSingle();
+      if (updErr) throw updErr;
+
+      // upload picture if changed
+      if (viewPictureFile && viewDriver.id) {
+        const pictureUrl = await uploadDriverPicture(viewPictureFile, viewDriver.id);
+        if (pictureUrl) {
+          await supabase.from('drivers').update({ picture_url: pictureUrl }).eq('id', viewDriver.id);
+        }
+      }
+
+      toast({ status: 'success', title: 'Driver updated' });
+      // refresh UI
+      fetchDrivers(page, pageSize);
+      setIsEditingInView(false);
+      onUpdateConfirmClose();
+      onViewClose();
+    } catch (err) {
+      console.error('performUpdateViewDriver error', err);
+      toast({ status: 'error', title: 'Update failed', description: err?.message || String(err) });
+    } finally {
+      setIsUpdatingView(false);
+    }
+  };
+
+  // ---------- SUSPEND logic (uses AlertDialog confirmation) ----------
+  const openSuspendConfirm = (driver) => {
+    suspendTargetRef.current = driver;
+    onSuspendOpen();
+  };
+
+  const performSuspend = async () => {
+    const driver = suspendTargetRef.current;
+    if (!driver) return onSuspendClose();
+    try {
+      // Try to update is_suspended boolean first
+      const { error } = await supabase.from('drivers').update({ is_suspended: true }).eq('id', driver.id);
+      if (error) {
+        // fallback: try setting status = 'suspended'
+        const { error: e2 } = await supabase.from('drivers').update({ status: 'suspended' }).eq('id', driver.id);
+        if (e2) {
+          // neither column available — inform admin
+          toast({
+            status: 'warning',
+            title: 'Could not suspend driver server-side',
+            description: 'No suspend column in DB. To persist suspensions add an "is_suspended boolean" or "status text" column to drivers table.',
+            duration: 8000,
+          });
+          // still reflect client-side state
+          setDrivers((prev) => prev.map((d) => (d.id === driver.id ? { ...d, _suspendedClient: true } : d)));
+          onSuspendClose();
+          return;
+        }
+      }
+
+      toast({ status: 'success', title: 'Driver suspended' });
+      fetchDrivers(page, pageSize);
+    } catch (err) {
+      console.error('performSuspend error', err);
+      toast({ status: 'error', title: 'Suspend failed', description: err?.message || String(err) });
+    } finally {
+      onSuspendClose();
+      suspendTargetRef.current = null;
+    }
+  };
+
+  // ---------- Utility: detect suspended state ----------
+  const isDriverSuspended = (d) => {
+    if (!d) return false;
+    if (d.is_suspended === true) return true;
+    if (d.status && String(d.status).toLowerCase() === 'suspended') return true;
+    if (d.suspended_at) return true;
+    if (d._suspendedClient) return true;
+    return false;
+  };
+
+  // small Avatar preview component
+  const AvatarPreview = ({ src }) => (
+    <Box borderRadius="md" overflow="hidden" boxShadow="sm">
+      <Image src={src} alt="preview" boxSize="72px" objectFit="cover" />
+    </Box>
+  );
 
   // pagination calculations
   const totalPages = Math.max(1, Math.ceil((totalCount || 0) / pageSize));
@@ -297,12 +371,17 @@ function DriversPage() {
                   <Text fontWeight="bold">{d.name}</Text>
                   <Text fontSize="sm" className="muted">{d.license_number}</Text>
                   <Text fontSize="sm" className="muted">{d.phone}</Text>
+                  {isDriverSuspended(d) && <Box mt={2} className="suspended-badge">Suspended</Box>}
                 </Box>
               </HStack>
 
               <VStack spacing={2}>
-                <IconButton size="sm" icon={<EditIcon />} aria-label="Edit" onClick={() => openEdit(d)} />
-                <IconButton size="sm" colorScheme="red" icon={<DeleteIcon />} aria-label="Delete" onClick={() => deleteDriver(d.id)} />
+                <Tooltip label="View">
+                  <IconButton size="sm" icon={<FaEye />} aria-label="View" onClick={() => openView(d)} />
+                </Tooltip>
+                <Tooltip label="Suspend">
+                  <IconButton size="sm" colorScheme="red" icon={<FaBan />} aria-label="Suspend" onClick={() => openSuspendConfirm(d)} />
+                </Tooltip>
               </VStack>
             </Flex>
           </Box>
@@ -330,14 +409,21 @@ function DriversPage() {
               <Td>
                 <Image src={d.picture_url || undefined} alt={d.name} boxSize="48px" objectFit="cover" borderRadius="md" />
               </Td>
-              <Td>{d.name}</Td>
+              <Td>
+                <Flex align="center" gap={3}>
+                  <Box>
+                    <Text fontWeight="semibold">{d.name}</Text>
+                    {isDriverSuspended(d) && <Text fontSize="xs" color="red.500">Suspended</Text>}
+                  </Box>
+                </Flex>
+              </Td>
               <Td>{d.phone}</Td>
               <Td>{d.license_number}</Td>
               <Td>{d.created_at ? new Date(d.created_at).toLocaleString() : '—'}</Td>
               <Td>
                 <HStack>
-                  <Button size="sm" leftIcon={<EditIcon />} onClick={() => openEdit(d)}>Edit</Button>
-                  <Button size="sm" colorScheme="red" leftIcon={<DeleteIcon />} onClick={() => deleteDriver(d.id)}>Delete</Button>
+                  <Button size="sm" leftIcon={<FaEye />} onClick={() => openView(d)}>View</Button>
+                  <Button size="sm" colorScheme="red" leftIcon={<FaBan />} onClick={() => openSuspendConfirm(d)}>Suspend</Button>
                 </HStack>
               </Td>
             </Tr>
@@ -412,8 +498,8 @@ function DriversPage() {
         </HStack>
       </Flex>
 
-      {/* Floating crystal orb */}
-      <Box className="floating-orb" onClick={() => { openCreate(); }} role="button" aria-label="New Driver">
+      {/* Floating crystal orb (create) */}
+      <Box className="floating-orb" onClick={() => { onCreateOpen(); }} role="button" aria-label="New Driver">
         <MotionBox
           className="orb"
           whileHover={{ scale: 1.06, rotate: 6 }}
@@ -426,11 +512,11 @@ function DriversPage() {
         </MotionBox>
       </Box>
 
-      {/* cinematic modal */}
-      <Modal isOpen={isOpen} onClose={() => { onClose(); setEditingId(null); setPictureFile(null); setPreviewUrl(null); }}>
+      {/* ---------- Create Modal (floating orb) ---------- */}
+      <Modal isOpen={isCreateOpen} onClose={() => { onCreateClose(); setForm({ name: '', phone: '', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }}>
         <ModalOverlay bg="rgba(2,6,23,0.6)" />
         <AnimatePresence>
-          {isOpen && (
+          {isCreateOpen && (
             <MotionBox
               initial={{ opacity: 0, y: 40, scale: 0.98 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -439,14 +525,12 @@ function DriversPage() {
               <ModalContent borderRadius="2xl" bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" p={4}>
                 <ModalHeader>
                   <Flex align="center" justify="space-between">
-                    <Text fontWeight="bold">{editingId ? 'Edit Driver' : 'Register New Driver'}</Text>
-                    <Badge colorScheme="cyan">{editingId ? 'Edit Mode' : 'New'}</Badge>
+                    <Text fontWeight="bold">Register New Driver</Text>
+                    <Badge colorScheme="cyan">New</Badge>
                   </Flex>
                 </ModalHeader>
                 <ModalCloseButton />
-
                 <ModalBody>
-                  {/* holographic inputs area */}
                   <Stack spacing={4}>
                     <FormControl isRequired>
                       <FormLabel>Driver's Name</FormLabel>
@@ -467,15 +551,15 @@ function DriversPage() {
                       <FormLabel>Picture</FormLabel>
                       <HStack spacing={3}>
                         <input
-                          ref={fileInputRef}
+                          ref={createFileRef}
                           type="file"
                           accept="image/*"
                           capture="environment"
-                          onChange={onFileChange}
+                          onChange={onCreateFileChange}
                           style={{ display: 'none' }}
                         />
-                        <Button leftIcon={<FaCamera />} onClick={() => fileInputRef.current && fileInputRef.current.click()}>Snap / Upload</Button>
-                        <Button variant="ghost" leftIcon={<FaUpload />} onClick={() => fileInputRef.current && fileInputRef.current.click()}>Choose file</Button>
+                        <Button leftIcon={<FaCamera />} onClick={() => createFileRef.current && createFileRef.current.click()}>Snap / Upload</Button>
+                        <Button variant="ghost" leftIcon={<FaUpload />} onClick={() => createFileRef.current && createFileRef.current.click()}>Choose file</Button>
                         {previewUrl ? <AvatarPreview src={previewUrl} /> : <Text className="muted">No picture selected</Text>}
                       </HStack>
                     </FormControl>
@@ -483,28 +567,134 @@ function DriversPage() {
                 </ModalBody>
 
                 <ModalFooter>
-                  {editingId ? (
-                    <Button colorScheme="teal" mr={3} isLoading={isSaving} onClick={saveDriver}>{isSaving ? 'Saving...' : 'Save changes'}</Button>
-                  ) : (
-                    <Button colorScheme="teal" mr={3} isLoading={isSaving} onClick={saveDriver}>{isSaving ? 'Creating...' : 'Create Driver'}</Button>
-                  )}
-                  <Button variant="ghost" onClick={() => { onClose(); setEditingId(null); setPictureFile(null); setPreviewUrl(null); }}>Cancel</Button>
+                  <Button colorScheme="teal" mr={3} isLoading={isSaving} onClick={createDriver}>{isSaving ? 'Creating...' : 'Create Driver'}</Button>
+                  <Button variant="ghost" onClick={() => { onCreateClose(); setForm({ name: '', phone: '', license_number: '' }); setPictureFile(null); setPreviewUrl(null); }}>Cancel</Button>
                 </ModalFooter>
               </ModalContent>
             </MotionBox>
           )}
         </AnimatePresence>
       </Modal>
-    </Container>
-  );
-}
 
-// small Avatar preview component
-function AvatarPreview({ src }) {
-  return (
-    <Box borderRadius="md" overflow="hidden" boxShadow="sm">
-      <Image src={src} alt="preview" boxSize="72px" objectFit="cover" />
-    </Box>
+      {/* ---------- View Modal (with inline edit) ---------- */}
+      <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewDriver(null); setIsEditingInView(false); setViewPictureFile(null); setViewPreviewUrl(null); }}>
+        <ModalOverlay bg="rgba(2,6,23,0.6)" />
+        <AnimatePresence>
+          {isViewOpen && viewDriver && (
+            <MotionBox
+              initial={{ opacity: 0, y: 40, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 40, scale: 0.98 }}
+            >
+              <ModalContent borderRadius="2xl" bg="linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,255,0.98))" p={4}>
+                <ModalHeader>
+                  <Flex align="center" justify="space-between">
+                    <Text fontWeight="bold">Driver Details</Text>
+                    <Badge colorScheme={isDriverSuspended(viewDriver) ? 'red' : 'green'}>{isDriverSuspended(viewDriver) ? 'Suspended' : 'Active'}</Badge>
+                  </Flex>
+                </ModalHeader>
+                <ModalCloseButton />
+                <ModalBody>
+                  {!isEditingInView ? (
+                    <Stack spacing={4}>
+                      <HStack spacing={4}>
+                        <Avatar size="xl" name={viewDriver.name} src={viewPreviewUrl || viewDriver.picture_url || undefined} />
+                        <Box>
+                          <Text fontWeight="bold" fontSize="lg">{viewDriver.name}</Text>
+                          <Text className="muted">{viewDriver.license_number}</Text>
+                          <Text mt={2}>{viewDriver.phone}</Text>
+                          <Text className="muted" mt={2}>{viewDriver.created_at ? new Date(viewDriver.created_at).toLocaleString() : '—'}</Text>
+                        </Box>
+                      </HStack>
+
+                      <Box>
+                        <Text fontSize="sm" color="gray.600">Picture</Text>
+                        {viewPreviewUrl || viewDriver.picture_url ? (
+                          <Image src={viewPreviewUrl || viewDriver.picture_url} alt="driver" boxSize="160px" objectFit="cover" borderRadius="md" mt={2} />
+                        ) : (
+                          <Text className="muted" mt={2}>No picture available</Text>
+                        )}
+                      </Box>
+                    </Stack>
+                  ) : (
+                    // edit fields
+                    <Stack spacing={4}>
+                      <FormControl isRequired>
+                        <FormLabel>Name</FormLabel>
+                        <Input value={viewDriver.name || ''} onChange={(e) => setViewDriver((p) => ({ ...p, name: e.target.value }))} />
+                      </FormControl>
+                      <FormControl isRequired>
+                        <FormLabel>Phone</FormLabel>
+                        <Input value={viewDriver.phone || ''} onChange={(e) => setViewDriver((p) => ({ ...p, phone: e.target.value }))} />
+                      </FormControl>
+                      <FormControl isRequired>
+                        <FormLabel>License Number</FormLabel>
+                        <Input value={viewDriver.license_number || ''} onChange={(e) => setViewDriver((p) => ({ ...p, license_number: e.target.value }))} />
+                      </FormControl>
+                      <FormControl>
+                        <FormLabel>Picture</FormLabel>
+                        <HStack>
+                          <input ref={viewFileRef} type="file" accept="image/*" capture="environment" onChange={onViewFileChange} style={{ display: 'none' }} />
+                          <Button leftIcon={<FaCamera />} onClick={() => viewFileRef.current && viewFileRef.current.click()}>Snap / Upload</Button>
+                          <Button variant="ghost" leftIcon={<FaUpload />} onClick={() => viewFileRef.current && viewFileRef.current.click()}>Choose</Button>
+                          {viewPreviewUrl ? <AvatarPreview src={viewPreviewUrl} /> : <Text className="muted">No picture selected</Text>}
+                        </HStack>
+                      </FormControl>
+                    </Stack>
+                  )}
+                </ModalBody>
+
+                <ModalFooter>
+                  {!isEditingInView ? (
+                    <>
+                      <Button colorScheme="teal" mr={3} onClick={() => setIsEditingInView(true)} leftIcon={<EditIcon />}>Edit</Button>
+                      <Button variant="ghost" mr={3} onClick={() => { onViewClose(); setViewDriver(null); }}>Close</Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button colorScheme="green" mr={3} isLoading={isUpdatingView} onClick={() => onUpdateConfirmOpen()}>Save</Button>
+                      <Button variant="ghost" onClick={() => { setIsEditingInView(false); setViewPictureFile(null); setViewPreviewUrl(viewDriver.picture_url || null); }}>Cancel</Button>
+                    </>
+                  )}
+                </ModalFooter>
+              </ModalContent>
+            </MotionBox>
+          )}
+        </AnimatePresence>
+      </Modal>
+
+      {/* ---------- Suspend Confirmation AlertDialog ---------- */}
+      <AlertDialog isOpen={isSuspendOpen} leastDestructiveRef={suspendCancelRef} onClose={onSuspendClose} isCentered>
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Suspend Driver</AlertDialogHeader>
+            <AlertDialogBody>
+              Are you sure you want to suspend <b>{suspendTargetRef.current?.name || 'this driver'}</b>? Suspended drivers will be prevented from receiving new assignments (if enforced server-side).
+            </AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={suspendCancelRef} onClick={onSuspendClose}>Cancel</Button>
+              <Button colorScheme="red" onClick={performSuspend} ml={3}>Suspend</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
+
+      {/* ---------- Update Confirm (for saving edits in view modal) ---------- */}
+      <AlertDialog isOpen={isUpdateConfirmOpen} leastDestructiveRef={updateCancelRef} onClose={onUpdateConfirmClose} isCentered>
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Confirm Update</AlertDialogHeader>
+            <AlertDialogBody>
+              Save changes to driver <b>{viewDriver?.name || ''}</b>?
+            </AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={updateCancelRef} onClick={onUpdateConfirmClose}>Cancel</Button>
+              <Button colorScheme="green" onClick={performUpdateViewDriver} ml={3} isLoading={isUpdatingView}>Yes, save</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
+    </Container>
   );
 }
 
