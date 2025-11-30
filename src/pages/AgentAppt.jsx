@@ -1699,7 +1699,7 @@ export default function AgentApptPage() {
           </FormControl>
 
           <FormControl isRequired>
-            <FormLabel>Pick-up Date</FormLabel>
+            <FormLabel>Discharge Date</FormLabel>
             <ChakraInput type="date" value={pickupDate} onChange={(e) => setPickupDate(e.target.value)} />
             <Text className="muted" mt={1}>Select the day the truck will visit the weighbridge</Text>
           </FormControl>
