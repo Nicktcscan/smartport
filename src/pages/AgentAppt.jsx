@@ -1720,21 +1720,23 @@ export default function AgentApptPage() {
             <ChakraInput value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} placeholder="Truck Plate / No." />
           </FormControl>
 
-          <FormControl isRequired>
-            <FormLabel>Driver Name</FormLabel>
-            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
-            <Text className="muted" mt={1}>Enter the full name of the driver (registered drivers auto-fill phone).</Text>
-          </FormControl>
-
-          <FormControl isRequired>
+           <FormControl isRequired>
             <FormLabel>Driver Phone Number</FormLabel>
             <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
             {/* Inline driver check status messages */}
             {driverCheckStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking driver info…</Text>}
-            {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Registered driver — phone/name auto-filled.</Text>}
+            {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Registered driver — details will autopopulate.</Text>}
             {driverCheckStatus === 'not_found' && <Text color="orange.600" mt={1}>Driver not found — you'll be prompted to register this driver when you continue.</Text>}
             {driverCheckStatus === 'phone_taken' && <Text color="red.600" mt={1}>This phone number already exists for another driver — please use the registered phone or update the driver record.</Text>}
           </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Driver Name</FormLabel>
+            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
+            <Text className="muted" mt={1}>Enter the full name of the driver (registered drivers will appear automatically).</Text>
+          </FormControl>
+
+        
         </SimpleGrid>
 
         <Divider my={4} />
