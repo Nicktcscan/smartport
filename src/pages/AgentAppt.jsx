@@ -1674,15 +1674,6 @@ export default function AgentApptPage() {
           </FormControl>
 
           <FormControl isRequired>
-            <FormLabel>Driver Name</FormLabel>
-            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
-            {driverNameStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking name in drivers registry…</Text>}
-            {driverNameStatus === 'registered' && <Text color="green.600" mt={1}>Driver found — phone auto-filled.</Text>}
-            {driverNameStatus === 'multiple' && <Text color="orange.600" mt={1}>Multiple drivers match that name — please type the full registered name.</Text>}
-            {driverNameStatus === 'not_registered' && <Text color="red.600" mt={1}>Driver not registered — register driver before creating appointment.</Text>}
-          </FormControl>
-
-          <FormControl isRequired>
             <FormLabel>Driver Phone Number</FormLabel>
             <ChakraInput
               value={driverLicense}
@@ -1691,6 +1682,17 @@ export default function AgentApptPage() {
             />
             <PhoneHelper status={driverPhoneStatus} />
           </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Driver Name</FormLabel>
+            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
+            {driverNameStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking name in drivers registry…</Text>}
+            {driverNameStatus === 'registered' && <Text color="green.600" mt={1}>Driver found — phone auto-filled.</Text>}
+            {driverNameStatus === 'multiple' && <Text color="orange.600" mt={1}>Multiple drivers match that name — please type the full registered name.</Text>}
+            {driverNameStatus === 'not_registered' && <Text color="red.600" mt={1}>Driver not registered — register driver before creating appointment.</Text>}
+          </FormControl>
+
+          
         </SimpleGrid>
 
         <Divider my={4} />
