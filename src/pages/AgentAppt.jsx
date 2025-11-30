@@ -1725,7 +1725,7 @@ export default function AgentApptPage() {
             <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
             {/* Inline driver check status messages */}
             {driverCheckStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking driver info…</Text>}
-            {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Registered driver — details will autopopulate.</Text>}
+            {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Driver found, you may proceed now!</Text>}
             {driverCheckStatus === 'not_found' && <Text color="orange.600" mt={1}>Driver not found — you'll be prompted to register this driver when you continue.</Text>}
             {driverCheckStatus === 'phone_taken' && <Text color="red.600" mt={1}>This phone number already exists for another driver — please use the registered phone or update the driver record.</Text>}
           </FormControl>
