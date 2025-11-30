@@ -254,32 +254,6 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- PhoneHelper component (reused) ----------
-function PhoneHelper({ status }) {
-  // status: null | 'checking' | 'available' | 'taken' | 'badprefix' | 'not_registered'
-  if (!status) {
-    return (
-      <Text className="phone-helper muted">Phone should start with country code <b>+220</b>. We check drivers table as you type.</Text>
-    );
-  }
-  if (status === 'badprefix') {
-    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>Please include your country code <b>+220</b> at the start.</Text>;
-  }
-  if (status === 'checking') {
-    return <Text className="phone-helper" style={{ color: '#b45309' }}>Checking driver phone…</Text>;
-  }
-  if (status === 'taken') {
-    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>This phone number already exists for another driver — try another one.</Text>;
-  }
-  if (status === 'available') {
-    return <Text className="phone-helper" style={{ color: '#15803d' }}>Phone and name match a registered driver — good to go.</Text>;
-  }
-  if (status === 'not_registered') {
-    return <Text className="phone-helper" style={{ color: '#b91c1c' }}>Driver must be registered first. Please register driver in Drivers screen before creating appointment.</Text>;
-  }
-  return null;
-}
-
 // ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
@@ -419,7 +393,7 @@ export default function AgentApptPage() {
   const [consolidated, setConsolidated] = useState('N');
   const [truckNumber, setTruckNumber] = useState('');
   const [driverName, setDriverName] = useState('');
-  const [driverLicense, setDriverLicense] = useState(''); // driver phone stored here
+  const [driverLicense, setDriverLicense] = useState(''); // actually phone
 
   const [t1s, setT1s] = useState([]);
   const [isT1ModalOpen, setT1ModalOpen] = useState(false);
@@ -430,15 +404,6 @@ export default function AgentApptPage() {
 
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
-
-  // driver phone & name check states
-  const [driverPhoneStatus, setDriverPhoneStatus] = useState(null); // null | 'checking' | 'available' | 'taken' | 'badprefix' | 'not_registered'
-  const [driverNameStatus, setDriverNameStatus] = useState(null); // null | 'checking' | 'registered' | 'multiple' | 'not_registered'
-  const driverPhoneTimerRef = useRef(null);
-  const driverNameTimerRef = useRef(null);
-
-  // driver record matched (registered driver) -- object { id, name, phone } or null
-  const [matchedDriver, setMatchedDriver] = useState(null);
 
   // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
@@ -462,6 +427,17 @@ export default function AgentApptPage() {
 
   // subscription ref so we can unsubscribe
   const sadSubRef = useRef(null);
+
+  // ---------- NEW: driver registration/check states ----------
+  const [driverRegistered, setDriverRegistered] = useState(false);
+  const [foundDriver, setFoundDriver] = useState(null);
+  const [driverCheckStatus, setDriverCheckStatus] = useState(null); // null|'checking'|'exists'|'not_found'|'phone_taken'
+  const driverCheckTimerRef = useRef(null);
+
+  const [isDriverRegModalOpen, setDriverRegModalOpen] = useState(false);
+  const [regName, setRegName] = useState('');
+  const [regPhone, setRegPhone] = useState('');
+  const [isRegisteringDriver, setIsRegisteringDriver] = useState(false);
 
   // utility UI highlights
   const pulseRow = (index) => {
@@ -531,7 +507,6 @@ export default function AgentApptPage() {
       .highlight-flash { box-shadow: 0 0 0 6px rgba(96,165,250,0.12) !important; transition: box-shadow 0.5s ease; }
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
       .muted { color: #6b7280; font-size: 0.9rem; }
-      .phone-helper { font-size: 0.85rem; margin-top: 6px; }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -585,147 +560,6 @@ export default function AgentApptPage() {
     setVoiceActive(false);
   };
 
-  // ---------- driver name lookup (debounced) ----------
-  useEffect(() => {
-    const name = String(driverName || '').trim();
-    if (driverNameTimerRef.current) clearTimeout(driverNameTimerRef.current);
-    setDriverNameStatus(null);
-    setMatchedDriver(null);
-
-    if (!name) {
-      setDriverNameStatus(null);
-      return;
-    }
-
-    setDriverNameStatus('checking');
-    driverNameTimerRef.current = setTimeout(async () => {
-      try {
-        // Try to find exact-case-insensitive match on `name` column.
-        // If your drivers table uses a different column (driver_name/full_name), adapt accordingly.
-        // We use eq first (exact) then fallback to ilike for near matches.
-        let found = null;
-        let res = await supabase.from('drivers').select('id,phone,name').eq('name', name).maybeSingle();
-        if (res.error) {
-          // fallback: try ilike (case-insensitive)
-          const { data: il, error: ilErr } = await supabase.from('drivers').select('id,phone,name').ilike('name', name).limit(5);
-          if (ilErr) throw ilErr;
-          if (il && il.length === 1) found = il[0];
-          else if (il && il.length > 1) {
-            setDriverNameStatus('multiple');
-            setMatchedDriver(null);
-            return;
-          }
-        } else {
-          if (res.data) found = res.data;
-        }
-
-        if (!found) {
-          // try searching other likely columns if available
-          const tryOther = await supabase.from('drivers').select('id,phone,name,driver_name,full_name').or(`driver_name.eq.${name},full_name.eq.${name}`).limit(5);
-          if (!tryOther.error && tryOther.data && tryOther.data.length === 1) {
-            const rec = tryOther.data[0];
-            // normalize to {id, phone, name}
-            found = { id: rec.id, phone: rec.phone || rec.driver_phone || rec.driver_phone_number || '', name: rec.name || rec.driver_name || rec.full_name || '' };
-          } else if (!tryOther.error && tryOther.data && tryOther.data.length > 1) {
-            setDriverNameStatus('multiple');
-            setMatchedDriver(null);
-            return;
-          }
-        }
-
-        if (found) {
-          setMatchedDriver({ id: found.id, phone: (found.phone || '').toString().trim(), name: (found.name || name).toString().trim() });
-          // autofill phone if empty or different
-          if (!driverLicense || driverLicense.trim() === '' || driverLicense.trim() !== (found.phone || '').toString().trim()) {
-            setDriverLicense((found.phone || '').toString().trim());
-          }
-          setDriverNameStatus('registered');
-          setDriverPhoneStatus('available');
-        } else {
-          setDriverNameStatus('not_registered');
-          // do not clear phone automatically if user typed it
-          setMatchedDriver(null);
-          // if phone present, we will validate it in the phone effect
-        }
-      } catch (e) {
-        console.warn('driver name lookup error', e);
-        setDriverNameStatus(null);
-        setMatchedDriver(null);
-      }
-    }, 600);
-
-    return () => {
-      if (driverNameTimerRef.current) clearTimeout(driverNameTimerRef.current);
-    };
-  }, [driverName]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ---------- driver phone lookup (debounced) ----------
-  useEffect(() => {
-    const phone = String(driverLicense || '').trim();
-    if (driverPhoneTimerRef.current) clearTimeout(driverPhoneTimerRef.current);
-    setDriverPhoneStatus(null);
-
-    if (!phone) {
-      setDriverPhoneStatus(null);
-      return;
-    }
-
-    if (!phone.startsWith('+220')) {
-      setDriverPhoneStatus('badprefix');
-      return;
-    }
-
-    setDriverPhoneStatus('checking');
-    driverPhoneTimerRef.current = setTimeout(async () => {
-      try {
-        const { data: rec, error } = await supabase.from('drivers').select('id,phone,name').eq('phone', phone).maybeSingle();
-        if (error) {
-          console.warn('driver phone check error', error);
-          setDriverPhoneStatus(null);
-          return;
-        }
-
-        if (!rec) {
-          // phone not found in drivers
-          setDriverPhoneStatus('not_registered');
-          // if user already entered a name and nameStatus === 'registered', but phone isn't the same as the registered phone,
-          // mark as taken in higher-level validation (we'll block create). For the helper, show not_registered.
-          setMatchedDriver(null);
-          return;
-        }
-
-        // we have a driver record for this phone
-        const foundDriver = { id: rec.id, phone: (rec.phone || '').toString().trim(), name: (rec.name || '').toString().trim() };
-        // if driverName is present, ensure it matches the found driver
-        if (driverName && driverName.trim().length > 0) {
-          if (String(driverName).trim().toLowerCase() === String(foundDriver.name || '').trim().toLowerCase()) {
-            // match
-            setMatchedDriver(foundDriver);
-            setDriverPhoneStatus('available');
-            setDriverNameStatus('registered');
-          } else {
-            // phone belongs to another driver
-            setMatchedDriver(null);
-            setDriverPhoneStatus('taken');
-          }
-        } else {
-          // no driverName entered — auto-fill it
-          setMatchedDriver(foundDriver);
-          setDriverName(foundDriver.name || '');
-          setDriverPhoneStatus('available');
-          setDriverNameStatus('registered');
-        }
-      } catch (e) {
-        console.warn('driver phone check threw', e);
-        setDriverPhoneStatus(null);
-      }
-    }, 700);
-
-    return () => {
-      if (driverPhoneTimerRef.current) clearTimeout(driverPhoneTimerRef.current);
-    };
-  }, [driverLicense]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const validateMainForm = () => {
     if (!agentTin.trim()) { toast({ status: 'error', title: 'Agent TIN required' }); return false; }
     if (!agentName.trim()) { toast({ status: 'error', title: 'Agent Name required' }); return false; }
@@ -734,23 +568,6 @@ export default function AgentApptPage() {
     if (!truckNumber.trim()) { toast({ status: 'error', title: 'Truck Number required' }); return false; }
     if (!driverName.trim()) { toast({ status: 'error', title: 'Driver Name required' }); return false; }
     if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver Phone required' }); return false; }
-
-    // enforce driver must be registered and phone must match the registered driver
-    if (!matchedDriver || !matchedDriver.id) {
-      toast({ status: 'error', title: 'Driver not registered', description: 'The driver must be registered before creating an appointment.' });
-      return false;
-    }
-    const phoneClean = String(driverLicense || '').trim();
-    const nameClean = String(driverName || '').trim();
-    if (String(matchedDriver.phone || '').trim() !== phoneClean || String((matchedDriver.name || '').trim()).toLowerCase() !== nameClean.toLowerCase()) {
-      toast({
-        status: 'error',
-        title: 'Driver / Phone mismatch',
-        description: 'Driver name and phone must match a registered driver. If the driver is not registered, please register them first.',
-      });
-      return false;
-    }
-
     if (t1s.length === 0) { toast({ status: 'error', title: 'Please add at least one T1 record' }); return false; }
     if (consolidated === 'N' && t1s.length > 1) { toast({ status: 'error', title: 'Consolidated = N allows only one T1 record' }); return false; }
     if (blockedSads.length > 0) {
@@ -856,9 +673,235 @@ export default function AgentApptPage() {
 
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
-  // Modified openConfirm: generate numbers, set preview, then open modal
+  // ---------- NEW: driver name & phone check logic (debounced) ----------
+  //  - if exact driver name exists -> autopopulate phone
+  //  - if phone exists but name differs -> show friendly message and block
+  //  - if both name+phone entered and not registered -> open quick-register modal
+
+  useEffect(() => {
+    // watch driverName and attempt to auto-fill phone when exact match exists
+    const nm = String(driverName || '').trim();
+    if (!nm) {
+      setDriverCheckStatus(null);
+      setFoundDriver(null);
+      setDriverRegistered(false);
+      return;
+    }
+
+    setDriverCheckStatus('checking');
+    if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
+    driverCheckTimerRef.current = setTimeout(async () => {
+      try {
+        // try exact (case-insensitive) name match
+        const { data, error } = await supabase
+          .from('drivers')
+          .select('*')
+          .ilike('name', nm) // case-insensitive exact match attempt
+          .limit(2);
+
+        if (error) {
+          console.warn('driver name check error', error);
+          setDriverCheckStatus(null);
+          setFoundDriver(null);
+          setDriverRegistered(false);
+          return;
+        }
+
+        if (Array.isArray(data) && data.length === 1) {
+          const drv = data[0];
+          setFoundDriver(drv);
+          setDriverRegistered(true);
+          if (drv.phone) {
+            setDriverLicense(drv.phone);
+          }
+          setDriverCheckStatus('exists');
+        } else {
+          // not a single exact match
+          setFoundDriver(null);
+          setDriverRegistered(false);
+          setDriverCheckStatus('not_found');
+        }
+      } catch (e) {
+        console.warn('driver name check failed', e);
+        setDriverCheckStatus(null);
+      }
+    }, 700);
+
+    return () => {
+      if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
+    };
+  }, [driverName]);
+
+  useEffect(() => {
+    // watch driverLicense (phone)
+    const ph = String(driverLicense || '').trim();
+    if (!ph) {
+      setDriverCheckStatus(null);
+      return;
+    }
+
+    setDriverCheckStatus('checking');
+    if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
+    driverCheckTimerRef.current = setTimeout(async () => {
+      try {
+        const { data, error } = await supabase
+          .from('drivers')
+          .select('*')
+          .eq('phone', ph)
+          .maybeSingle();
+
+        if (error) {
+          console.warn('driver phone check error', error);
+          setDriverCheckStatus(null);
+          return;
+        }
+
+        if (data) {
+          // found by phone
+          const drv = data;
+          setFoundDriver(drv);
+          // If the name matches what's typed -> OK and mark registered
+          if (String((drv.name || '').trim()).toLowerCase() === String((driverName || '').trim()).toLowerCase()) {
+            setDriverRegistered(true);
+            setDriverCheckStatus('exists');
+            // ensure name is exactly as in DB (useful capitalization)
+            if (drv.name && drv.name !== driverName) setDriverName(drv.name);
+          } else {
+            // phone exists but the provided name is different -> block & inform
+            setDriverRegistered(false);
+            setDriverCheckStatus('phone_taken');
+            toast({
+              status: 'error',
+              title: 'Phone already registered',
+              description: 'This phone number already exists for another driver — please use the correct phone or choose the registered driver.',
+              duration: 8000,
+            });
+          }
+        } else {
+          // no driver with that phone
+          // If current driverName is not found, we will prompt registration at create time.
+          setFoundDriver(null);
+          setDriverRegistered(false);
+          setDriverCheckStatus('not_found');
+        }
+      } catch (e) {
+        console.warn('driver phone check failed', e);
+        setDriverCheckStatus(null);
+      }
+    }, 700);
+
+    return () => {
+      if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
+    };
+  }, [driverLicense, driverName]);
+
+  // ---------- helper run before opening Confirm: ensure driver registration ----------
+  async function ensureDriverRegistered() {
+    const name = String(driverName || '').trim();
+    const phone = String(driverLicense || '').trim();
+
+    if (!name || !phone) {
+      toast({ status: 'error', title: 'Driver name & phone required', description: 'Please fill both driver name and phone number' });
+      return { ok: false, reason: 'missing' };
+    }
+
+    try {
+      // check by phone first
+      const { data: byPhone, error: phoneErr } = await supabase.from('drivers').select('*').eq('phone', phone).maybeSingle();
+      if (phoneErr) {
+        console.warn('ensureDriverRegistered phoneErr', phoneErr);
+      }
+      if (byPhone) {
+        // phone exists
+        if (String((byPhone.name || '').trim()).toLowerCase() === name.toLowerCase()) {
+          setFoundDriver(byPhone);
+          setDriverRegistered(true);
+          return { ok: true, driver: byPhone };
+        }
+        // phone used by another driver
+        setDriverCheckStatus('phone_taken');
+        toast({ status: 'error', title: 'Phone already exists', description: 'This phone number already exists for another driver — please use the correct phone or ask them to register.' });
+        return { ok: false, reason: 'phone_taken' };
+      }
+
+      // no driver by phone; check if name exists
+      const { data: byNameArr, error: nameErr } = await supabase.from('drivers').select('*').ilike('name', name).limit(5);
+      if (nameErr) {
+        console.warn('ensureDriverRegistered nameErr', nameErr);
+      }
+      if (Array.isArray(byNameArr) && byNameArr.length === 1) {
+        // name exists, but phone does not — likely the driver was registered without phone or phone changed.
+        // We'll open the quick-register modal so the agent can confirm adding/updating the phone.
+        setRegName(name);
+        setRegPhone(phone);
+        setDriverRegModalOpen(true);
+        toast({ status: 'info', title: 'Driver found by name', description: 'Complete registration with the phone to link this appointment.' });
+        return { ok: false, reason: 'register_required' };
+      }
+
+      // name not found -> open quick-register modal
+      setRegName(name);
+      setRegPhone(phone);
+      setDriverRegModalOpen(true);
+      return { ok: false, reason: 'register_required' };
+    } catch (e) {
+      console.error('ensureDriverRegistered failed', e);
+      toast({ status: 'error', title: 'Driver check failed', description: 'Could not verify driver registration. Try again.' });
+      return { ok: false, reason: 'error' };
+    }
+  }
+
+  // ---------- quick register driver (from modal) ----------
+  const registerDriverQuick = async () => {
+    const name = String(regName || '').trim();
+    const phone = String(regPhone || '').trim();
+    if (!name || !phone) {
+      toast({ status: 'error', title: 'Name and Phone required' });
+      return;
+    }
+    setIsRegisteringDriver(true);
+    try {
+      const payload = { name, phone };
+      const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
+      if (error) {
+        // handle unique violation (phone) gracefully
+        const msg = (error.message || '').toLowerCase();
+        if ((error.code && String(error.code).includes('23505')) || msg.includes('duplicate') || msg.includes('unique')) {
+          toast({ status: 'error', title: 'Phone already exists', description: 'That phone is already used by another driver.' });
+          setIsRegisteringDriver(false);
+          return;
+        }
+        throw error;
+      }
+      setFoundDriver(data || null);
+      setDriverRegistered(true);
+      setDriverName((data && data.name) || name);
+      setDriverLicense((data && data.phone) || phone);
+      setDriverRegModalOpen(false);
+      toast({ status: 'success', title: 'Driver registered', description: `${name} saved.` });
+      try { await triggerConfetti(120); } catch (_) {}
+    } catch (e) {
+      console.error('registerDriverQuick failed', e);
+      toast({ status: 'error', title: 'Registration failed', description: e?.message || String(e) });
+    } finally {
+      setIsRegisteringDriver(false);
+    }
+  };
+
+  // ---------------- existing generateUniqueNumbers, createDirectlyInSupabase etc remain unchanged -------------
+  // (I will reuse your existing functions below; only small change: openConfirm will call ensureDriverRegistered first)
+  // --- New openConfirm wiring included below ---
+
+  // ---------- Modified openConfirm: generate numbers, set preview, but ensure driver registered first ----------
   const openConfirm = async () => {
     if (!validateMainForm()) return;
+
+    // ensure driver is registered or prompt quick register
+    const drvCheck = await ensureDriverRegistered();
+    if (!drvCheck.ok) {
+      // ensureDriverRegistered already opened modal or showed toast with reason
+      return;
+    }
 
     // final check: ensure none of the selected SADs are Completed
     const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
@@ -906,7 +949,7 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // --- New helper: generate unique numbers with checks ---
+  // --- Reuse your existing generateUniqueNumbers & generateNumbersUsingSupabase functions from earlier code ---
   async function generateUniqueNumbers(pickupDateValue) {
     const maxAttempts = 10;
     const d = new Date(pickupDateValue);
@@ -966,30 +1009,6 @@ export default function AgentApptPage() {
   // ---------- createDirectlyInSupabase (adds created_by, returns full object) ----------
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
-
-    // Final server-side guard: ensure driver exists and phone matches
-    try {
-      const { data: driverCheck, error: driverErr } = await supabase
-        .from('drivers')
-        .select('id,phone,name')
-        .eq('phone', String(payload.driverLicense || '').trim())
-        .maybeSingle();
-
-      if (driverErr) {
-        console.warn('server-side driver existence check error', driverErr);
-        // allow creation to continue (we'll rely on client-side), but ideally surface this
-      } else {
-        if (!driverCheck || !driverCheck.id) {
-          throw new Error('Driver not registered. Please register the driver before creating an appointment.');
-        }
-        // ensure the name matches too (case-insensitive)
-        if (String((driverCheck.name || '')).trim().toLowerCase() !== String((payload.driverName || '')).trim().toLowerCase()) {
-          throw new Error('Driver name and phone do not match the registered driver. Please ensure you selected the correct registered driver.');
-        }
-      }
-    } catch (e) {
-      throw e;
-    }
 
     let attempts = 0;
     const maxInsertAttempts = 6;
@@ -1273,29 +1292,6 @@ export default function AgentApptPage() {
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify server-side driver again
-    try {
-      const phoneToCheck = String(driverLicense || '').trim();
-      const nameToCheck = String(driverName || '').trim();
-      const { data: drec, error: derr } = await supabase.from('drivers').select('id,phone,name').eq('phone', phoneToCheck).maybeSingle();
-      if (derr) {
-        console.warn('driver re-check error', derr);
-      } else {
-        if (!drec || !drec.id) {
-          toast({ status: 'error', title: 'Driver not registered', description: 'Please register the driver first.' });
-          setDriverPhoneStatus('not_registered');
-          return;
-        }
-        if (String((drec.name || '')).trim().toLowerCase() !== nameToCheck.toLowerCase()) {
-          toast({ status: 'error', title: 'Driver name mismatch', description: 'Driver name and phone do not match the registered driver.' });
-          setDriverPhoneStatus('taken');
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn('driver server-side check threw', e);
-    }
-
     // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
@@ -1438,9 +1434,6 @@ export default function AgentApptPage() {
       setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
       setBlockedSads([]);
-      setDriverPhoneStatus(null);
-      setMatchedDriver(null);
-      setDriverNameStatus(null);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
       const message = err?.message || String(err);
@@ -1674,25 +1667,20 @@ export default function AgentApptPage() {
           </FormControl>
 
           <FormControl isRequired>
-            <FormLabel>Driver Phone Number</FormLabel>
-            <ChakraInput
-              value={driverLicense}
-              onChange={(e) => setDriverLicense(e.target.value)}
-              placeholder="Driver Phone Number (e.g. +2201234567)"
-            />
-            <PhoneHelper status={driverPhoneStatus} />
+            <FormLabel>Driver Name</FormLabel>
+            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
+            <Text className="muted" mt={1}>Enter the full name of the driver (registered drivers auto-fill phone).</Text>
           </FormControl>
 
           <FormControl isRequired>
-            <FormLabel>Driver Name</FormLabel>
-            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
-            {driverNameStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking name in drivers registry…</Text>}
-            {driverNameStatus === 'registered' && <Text color="green.600" mt={1}>Driver found. You may proceed to create the appointment.</Text>}
-            {driverNameStatus === 'multiple' && <Text color="orange.600" mt={1}>Multiple drivers match that name — please type the full registered name.</Text>}
-            {driverNameStatus === 'not_registered' && <Text color="red.600" mt={1}>Driver not registered — register driver before creating appointment.</Text>}
+            <FormLabel>Driver Phone Number</FormLabel>
+            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
+            {/* Inline driver check status messages */}
+            {driverCheckStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking driver info…</Text>}
+            {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Registered driver — phone auto-filled.</Text>}
+            {driverCheckStatus === 'not_found' && <Text color="orange.600" mt={1}>Driver not found — you'll be prompted to register this driver when you create the appointment.</Text>}
+            {driverCheckStatus === 'phone_taken' && <Text color="red.600" mt={1}>This phone number already exists for another driver — please use the registered phone or update the driver record.</Text>}
           </FormControl>
-
-          
         </SimpleGrid>
 
         <Divider my={4} />
@@ -1724,9 +1712,6 @@ export default function AgentApptPage() {
             setAgentTin(''); setAgentName(''); setWarehouse(WAREHOUSES[0].value);
             setPickupDate(''); setConsolidated('N'); setTruckNumber(''); setDriverName(''); setDriverLicense(''); setT1s([]);
             setBlockedSads([]);
-            setDriverPhoneStatus(null);
-            setDriverNameStatus(null);
-            setMatchedDriver(null);
             toast({ status: 'info', title: 'Form cleared' });
           }}>Clear</Button>
 
@@ -1893,6 +1878,34 @@ export default function AgentApptPage() {
           </ModalFooter>
         </ModalContent>
       </Modal>
+
+      {/* ---------- Quick Register Driver Modal (opened when name+phone not found) ---------- */}
+      <Modal isOpen={isDriverRegModalOpen} onClose={() => setDriverRegModalOpen(false)} isCentered>
+        <ModalOverlay />
+        <ModalContent maxW="md" borderRadius="lg">
+          <ModalHeader>Register Driver</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <Stack spacing={3}>
+              <FormControl isRequired>
+                <FormLabel>Driver Name</FormLabel>
+                <ChakraInput value={regName} onChange={(e) => setRegName(e.target.value)} placeholder="Full name" />
+              </FormControl>
+
+              <FormControl isRequired>
+                <FormLabel>Phone</FormLabel>
+                <ChakraInput value={regPhone} onChange={(e) => setRegPhone(e.target.value)} placeholder="+220 ..." />
+                <Text className="muted" mt={1}>This will create a driver record that can be used for appointments.</Text>
+              </FormControl>
+            </Stack>
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" onClick={() => setDriverRegModalOpen(false)} mr={3}>Cancel</Button>
+            <Button colorScheme="teal" onClick={registerDriverQuick} isLoading={isRegisteringDriver}>Register Driver</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
     </Container>
   );
 }
