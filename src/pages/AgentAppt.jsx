@@ -1667,12 +1667,6 @@ export default function AgentApptPage() {
           </FormControl>
 
           <FormControl isRequired>
-            <FormLabel>Driver Name</FormLabel>
-            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
-            <Text className="muted" mt={1}>Enter the full name of the driver (registered drivers auto-fill phone).</Text>
-          </FormControl>
-
-          <FormControl isRequired>
             <FormLabel>Driver Phone Number</FormLabel>
             <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
             {/* Inline driver check status messages */}
@@ -1681,6 +1675,14 @@ export default function AgentApptPage() {
             {driverCheckStatus === 'not_found' && <Text color="orange.600" mt={1}>Driver not found — you'll be prompted to register this driver when you create the appointment.</Text>}
             {driverCheckStatus === 'phone_taken' && <Text color="red.600" mt={1}>This phone number already exists for another driver — please use the registered phone or update the driver record.</Text>}
           </FormControl>
+
+          <FormControl isRequired>
+            <FormLabel>Driver Name</FormLabel>
+            <ChakraInput value={driverName} onChange={(e) => setDriverName(e.target.value)} placeholder="Driver full name" />
+            <Text className="muted" mt={1}>Enter the full name of the driver (registered drivers will be autofilled with phone entry).</Text>
+          </FormControl>
+
+          
         </SimpleGrid>
 
         <Divider my={4} />
