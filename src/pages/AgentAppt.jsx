@@ -1593,9 +1593,9 @@ export default function AgentApptPage() {
         }
 
         if (notifyResp && notifyResp.ok) {
-          toast({ status: 'success', title: 'Notifications sent', description: 'SMS/email sent (or scheduled).' });
+          toast({ status: 'success', title: 'Notifications sent', description: 'SMS & Email sent (or scheduled).' });
         } else {
-          toast({ status: 'warning', title: 'Notification failed', description: 'Appointment created but sending SMS/email failed.' });
+          toast({ status: 'warning', title: 'Notification failed', description: 'Appointment created but sending SMS & Email failed.' });
         }
       } catch (notifyErr) {
         console.warn('notify error', notifyErr);
