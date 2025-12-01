@@ -17,17 +17,50 @@ type BodyPayload = {
   };
 };
 
-function jsonResponse(obj: any, status = 200) {
+function buildCorsHeaders(req?: Request) {
+  // Priority:
+  // 1) Use explicit env var CORS_ORIGIN if set
+  // 2) Fallback to request Origin header (so Access-Control-Allow-Origin echoes caller)
+  // 3) Fallback to wildcard '*'
+  const envOrigin = (typeof Deno !== "undefined" && Deno.env.get("CORS_ORIGIN")) || "";
+  const origin = envOrigin || (req && req.headers.get("origin")) || "*";
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
+    // keep responses cache-free for preflight-sensitive endpoints
+    "Vary": "Origin",
+  };
+
+  // If we've echoed a specific origin (not '*'), allow credentials.
+  if (origin && origin !== "*") {
+    headers["Access-Control-Allow-Credentials"] = "true";
+  }
+
+  return headers;
+}
+
+function jsonResponse(obj: any, status = 200, req?: Request) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: buildCorsHeaders(req),
   });
 }
 
 export const handler = async (req: Request): Promise<Response> => {
   try {
+    // Respond to preflight OPTIONS quickly with proper CORS headers
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: buildCorsHeaders(req),
+      });
+    }
+
     if (req.method !== "POST") {
-      return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
+      return jsonResponse({ ok: false, error: "Method not allowed" }, 405, req);
     }
 
     // parse body safely
@@ -50,13 +83,13 @@ export const handler = async (req: Request): Promise<Response> => {
     if (NOTIFY_API_KEY) {
       const clientKey = req.headers.get("x-api-key") || body.apiKey;
       if (!clientKey || clientKey !== NOTIFY_API_KEY) {
-        return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+        return jsonResponse({ ok: false, error: "Unauthorized" }, 401, req);
       }
     }
 
     const { appointment, pdfUrl, recipients } = body || {};
     if (!appointment) {
-      return jsonResponse({ ok: false, error: "Missing appointment in request body" }, 400);
+      return jsonResponse({ ok: false, error: "Missing appointment in request body" }, 400, req);
     }
 
     // determine recipients (prefer explicit recipients object)
@@ -186,15 +219,19 @@ ${shortPdfLink ? `Download ticket: ${shortPdfLink}` : "Ticket URL not available.
       emailResult = { ok: false, error: e?.message || String(e) };
     }
 
-    return jsonResponse({
-      ok: true,
-      results: {
-        sms: smsResult,
-        email: emailResult,
+    return jsonResponse(
+      {
+        ok: true,
+        results: {
+          sms: smsResult,
+          email: emailResult,
+        },
       },
-    });
+      200,
+      req
+    );
   } catch (err: any) {
-    return jsonResponse({ ok: false, error: err?.message || String(err) }, 500);
+    return jsonResponse({ ok: false, error: err?.message || String(err) }, 500, req);
   }
 };
 
