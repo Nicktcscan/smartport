@@ -326,7 +326,7 @@ function AppointmentPdf({ ticket }) {
               <PdfText style={pdfStyles.label}>Warehouse :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
+              <PdfText style={pdfStyles.label}>Discharge Date :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
 
               <PdfText style={pdfStyles.label}>Consolidated :</PdfText>
