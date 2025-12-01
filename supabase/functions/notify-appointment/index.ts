@@ -1,10 +1,9 @@
 // supabase/functions/notify-appointment/index.ts
-// Supabase Edge Function (Deno) — Notify appointment via Twilio SMS + SendGrid Email
+// Supabase Edge Function (Deno) — Notify appointment via Twilio SMS
+// SendGrid removed as requested.
 
 // Twilio (ESM)
 import Twilio from "https://esm.sh/twilio@4.22.0";
-// SendGrid (ESM)
-import sgMail from "https://esm.sh/@sendgrid/mail@7.7.0";
 
 type BodyPayload = {
   apiKey?: string;
@@ -30,11 +29,13 @@ function buildCorsHeaders(req?: Request) {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key",
-    // keep responses cache-free for preflight-sensitive endpoints
+    // allow clients to read these headers if needed
+    "Access-Control-Expose-Headers": "Content-Type",
+    // small optimization for preflights
+    "Access-Control-Max-Age": "3600",
     "Vary": "Origin",
   };
 
-  // If we've echoed a specific origin (not '*'), allow credentials.
   if (origin && origin !== "*") {
     headers["Access-Control-Allow-Credentials"] = "true";
   }
@@ -51,7 +52,7 @@ function jsonResponse(obj: any, status = 200, req?: Request) {
 
 export const handler = async (req: Request): Promise<Response> => {
   try {
-    // Respond to preflight OPTIONS quickly with proper CORS headers
+    // Handle preflight
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -63,7 +64,6 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Method not allowed" }, 405, req);
     }
 
-    // parse body safely
     const body = (await req.json().catch(() => ({}))) as BodyPayload;
 
     // ENV (Deno)
@@ -75,9 +75,6 @@ export const handler = async (req: Request): Promise<Response> => {
     const TWILIO_API_KEY_SECRET = (Deno.env.get("TWILIO_API_KEY_SECRET") ?? null) as string | null;
     const TWILIO_FROM = (Deno.env.get("TWILIO_FROM") ?? null) as string | null;
     const TWILIO_MESSAGING_SERVICE_SID = (Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") ?? null) as string | null;
-
-    const SENDGRID_API_KEY = (Deno.env.get("SENDGRID_API_KEY") ?? null) as string | null;
-    const EMAIL_FROM = (Deno.env.get("EMAIL_FROM") ?? "no-reply@example.com") as string;
 
     // validate API key if set
     if (NOTIFY_API_KEY) {
@@ -99,7 +96,7 @@ export const handler = async (req: Request): Promise<Response> => {
       appointment.driverLicense ||
       null;
 
-    const agentEmail = (recipients && recipients.agentEmail) || appointment.agentEmail || null;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const agentName = (recipients && recipients.agentName) || appointment.agentName || "";
 
     // friendly appointment fields
@@ -128,37 +125,13 @@ export const handler = async (req: Request): Promise<Response> => {
       `\nDriver: ${drvName}` +
       (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : "");
 
-    // Email subject + bodies
-    const emailSubject = `Appointment ${apptNo} — Weighbridge Ticket`;
-    const emailText = `
-Appointment ${apptNo} ${wbNo ? `| Weighbridge: ${wbNo}` : ""}
-Agent: ${agentName}
-Pickup Date: ${pickup}
-Truck: ${truck}
-Driver: ${drvName}
-
-${shortPdfLink ? `Download ticket: ${shortPdfLink}` : "Ticket URL not available."}
-`.trim();
-
-    const emailHtml = `
-      <p>Hello ${agentName || "Agent"},</p>
-      <p>Your weighbridge appointment <strong>${apptNo}</strong>${wbNo ? ` (Weighbridge: <strong>${wbNo}</strong>)` : ""} has been created.</p>
-      <ul>
-        <li><strong>Pickup Date:</strong> ${pickup}</li>
-        <li><strong>Truck:</strong> ${truck}</li>
-        <li><strong>Driver:</strong> ${drvName}</li>
-      </ul>
-      ${shortPdfLink ? `<p><a href="${shortPdfLink}" target="_blank" rel="noopener">Open appointment PDF / ticket</a></p>` : `<p>Ticket URL not available.</p>`}
-      <p>Regards,<br/>NICK TC-SCAN (GAMBIA) LTD.</p>
-    `;
-
     // Helper: basic E.164 phone validation (expects +<country><number>)
     function isValidPhone(phone: string | null | undefined) {
       if (!phone || typeof phone !== "string") return false;
       return /^\+\d{6,20}$/.test(phone.trim());
     }
 
-    // ---------- Twilio SMS send ----------
+    // Twilio SMS send
     let smsResult: any = { ok: false, error: "skipped" };
     try {
       // initialize Twilio with preferred API key credentials if provided (safer)
@@ -190,41 +163,19 @@ ${shortPdfLink ? `Download ticket: ${shortPdfLink}` : "Ticket URL not available.
         smsResult = { ok: true, sid: sms.sid, raw: { status: sms.status } };
       }
     } catch (e: any) {
-      smsResult = { ok: false, error: e?.message || String(e) };
+      // include helpful hints for common issues
+      const msg = e?.message || String(e);
+      smsResult = { ok: false, error: msg };
+      console.error("Twilio send error:", msg);
     }
 
-    // ---------- SendGrid Email send ----------
-    let emailResult: any = { ok: false, error: "skipped" };
-    try {
-      if (!SENDGRID_API_KEY) {
-        emailResult = { ok: false, error: "SendGrid API key not configured" };
-      } else if (!agentEmail || typeof agentEmail !== "string") {
-        emailResult = { ok: false, error: "Missing agent email" };
-      } else {
-        sgMail.setApiKey(SENDGRID_API_KEY);
-        const msg = {
-          to: agentEmail,
-          from: EMAIL_FROM,
-          subject: emailSubject,
-          text: emailText,
-          html: emailHtml,
-        };
-        const sgResp = await sgMail.send(msg);
-        emailResult = {
-          ok: true,
-          info: Array.isArray(sgResp) ? sgResp.map((r) => r.statusCode) : sgResp.statusCode,
-        };
-      }
-    } catch (e: any) {
-      emailResult = { ok: false, error: e?.message || String(e) };
-    }
-
+    // Return only sms result since email (SendGrid) removed
     return jsonResponse(
       {
         ok: true,
         results: {
           sms: smsResult,
-          email: emailResult,
+          note: "Email functionality removed from this function (SendGrid).",
         },
       },
       200,
