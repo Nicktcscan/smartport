@@ -341,7 +341,7 @@ function AppointmentPdf({ ticket }) {
             </PdfView>
 
             <PdfView style={{ width: '48%', zIndex: 3 }}>
-              <PdfText style={pdfStyles.label}>Driver License :</PdfText>
+              <PdfText style={pdfStyles.label}>Driver's Phone:</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
             </PdfView>
           </PdfView>
