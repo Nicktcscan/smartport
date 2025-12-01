@@ -32,6 +32,36 @@ import logo from '../assets/logo.png';
 import MonoFont from '../assets/RobotoMono-Regular.ttf';
 Font.register({ family: 'Mono', src: MonoFont });
 
+// ---------- Browser polyfills & safe plugin registration ----------
+
+// Buffer polyfill for browser (avoids "Buffer is not defined")
+if (typeof window !== 'undefined') {
+  // dynamic import to avoid bundler issues if buffer isn't available server-side
+  import('buffer').then(mod => {
+    try { window.Buffer = mod.Buffer; } catch (e) { /* ignore */ }
+  }).catch(() => { /* ignore */ });
+}
+
+// Attempt safe Chart.js Filler registration (no-op if Chart isn't present)
+if (typeof window !== 'undefined') {
+  (async () => {
+    try {
+      // dynamic import, will succeed only if Chart.js is in the bundle
+      const ChartModule = await import('chart.js');
+      // some bundlers expose Chart as default or named
+      const Chart = ChartModule.Chart || ChartModule.default || ChartModule;
+      const Filler = ChartModule.Filler || ChartModule.filler || ChartModule.plugins?.filler;
+      if (Chart && Filler && typeof Chart.register === 'function') {
+        try { Chart.register(Filler); } catch (e) { /* ignore registration errors */ }
+      }
+    } catch (e) {
+      // Chart not present or failed to register — ignore, this is defensive only
+    }
+  })();
+}
+
+
+
 // ---------- Config ----------
 const WAREHOUSES = [
   { value: 'WTGMBJLCON', label: 'WTGMBJLCON - GAMBIA PORTS AUTHORITY - P.O BOX 617 BANJUL BJ' },
@@ -198,7 +228,6 @@ async function generateCode39DataUrl(payloadStr, width = 420, height = 48) {
     const svgString = new XMLSerializer().serializeToString(svgEl);
     const pngDataUrl = await svgStringToPngDataUrl(svgString, width, height);
     if (pngDataUrl) return pngDataUrl;
-    // fallback to canvas-based PNG if conversion failed
     return await generateFallbackDataUrl(payloadStr, width, height);
   } catch (e) {
     console.warn('generateCode39DataUrl failed, falling back', e);
@@ -909,23 +938,27 @@ export default function AgentApptPage() {
           const safeName = name.replace(/[^a-z0-9\-_\s]/gi, '').replace(/\s+/g, '-').toLowerCase().slice(0, 40);
           const ext = (regPhotoFile.name || '').split('.').pop() || 'jpg';
           const path = `drivers/${Date.now()}-${safeName}.${ext}`;
-          const { error: uploadErr } = await supabase.storage.from('drivers').upload(path, regPhotoFile, { upsert: true, contentType: regPhotoFile.type });
-          if (uploadErr) {
-            console.warn('driver photo upload failed', uploadErr);
-            // we don't abort on photo upload fail — show toast and continue without photo
-            toast({ status: 'warning', title: 'Photo upload failed', description: 'Driver will be created without photo.' });
-          } else {
-            // get public url
-            try {
-              const { data: urlData } = supabase.storage.from('drivers').getPublicUrl(path);
-              photoUrl = urlData?.publicUrl || null;
-            } catch (ee) {
-              // fallback attempt to create signed url (short)
+          // wrap upload in try/catch and tolerate RLS errors
+          try {
+            const { error: uploadErr } = await supabase.storage.from('drivers').upload(path, regPhotoFile, { upsert: true, contentType: regPhotoFile.type });
+            if (uploadErr) {
+              console.warn('driver photo upload failed', uploadErr);
+              toast({ status: 'warning', title: 'Photo upload failed', description: 'Driver will be created without photo.' });
+            } else {
+              // get public url
               try {
-                const { data: signedData } = await supabase.storage.from('drivers').createSignedUrl(path, 60 * 60);
-                photoUrl = signedData?.signedUrl || null;
-              } catch (e2) { /* ignore */ }
+                const { data: urlData } = supabase.storage.from('drivers').getPublicUrl(path);
+                photoUrl = urlData?.publicUrl || null;
+              } catch (ee) {
+                try {
+                  const { data: signedData } = await supabase.storage.from('drivers').createSignedUrl(path, 60 * 60);
+                  photoUrl = signedData?.signedUrl || null;
+                } catch (e2) { /* ignore */ }
+              }
             }
+          } catch (uploadException) {
+            console.warn('driver photo upload threw', uploadException);
+            toast({ status: 'warning', title: 'Photo upload failed', description: 'Driver will be created without photo.' });
           }
         } catch (e) {
           console.warn('photo upload flow threw', e);
@@ -1289,20 +1322,16 @@ export default function AgentApptPage() {
         fileForUpload = uint8;
       }
 
-      let uploadRes;
       try {
-        const { data: uploadData, error: uploadError } = await supabase.storage
+        const { error: uploadError } = await supabase.storage
           .from(bucketName)
           .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
 
-        uploadRes = { data: uploadData, error: uploadError };
         if (uploadError) {
           console.warn('uploadPdfToStorage upload error', uploadError);
         }
       } catch (e) {
         console.warn('uploadPdfToStorage upload threw', e);
-        // eslint-disable-next-line no-unused-vars
-        uploadRes = { data: null, error: e };
       }
 
       try {
@@ -1567,7 +1596,6 @@ export default function AgentApptPage() {
           }
         } else {
           // fallback: attempt a direct fetch to PUBLIC_SUPABASE_URL/functions/v1/notify-appointment
-          // Requires NEXT_PUBLIC_SUPABASE_URL present in your build-time env and anon key not necessary if function allows unauth; otherwise better to call via server-side.
           try {
             const functionsUrl = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_URL)
               ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/+$/,'')}/functions/v1/notify-appointment`
@@ -1575,9 +1603,32 @@ export default function AgentApptPage() {
 
             if (!functionsUrl) throw new Error('Functions URL not available');
 
+            // Attempt to get current access token from supabase auth (if available)
+            let accessToken = null;
+            try {
+              if (supabase && supabase.auth) {
+                // support both older and newer clients
+                if (typeof supabase.auth.getSession === 'function') {
+                  const sess = await supabase.auth.getSession();
+                  accessToken = sess?.data?.session?.access_token || null;
+                } else if (typeof supabase.auth.session === 'function') {
+                  const sess = supabase.auth.session();
+                  accessToken = sess?.access_token || null;
+                } else if (supabase.auth.session) {
+                  accessToken = supabase.auth.session?.access_token || null;
+                }
+              }
+            } catch (e) {
+              accessToken = null;
+            }
+
+            const headers = { 'Content-Type': 'application/json' };
+            if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+            else if (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) headers['apikey'] = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
             const res = await fetch(functionsUrl, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers,
               body: JSON.stringify(notifyBody),
             });
             const json = await res.json().catch(() => null);
