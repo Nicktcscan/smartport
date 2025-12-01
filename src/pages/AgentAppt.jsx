@@ -1557,7 +1557,7 @@ export default function AgentApptPage() {
       // Show immediate creation success toast to agent
       toast({ title: 'Appointment created', description: `Appointment saved — sending details to driver.`, status: 'success', duration: 6000 });
 
-      // ---------- Notify via Supabase Edge Function ----------
+      // ---------- Notify via Supabase Edge Function (SMS only) ----------
       try {
         const notifyBody = {
           appointment: {
@@ -1573,7 +1573,6 @@ export default function AgentApptPage() {
           pdfUrl: uploadedPdfUrl || null,
           recipients: {
             driverPhone: normalizedDriverPhone,
-            agentEmail: null,
             agentName: agentName || dbAppointment.agentName || ''
           }
         };
@@ -1644,13 +1643,16 @@ export default function AgentApptPage() {
         }
 
         if (notifyResp && notifyResp.ok) {
-          toast({ status: 'success', title: 'Notifications sent', description: 'SMS & Email sent (or scheduled).' });
+          // only SMS is sent now — reflect that in UI text
+          toast({ status: 'success', title: 'Notification sent', description: 'SMS sent to driver (if phone valid).' });
         } else {
-          toast({ status: 'warning', title: 'Notification failed', description: 'Appointment created but sending SMS & Email failed.' });
+          // reflect SMS-only failure
+          const errMsg = notifyResp && notifyResp.error ? String(notifyResp.error) : 'Unknown';
+          toast({ status: 'warning', title: 'Notification failed', description: `Appointment created but sending SMS failed: ${errMsg}` });
         }
       } catch (notifyErr) {
         console.warn('notify error', notifyErr);
-        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending notifications failed.' });
+        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
       }
 
       await triggerConfetti(160);
