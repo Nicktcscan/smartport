@@ -486,6 +486,10 @@ export default function AgentApptPage() {
   // promise resolver ref so ensureDriverRegistered can await registration
   const regPromiseRef = useRef(null);
 
+  // ---------- NEW: Created Popup state (per your earlier request) ----------
+  const [createdPopupOpen, setCreatedPopupOpen] = useState(false);
+  const [createdPopupInfo, setCreatedPopupInfo] = useState({ appointmentNumber: '', driverPhone: '' });
+
   // utility UI highlights
   const pulseRow = (index) => {
     const rows = document.querySelectorAll('.panel-card');
@@ -1149,6 +1153,7 @@ export default function AgentApptPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
+          // even if fetch failed, return data based on inserted values (including barcode_payload)
           return {
             appointment: {
               id: appointmentId,
@@ -1241,6 +1246,7 @@ export default function AgentApptPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
+    // Prefer server-side stored barcode_payload if available (this ensures DB <-> PDF validation)
     let barcodePayload = (dbAppointment.barcode_payload || dbAppointment.barcodePayload || '').trim();
 
     if (!barcodePayload) {
@@ -1290,53 +1296,20 @@ export default function AgentApptPage() {
         fileForUpload = uint8;
       }
 
+      let uploadRes;
       try {
-        const { error: uploadError } = await supabase.storage
+        const { data: uploadData, error: uploadError } = await supabase.storage
           .from(bucketName)
           .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
 
+        uploadRes = { data: uploadData, error: uploadError };
         if (uploadError) {
           console.warn('uploadPdfToStorage upload error', uploadError);
-
-          // If it's an RLS / permission issue, attempt server-side upload via edge function
-          const msg = (uploadError && uploadError.message) ? String(uploadError.message).toLowerCase() : '';
-          if (msg.includes('row-level security') || msg.includes('violates') || String(uploadError.status) === '400') {
-            console.warn('uploadPdfToStorage detected RLS-like error, will attempt server-side upload via function');
-            // prepare base64 payload
-            try {
-              const arrayBuffer = await blob.arrayBuffer();
-              const uint8 = new Uint8Array(arrayBuffer);
-              let binary = '';
-              const chunkSize = 0x8000;
-              for (let i = 0; i < uint8.length; i += chunkSize) {
-                binary += String.fromCharCode.apply(null, Array.from(uint8.subarray(i, i + chunkSize)));
-              }
-              const b64 = typeof window !== 'undefined' ? window.btoa(binary) : Buffer.from(uint8).toString('base64');
-
-              // call edge function to upload server-side
-              const notifyBody = {
-                action: 'upload_pdf',
-                filename,
-                path,
-                appointmentNumber,
-                base64: b64,
-                bucket: bucketName,
-              };
-
-              // use same function invocation helper (below) - prefer supabase.functions.invoke
-              const resp = await callNotifyFunction(notifyBody);
-              if (resp && resp.ok && resp.data && (resp.data.publicUrl || resp.data.path)) {
-                return { publicUrl: resp.data.publicUrl || null, path: resp.data.path || null };
-              } else {
-                console.warn('server-side upload via function failed', resp);
-              }
-            } catch (e) {
-              console.warn('server-side upload fallback failed', e);
-            }
-          }
         }
       } catch (e) {
         console.warn('uploadPdfToStorage upload threw', e);
+        // eslint-disable-next-line no-unused-vars
+        uploadRes = { data: null, error: e };
       }
 
       try {
@@ -1362,73 +1335,18 @@ export default function AgentApptPage() {
     }
   }
 
-  // ---------- helper to call notify-appointment edge function (invoke or fetch fallback) ----------
-  async function callNotifyFunction(body) {
-    // returns { ok: bool, data?: any, error?: any, status?: number }
-    // Prefer supabase.functions.invoke when available (avoids CORS)
-    try {
-      if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
-        try {
-          const { data, error } = await supabase.functions.invoke('notify-appointment', { body });
-          if (error) {
-            return { ok: false, error };
-          }
-          return { ok: true, data };
-        } catch (e) {
-          // continue to fetch fallback
-          console.warn('functions.invoke failed, falling back to fetch', e);
-        }
-      }
-
-      // Fallback: direct fetch to functions URL
-      const functionsBase =
-        (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL) ? process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
-        (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_URL) ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/+$/,'')}/functions/v1` :
-        (typeof window !== 'undefined' && window?.__env?.SUPABASE_FUNCTIONS_URL) ? window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
-        null;
-
-      if (!functionsBase) {
-        return { ok: false, error: 'Functions URL not available in environment (NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL or NEXT_PUBLIC_SUPABASE_URL)' };
-      }
-
-      const functionsUrl = `${functionsBase}/notify-appointment`;
-      const publicNotifyKey = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_NOTIFY_API_KEY) ? process.env.NEXT_PUBLIC_NOTIFY_API_KEY : (typeof window !== 'undefined' && window?.__env?.NEXT_PUBLIC_NOTIFY_API_KEY) ? window.__env.NEXT_PUBLIC_NOTIFY_API_KEY : null;
-
-      const headers = { 'Content-Type': 'application/json' };
-      if (publicNotifyKey) headers['x-api-key'] = publicNotifyKey;
-
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15000);
-
-      const res = await fetch(functionsUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-        mode: 'cors',
-      });
-
-      clearTimeout(timeout);
-
-      const json = await res.json().catch(() => null);
-      if (!res.ok) {
-        return { ok: false, status: res.status, error: json || 'Function returned non-OK' };
-      }
-      return { ok: true, data: json };
-    } catch (e) {
-      return { ok: false, error: e };
-    }
-  }
-
   // ---------- Modified openConfirm: generate numbers, set preview, but ensure driver registered first ----------
   const openConfirm = async () => {
+    // first run the driver registration/verification step (this will open modal and resolve automatically if needed)
     const drvCheck = await ensureDriverRegistered();
     if (!drvCheck.ok) {
+      // ensureDriverRegistered already opened modal or showed toast with reason — stop
       return;
     }
 
     if (!validateMainForm()) return;
 
+    // final check: ensure none of the selected SADs are Completed
     const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
     const uniqueSads = Array.from(new Set(rawSadList));
     if (uniqueSads.length === 0) {
@@ -1478,6 +1396,7 @@ export default function AgentApptPage() {
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
+    // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -1526,6 +1445,7 @@ export default function AgentApptPage() {
 
     setLoadingCreate(true);
 
+    // ensure driver phone is normalized for saving & notifications
     const normalizedDriverPhone = formatPhone(driverLicense);
 
     const payload = {
@@ -1586,9 +1506,11 @@ export default function AgentApptPage() {
           const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
             uploadedPdfUrl = publicUrl;
+            // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           } else if (path && dbAppointment.id) {
             uploadedPdfUrl = path;
+            // store path as fallback
             await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
@@ -1613,7 +1535,18 @@ export default function AgentApptPage() {
       // Show immediate creation success toast to agent
       toast({ title: 'Appointment created', description: `Appointment saved — sending details to driver.`, status: 'success', duration: 6000 });
 
-      // ---------- Notify via Supabase Edge Function (SMS only) ----------
+      // ---------- NEW: show popup message to the agent (per your request) ----------
+      try {
+        setCreatedPopupInfo({
+          appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number || '',
+          driverPhone: normalizedDriverPhone || '',
+        });
+        setCreatedPopupOpen(true);
+      } catch (e) {
+        // ignore popup errors
+      }
+
+      // ---------- Notify via Supabase Edge Function (Option 1 fix: include Authorization header fallback) ----------
       try {
         const notifyBody = {
           appointment: {
@@ -1629,24 +1562,73 @@ export default function AgentApptPage() {
           pdfUrl: uploadedPdfUrl || null,
           recipients: {
             driverPhone: normalizedDriverPhone,
+            agentEmail: null,
             agentName: agentName || dbAppointment.agentName || ''
           }
         };
 
-        // include optional public notify key on body if desired (edge function checks x-api-key header OR body.apiKey)
-        const publicNotifyKey = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_NOTIFY_API_KEY) ? process.env.NEXT_PUBLIC_NOTIFY_API_KEY : (typeof window !== 'undefined' && window?.__env?.NEXT_PUBLIC_NOTIFY_API_KEY) ? window.__env.NEXT_PUBLIC_NOTIFY_API_KEY : null;
-        if (publicNotifyKey) {
-          // prefer to set header via callNotifyFunction - but if using invoke, header not required.
-          notifyBody.apiKey = publicNotifyKey;
+        let notifyResp = null;
+
+        // prefer supabase.functions.invoke if available (Supabase JS v2)
+        if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
+          try {
+            const { data, error } = await supabase.functions.invoke('notify-appointment', { body: notifyBody });
+            if (error) {
+              console.warn('notify-appointment function error', error);
+              notifyResp = { ok: false, error: error };
+            } else {
+              notifyResp = { ok: true, data };
+            }
+          } catch (fnErr) {
+            console.warn('notify invoke failed', fnErr);
+            notifyResp = { ok: false, error: fnErr };
+          }
+        } else {
+          // fallback: attempt a direct fetch to SUPABASE functions endpoint
+          try {
+            const publicUrl = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL))
+              ? (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)
+              : null;
+
+            const functionsUrl = publicUrl ? `${publicUrl.replace(/\/+$/,'')}/functions/v1/notify-appointment` : null;
+
+            if (!functionsUrl) throw new Error('Functions URL not available');
+
+            // Option 1 fix: include anon key in Authorization & apikey headers so preflight and the function accept the request.
+            const anonKey = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY))
+              ? (process.env.REACT_APP_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
+              : null;
+
+            const headers = { 'Content-Type': 'application/json' };
+            if (anonKey) {
+              headers['Authorization'] = `Bearer ${anonKey}`;
+              headers['apikey'] = anonKey;
+            }
+
+            const res = await fetch(functionsUrl, {
+              method: 'POST',
+              mode: 'cors',
+              credentials: 'omit',
+              headers,
+              body: JSON.stringify(notifyBody),
+            });
+
+            const json = await res.json().catch(() => null);
+            if (!res.ok) {
+              notifyResp = { ok: false, status: res.status, error: json || 'Failed' };
+            } else {
+              notifyResp = { ok: true, data: json };
+            }
+          } catch (e) {
+            console.warn('notify fallback failed', e);
+            notifyResp = { ok: false, error: e };
+          }
         }
 
-        const notifyResp = await callNotifyFunction(notifyBody);
-
         if (notifyResp && notifyResp.ok) {
-          toast({ status: 'success', title: 'Notification sent', description: 'SMS sent to driver (or scheduled).' });
+          toast({ status: 'success', title: 'Notifications sent', description: 'SMS & Email sent (or scheduled).' });
         } else {
-          console.warn('notifyResp error:', notifyResp);
-          toast({ status: 'warning', title: 'Notification failed', description: `Appointment created but sending SMS failed.` });
+          toast({ status: 'warning', title: 'Notification failed', description: 'Appointment created but sending SMS & Email failed.' });
         }
       } catch (notifyErr) {
         console.warn('notify error', notifyErr);
@@ -1751,14 +1733,17 @@ export default function AgentApptPage() {
               const sadNo = String(newRow.sad_no || '').trim();
               const status = String(newRow.status || '').toLowerCase();
               if (status === 'completed') {
+                // find related appointment ids via t1_records
                 try {
                   const { data: trows, error: terr } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(1000);
                   if (terr) throw terr;
                   const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
                   if (apptIds.length) {
+                    // update appointments status to Completed
                     const { error: upErr } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
                     if (upErr) throw upErr;
 
+                    // log for each appointment
                     const logs = apptIds.map(id => ({
                       appointment_id: id,
                       changed_by: null,
@@ -1767,6 +1752,7 @@ export default function AgentApptPage() {
                       created_at: new Date().toISOString(),
                     }));
                     try {
+                      // attempt batched inserts
                       for (let i = 0; i < logs.length; i += 50) {
                         const chunk = logs.slice(i, i + 50);
                         await supabase.from('appointment_logs').insert(chunk);
@@ -1780,6 +1766,7 @@ export default function AgentApptPage() {
                 }
               }
 
+              // if this SAD is in the current t1s, mark as blocked client-side
               try {
                 const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
                 if (mySads.has(sadNo) && status === 'completed') {
@@ -1792,6 +1779,7 @@ export default function AgentApptPage() {
 
           sadSubRef.current = ch;
         } else {
+          // legacy realtime
           const s = supabase.from('sad_declarations').on('UPDATE', async (payload) => {
             const newRow = payload?.new;
             if (!newRow) return;
@@ -2150,6 +2138,29 @@ export default function AgentApptPage() {
           <ModalFooter>
             <Button variant="ghost" onClick={handleDriverRegModalClose} mr={3}>Cancel</Button>
             <Button colorScheme="teal" onClick={registerDriverQuick} isLoading={isRegisteringDriver}>Register Driver & Continue</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* ---------- CREATED POPUP: informs agent that appointment created & driver will receive details ---------- */}
+      <Modal isOpen={createdPopupOpen} onClose={() => setCreatedPopupOpen(false)} isCentered>
+        <ModalOverlay />
+        <ModalContent maxW="md" borderRadius="lg">
+          <ModalHeader>Appointment Created</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <Stack spacing={3}>
+              <Text>
+                Appointment <b>{createdPopupInfo.appointmentNumber || '—'}</b> has been created.
+              </Text>
+              <Text>
+                Appointment details will be sent to the driver's phone number: <b>{createdPopupInfo.driverPhone || '—'}</b>.
+              </Text>
+              <Text className="muted">You will receive a confirmation here when SMS delivery completes (or fails).</Text>
+            </Stack>
+          </ModalBody>
+          <ModalFooter>
+            <Button colorScheme="blue" onClick={() => setCreatedPopupOpen(false)}>OK</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

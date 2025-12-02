@@ -19,20 +19,24 @@ type BodyPayload = {
 };
 
 function buildCorsHeaders(req?: Request) {
-  // Choose origin: explicit env var wins (recommended), otherwise echo request Origin if present, otherwise "*"
-  const envOrigin = (typeof Deno !== "undefined" && (Deno.env.get("CORS_ORIGIN") || "")) || "";
+  // Prefer CORS_ORIGIN env, otherwise echo request origin if present, otherwise wildcard
+  const envOrigin =
+    typeof Deno !== "undefined" && (Deno.env.get("CORS_ORIGIN") || "")
+      ? (Deno.env.get("CORS_ORIGIN") as string)
+      : "";
   const reqOrigin = req && req.headers.get("origin") ? req.headers.get("origin")! : "";
   const origin = envOrigin || reqOrigin || "*";
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS,PUT,PATCH,DELETE",
     // include commonly-sent headers during preflight from browsers & supabase clients
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, X-Requested-With",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, x-api-key, X-Requested-With, apikey, accept, origin",
     "Access-Control-Expose-Headers": "Content-Type",
     "Access-Control-Max-Age": "3600",
-    "Vary": "Origin",
+    Vary: "Origin",
   };
 
   // Access-Control-Allow-Credentials must not be used with wildcard origin "*"
@@ -44,9 +48,7 @@ function buildCorsHeaders(req?: Request) {
 }
 
 function textResponse(body: string, status = 200, req?: Request) {
-  // Use text/plain for simple preflight/health responses where helpful
   const h = buildCorsHeaders(req);
-  // override content-type for plain text responses
   h["Content-Type"] = "text/plain";
   return new Response(body, { status, headers: h });
 }
@@ -62,13 +64,8 @@ function okResponse(obj: any, req?: Request) {
   return jsonResponse(obj, 200, req);
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function forbidden(req?: Request) {
-  return jsonResponse({ ok: false, error: "Unauthorized" }, 401, req);
-}
-
+// decode base64 to bytes
 function decodeBase64ToUint8Array(b64: string) {
-  // atob -> binary string -> Uint8Array
   const binStr = atob(b64);
   const len = binStr.length;
   const bytes = new Uint8Array(len);
@@ -78,7 +75,6 @@ function decodeBase64ToUint8Array(b64: string) {
   return bytes;
 }
 
-// lightweight logger (server-side only)
 function log(...args: any[]) {
   try {
     console.log(...args);
@@ -89,16 +85,19 @@ function log(...args: any[]) {
 
 export const handler = async (req: Request): Promise<Response> => {
   try {
-    // --- ALWAYS handle CORS preflight first, before reading body or auth checks ---
+    const origin = req.headers.get("origin") || "-";
+    log("notify-appointment invoked; Origin:", origin, "Method:", req.method);
+
+    // Handle CORS preflight first (return 200 OK with CORS headers)
     if (req.method === "OPTIONS") {
-      // return 204 (No Content) and CORS headers
-      return new Response(null, {
-        status: 204,
+      // Some clients/platforms prefer 200 OK for preflight — return 200 with CORS headers.
+      return new Response("", {
+        status: 200,
         headers: buildCorsHeaders(req),
       });
     }
 
-    // Optional: simple health check via GET for easier debugging
+    // Simple GET health check
     if (req.method === "GET") {
       return textResponse("notify-appointment: ok", 200, req);
     }
@@ -107,10 +106,10 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Method not allowed" }, 405, req);
     }
 
-    // parse JSON safely (will not run for preflight)
+    // parse JSON body safely
     const body = (await req.json().catch(() => ({}))) as BodyPayload;
 
-    // Environment
+    // Env
     const SUPABASE_URL = ((Deno.env.get("SUPABASE_URL") || "") as string).replace(/\/+$/, "");
     const SUPABASE_SERVICE_ROLE_KEY = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "") as string;
     const NOTIFY_API_KEY = (Deno.env.get("NOTIFY_API_KEY") || "") as string;
@@ -121,10 +120,10 @@ export const handler = async (req: Request): Promise<Response> => {
     const TWILIO_FROM = (Deno.env.get("TWILIO_FROM") || "") as string;
     const TWILIO_MESSAGING_SERVICE_SID = (Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") || "") as string;
 
-    // NOTE: Authorization removed by request — the function will NOT require x-api-key or Authorization headers.
-    // If you still have NOTIFY_API_KEY set in env, we log a non-blocking message for debugging only.
+    // NOTE: per your request we are NOT enforcing x-api-key / Authorization.
     if (NOTIFY_API_KEY) {
-      log("NOTIFY_API_KEY is set in env, but this function does not enforce it. (No auth required)");
+      // non-blocking log for debugging only
+      log("NOTIFY_API_KEY is set but NOT enforced by function");
     }
 
     const { appointment, pdfBase64, pdfFilename, recipients } = body || {};
@@ -145,13 +144,13 @@ export const handler = async (req: Request): Promise<Response> => {
     const truck = appointment.truckNumber || appointment.truck_number || "";
     const drvName = appointment.driverName || appointment.driver_name || "";
 
-    // validate phone (simple E.164)
+    // simple E.164 validation
     function isValidPhone(phone: string | null | undefined) {
       if (!phone || typeof phone !== "string") return false;
       return /^\+\d{6,20}$/.test(phone.trim());
     }
 
-    // Step 1: if pdfBase64 present → upload to storage using SERVICE ROLE (server-side)
+    // Step 1: upload PDF (if provided) using service role (PUT to /storage endpoint)
     let uploadedPublicUrl: string | null = null;
     let uploadedPath: string | null = null;
     try {
@@ -166,7 +165,6 @@ export const handler = async (req: Request): Promise<Response> => {
 
         const bytes = decodeBase64ToUint8Array(pdfBase64);
 
-        // Upload via PUT to /storage/v1/object/{bucket}/{path}?upsert=true
         const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(path)}?upsert=true`;
 
         const uploadResp = await fetch(uploadUrl, {
@@ -179,11 +177,9 @@ export const handler = async (req: Request): Promise<Response> => {
         });
 
         if (!uploadResp.ok) {
-          // log details for debugging, but don't block SMS send
           const txt = await uploadResp.text().catch(() => null);
           log("Storage upload failed", uploadResp.status, txt);
         } else {
-          // Public URL endpoint: /storage/v1/object/public/{bucket}/{path}
           uploadedPublicUrl = `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${encodeURIComponent(path)}`;
         }
       }
@@ -191,7 +187,7 @@ export const handler = async (req: Request): Promise<Response> => {
       log("PDF upload step failed:", e);
     }
 
-    // Step 2: If uploadedPublicUrl available, PATCH appointment row to set pdf_url using Service Role
+    // Step 2: PATCH appointment row with uploadedPublicUrl (if available)
     try {
       if (uploadedPublicUrl && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_URL) {
         const restUrl = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(appointment.id)}`;
@@ -217,7 +213,7 @@ export const handler = async (req: Request): Promise<Response> => {
       log("Appointment update failed:", e);
     }
 
-    // Step 3: Build SMS body & send via Twilio (if configured)
+    // Step 3: Build SMS and send via Twilio (if configured)
     const smsText =
       `Weighbridge Appointment confirmed: APPT ${apptNo}` +
       (wbNo ? ` | WB ${wbNo}` : "") +
@@ -229,7 +225,6 @@ export const handler = async (req: Request): Promise<Response> => {
     let smsResult: any = { ok: false, error: "skipped" };
 
     try {
-      // initialize Twilio
       let twilioClient: any = null;
       if (TWILIO_API_KEY_SID && TWILIO_API_KEY_SECRET && TWILIO_ACCOUNT_SID) {
         twilioClient = Twilio(TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, {
@@ -262,10 +257,15 @@ export const handler = async (req: Request): Promise<Response> => {
       log("Twilio send error:", msg);
     }
 
+    // Return success + results (with CORS headers)
     return okResponse(
       {
         ok: true,
-        results: { sms: smsResult, uploadedPublicUrl, uploadedPath },
+        results: {
+          sms: smsResult,
+          uploadedPublicUrl,
+          uploadedPath,
+        },
       },
       req
     );
