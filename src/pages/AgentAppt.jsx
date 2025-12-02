@@ -46,9 +46,7 @@ if (typeof window !== 'undefined') {
 if (typeof window !== 'undefined') {
   (async () => {
     try {
-      // dynamic import, will succeed only if Chart.js is in the bundle
       const ChartModule = await import('chart.js');
-      // some bundlers expose Chart as default or named
       const Chart = ChartModule.Chart || ChartModule.default || ChartModule;
       const Filler = ChartModule.Filler || ChartModule.filler || ChartModule.plugins?.filler;
       if (Chart && Filler && typeof Chart.register === 'function') {
@@ -59,8 +57,6 @@ if (typeof window !== 'undefined') {
     }
   })();
 }
-
-
 
 // ---------- Config ----------
 const WAREHOUSES = [
@@ -74,6 +70,8 @@ const PACKING_TYPES = [
 ];
 
 const MotionBox = motion(Box);
+
+// Whatsapp sender (signature) — user asked for +220 6111 222
 
 // ---------- PDF styles ----------
 const pdfStyles = StyleSheet.create({
@@ -1414,7 +1412,46 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // ---------- handleCreateAppointment (modified to call notify edge function) ----------
+  // Helper: open WhatsApp chat with the driver, prefilled message.
+  // Note: wa.me cannot change the actual sender. We include the sender number as a signature line.
+  function openWhatsAppAppointment({ appointment, pdfUrl = null }, toPhone) {
+    try {
+      if (!toPhone) return;
+      // strip non-digits (wa.me expects number without plus)
+      const recipient = String(toPhone || '').replace(/[^\d]/g, '');
+      if (!recipient) return;
+
+      const lines = [
+        `*Weighbridge Appointment — NICK TC-SCAN (Gambia) Ltd.*`,
+        `Appointment No: ${appointment.appointmentNumber || appointment.appointment_number || '—'}`,
+        `Weighbridge No: ${appointment.weighbridgeNumber || appointment.weighbridge_number || '—'}`,
+        `Agent: ${appointment.agentName || appointment.agent_name || '—'} (${appointment.agentTin || appointment.agent_tin || '—'})`,
+        `Warehouse: ${appointment.warehouse || appointment.warehouse_location || appointment.warehouseLabel || '—'}`,
+        `Pick-up Date: ${appointment.pickupDate || appointment.pickup_date || '—'}`,
+        `Truck: ${appointment.truckNumber || appointment.truck_number || '—'}`,
+        `Driver: ${appointment.driverName || appointment.driver_name || '—'}`,
+        `Phone: ${toPhone}`,
+        `Consolidated: ${appointment.consolidated || appointment.consolidated === 'Y' ? 'Y' : 'N'}`,
+        '',
+        `T1 Records:`,
+        ...(Array.isArray(appointment.t1s) ? appointment.t1s.map((t, i) => `  ${i + 1}. ${t.sadNo || t.sad_no || '—'} — ${t.packingType || t.packing_type || '—'}${t.containerNo ? ` — ${t.containerNo || t.container_no}` : ''}`) : []),
+        '',
+        pdfUrl ? `PDF: ${pdfUrl}` : '',
+        '',
+        `Sent on behalf of: +220 6111 222`,
+        `Please reply if you have questions.`,
+      ].filter(Boolean);
+
+      const text = encodeURIComponent(lines.join('\n'));
+      const url = `https://wa.me/${recipient}?text=${text}`;
+      // Open in new tab
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch (e) {
+      console.warn('openWhatsAppAppointment failed', e);
+    }
+  }
+
+  // ---------- handleCreateAppointment (modified to call notify edge function and WhatsApp) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
@@ -1653,6 +1690,31 @@ export default function AgentApptPage() {
       } catch (notifyErr) {
         console.warn('notify error', notifyErr);
         toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
+      }
+
+      // ---------- WhatsApp: open wa.me chat to driver with appointment details ----------
+      try {
+        const apptObj = {
+          appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
+          weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
+          agentName: dbAppointment.agentName || dbAppointment.agent_name,
+          agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
+          warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location || dbAppointment.warehouse,
+          pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
+          truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
+          driverName: dbAppointment.driverName || dbAppointment.driver_name,
+          consolidated: dbAppointment.consolidated || dbAppointment.consolidated,
+          t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
+        };
+
+        // open wa.me to driver's phone (normalized and stripped of +)
+        if (normalizedDriverPhone) {
+          openWhatsAppAppointment({ appointment: apptObj, pdfUrl: uploadedPdfUrl || null }, normalizedDriverPhone);
+          // user feedback
+          toast({ status: 'info', title: 'Opening WhatsApp', description: 'A WhatsApp window/tab should open for driver notification.' });
+        }
+      } catch (waErr) {
+        console.warn('WhatsApp notification failed', waErr);
       }
 
       await triggerConfetti(160);
