@@ -71,8 +71,6 @@ const PACKING_TYPES = [
 
 const MotionBox = motion(Box);
 
-// Whatsapp sender (signature) — user asked for +220 6111 222
-
 // ---------- PDF styles ----------
 const pdfStyles = StyleSheet.create({
   page: {
@@ -728,10 +726,6 @@ export default function AgentApptPage() {
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
   // ---------- NEW: driver name & phone check logic (debounced) ----------
-  //  - if exact driver name exists -> autopopulate phone
-  //  - if phone exists -> autopopulate name (if driverName empty); if name differs -> friendly message and block
-  //  - if both name+phone entered and not registered -> open quick-register modal (which now returns a Promise and continues)
-
   useEffect(() => {
     // watch driverName and attempt to auto-fill phone when exact match exists
     const nm = String(driverName || '').trim();
@@ -746,7 +740,6 @@ export default function AgentApptPage() {
     if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
     driverCheckTimerRef.current = setTimeout(async () => {
       try {
-        // case-insensitive exact-ish match (use ilike with exact text)
         const { data, error } = await supabase
           .from('drivers')
           .select('*')
@@ -811,19 +804,15 @@ export default function AgentApptPage() {
         }
 
         if (data) {
-          // found by phone
           const drv = data;
           setFoundDriver(drv);
 
-          // Auto-populate name when driverName is empty (symmetry)
           if (!driverName || String(driverName).trim().length === 0) {
             if (drv.name) setDriverName(drv.name);
             setDriverRegistered(true);
             setDriverCheckStatus('exists');
-            // ensure displayed phone is normalized
             setDriverLicense(drv.phone);
           } else {
-            // if a name is already typed and doesn't match the record -> block & inform
             if (String((drv.name || '').trim()).toLowerCase() !== String((driverName || '').trim()).toLowerCase()) {
               setDriverRegistered(false);
               setDriverCheckStatus('phone_taken');
@@ -834,14 +823,12 @@ export default function AgentApptPage() {
                 duration: 8000,
               });
             } else {
-              // names match (case-insensitive) -> OK
               setDriverRegistered(true);
               setDriverCheckStatus('exists');
               setDriverLicense(drv.phone);
             }
           }
         } else {
-          // no driver with that phone
           setFoundDriver(null);
           setDriverRegistered(false);
           setDriverCheckStatus('not_found');
@@ -858,7 +845,6 @@ export default function AgentApptPage() {
   }, [driverLicense, driverName, toast]);
 
   // ---------- helper run before opening Confirm: ensure driver registration ----------
-  // returns a Promise that resolves { ok: true, driver } or { ok: false, reason }
   async function ensureDriverRegistered() {
     const name = String(driverName || '').trim();
     const phone = String(driverLicense || '').trim();
@@ -876,14 +862,12 @@ export default function AgentApptPage() {
       if (phoneErr) console.warn('ensureDriverRegistered phoneErr', phoneErr);
 
       if (byPhone) {
-        // phone exists
         if (String((byPhone.name || '').trim()).toLowerCase() === name.toLowerCase()) {
           setFoundDriver(byPhone);
           setDriverRegistered(true);
           setDriverLicense(byPhone.phone || normalizedPhone);
           return { ok: true, driver: byPhone };
         }
-        // phone used by another driver -> block
         setDriverCheckStatus('phone_taken');
         toast({ status: 'error', title: 'Phone already exists', description: 'This phone number exists for another driver — please use the registered driver.' });
         return { ok: false, reason: 'phone_taken' };
@@ -925,25 +909,21 @@ export default function AgentApptPage() {
     setIsRegisteringDriver(true);
 
     try {
-      // normalize phone
       const normalizedPhone = formatPhone(phoneRaw);
 
       // Attempt to upload photo first (if provided)
       let photoUrl = null;
       if (regPhotoFile) {
         try {
-          // create a safe filename
           const safeName = name.replace(/[^a-z0-9\-_\s]/gi, '').replace(/\s+/g, '-').toLowerCase().slice(0, 40);
           const ext = (regPhotoFile.name || '').split('.').pop() || 'jpg';
           const path = `drivers/${Date.now()}-${safeName}.${ext}`;
-          // wrap upload in try/catch and tolerate RLS errors
           try {
             const { error: uploadErr } = await supabase.storage.from('drivers').upload(path, regPhotoFile, { upsert: true, contentType: regPhotoFile.type });
             if (uploadErr) {
               console.warn('driver photo upload failed', uploadErr);
               toast({ status: 'warning', title: 'Photo upload failed', description: 'Driver will be created without photo.' });
             } else {
-              // get public url
               try {
                 const { data: urlData } = supabase.storage.from('drivers').getPublicUrl(path);
                 photoUrl = urlData?.publicUrl || null;
@@ -968,12 +948,10 @@ export default function AgentApptPage() {
       const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
 
       if (error) {
-        // unique violation on phone
         const msg = (error.message || '').toLowerCase();
         if ((error.code && String(error.code).includes('23505')) || msg.includes('duplicate') || msg.includes('unique')) {
           toast({ status: 'error', title: 'Phone already exists', description: 'That phone is already used by another driver.' });
           setIsRegisteringDriver(false);
-          // resolve promise (if present) as failure
           if (regPromiseRef.current) {
             regPromiseRef.current({ ok: false, reason: 'phone_taken' });
             regPromiseRef.current = null;
@@ -983,20 +961,17 @@ export default function AgentApptPage() {
         throw error;
       }
 
-      // success: close modal, set driver fields and resolve registration promise if waiting
       const created = data || null;
       setFoundDriver(created);
       setDriverRegistered(true);
       setDriverName(created?.name || name);
       setDriverLicense(created?.phone || normalizedPhone);
 
-      // little confirmation and close
       toast({ status: 'success', title: 'Driver registered', description: `${name} saved.` });
       try { await triggerConfetti(120); } catch (_) {}
 
       setDriverRegModalOpen(false);
 
-      // resolve awaiting promise (if any) so create flow continues
       if (regPromiseRef.current) {
         regPromiseRef.current({ ok: true, driver: created });
         regPromiseRef.current = null;
@@ -1013,10 +988,8 @@ export default function AgentApptPage() {
     }
   };
 
-  // when modal is closed/cancelled by user
   const handleDriverRegModalClose = () => {
     setDriverRegModalOpen(false);
-    // if someone is awaiting registration, resolve as cancelled
     if (regPromiseRef.current) {
       regPromiseRef.current({ ok: false, reason: 'cancelled' });
       regPromiseRef.current = null;
@@ -1163,7 +1136,6 @@ export default function AgentApptPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
-            // roll back appointment insertion if t1 insert failed
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
@@ -1177,7 +1149,6 @@ export default function AgentApptPage() {
           .maybeSingle();
 
         if (fetchErr || !fullAppointment) {
-          // even if fetch failed, return data based on inserted values (including barcode_payload)
           return {
             appointment: {
               id: appointmentId,
@@ -1270,7 +1241,6 @@ export default function AgentApptPage() {
       createdAt: dbAppointment.createdAt || dbAppointment.created_at || new Date().toISOString(),
     };
 
-    // Prefer server-side stored barcode_payload if available (this ensures DB <-> PDF validation)
     let barcodePayload = (dbAppointment.barcode_payload || dbAppointment.barcodePayload || '').trim();
 
     if (!barcodePayload) {
@@ -1357,16 +1327,13 @@ export default function AgentApptPage() {
 
   // ---------- Modified openConfirm: generate numbers, set preview, but ensure driver registered first ----------
   const openConfirm = async () => {
-    // first run the driver registration/verification step (this will open modal and resolve automatically if needed)
     const drvCheck = await ensureDriverRegistered();
     if (!drvCheck.ok) {
-      // ensureDriverRegistered already opened modal or showed toast with reason — stop
       return;
     }
 
     if (!validateMainForm()) return;
 
-    // final check: ensure none of the selected SADs are Completed
     const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
     const uniqueSads = Array.from(new Set(rawSadList));
     if (uniqueSads.length === 0) {
@@ -1412,50 +1379,10 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // Helper: open WhatsApp chat with the driver, prefilled message.
-  // Note: wa.me cannot change the actual sender. We include the sender number as a signature line.
-  function openWhatsAppAppointment({ appointment, pdfUrl = null }, toPhone) {
-    try {
-      if (!toPhone) return;
-      // strip non-digits (wa.me expects number without plus)
-      const recipient = String(toPhone || '').replace(/[^\d]/g, '');
-      if (!recipient) return;
-
-      const lines = [
-        `*Weighbridge Appointment — NICK TC-SCAN (Gambia) Ltd.*`,
-        `Appointment No: ${appointment.appointmentNumber || appointment.appointment_number || '—'}`,
-        `Weighbridge No: ${appointment.weighbridgeNumber || appointment.weighbridge_number || '—'}`,
-        `Agent: ${appointment.agentName || appointment.agent_name || '—'} (${appointment.agentTin || appointment.agent_tin || '—'})`,
-        `Warehouse: ${appointment.warehouse || appointment.warehouse_location || appointment.warehouseLabel || '—'}`,
-        `Pick-up Date: ${appointment.pickupDate || appointment.pickup_date || '—'}`,
-        `Truck: ${appointment.truckNumber || appointment.truck_number || '—'}`,
-        `Driver: ${appointment.driverName || appointment.driver_name || '—'}`,
-        `Phone: ${toPhone}`,
-        `Consolidated: ${appointment.consolidated || appointment.consolidated === 'Y' ? 'Y' : 'N'}`,
-        '',
-        `T1 Records:`,
-        ...(Array.isArray(appointment.t1s) ? appointment.t1s.map((t, i) => `  ${i + 1}. ${t.sadNo || t.sad_no || '—'} — ${t.packingType || t.packing_type || '—'}${t.containerNo ? ` — ${t.containerNo || t.container_no}` : ''}`) : []),
-        '',
-        pdfUrl ? `PDF: ${pdfUrl}` : '',
-        '',
-        `Sent on behalf of: +220 6111 222`,
-        `Please reply if you have questions.`,
-      ].filter(Boolean);
-
-      const text = encodeURIComponent(lines.join('\n'));
-      const url = `https://wa.me/${recipient}?text=${text}`;
-      // Open in new tab
-      window.open(url, '_blank', 'noopener,noreferrer');
-    } catch (e) {
-      console.warn('openWhatsAppAppointment failed', e);
-    }
-  }
-
-  // ---------- handleCreateAppointment (modified to call notify edge function and WhatsApp) ----------
+  // ---------- handleCreateAppointment (modified to call notify edge function) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -1504,7 +1431,6 @@ export default function AgentApptPage() {
 
     setLoadingCreate(true);
 
-    // ensure driver phone is normalized for saving & notifications
     const normalizedDriverPhone = formatPhone(driverLicense);
 
     const payload = {
@@ -1565,11 +1491,9 @@ export default function AgentApptPage() {
           const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
             uploadedPdfUrl = publicUrl;
-            // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           } else if (path && dbAppointment.id) {
             uploadedPdfUrl = path;
-            // store path as fallback
             await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
@@ -1619,31 +1543,42 @@ export default function AgentApptPage() {
         // prefer supabase.functions.invoke if available (Supabase JS v2)
         if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
           try {
-            const { data, error } = await supabase.functions.invoke('notify-appointment', { body: notifyBody });
+            // supabase.functions.invoke will use your client's auth; still include body.apiKey if you want the function to validate a static key
+            const fnOptions = { body: notifyBody };
+            const { data, error } = await supabase.functions.invoke('notify-appointment', fnOptions);
             if (error) {
-              console.warn('notify-appointment function error', error);
-              notifyResp = { ok: false, error: error };
+              console.warn('notify-appointment function error (invoke):', error);
+              notifyResp = { ok: false, error };
             } else {
               notifyResp = { ok: true, data };
             }
           } catch (fnErr) {
-            console.warn('notify invoke failed', fnErr);
+            console.warn('notify invoke failed, will attempt direct fetch fallback', fnErr);
             notifyResp = { ok: false, error: fnErr };
           }
-        } else {
-          // fallback: attempt a direct fetch to PUBLIC_SUPABASE_URL/functions/v1/notify-appointment
+        }
+
+        // fallback to direct fetch if invoke not available or failed
+        if (!notifyResp || !notifyResp.ok) {
           try {
-            const functionsUrl = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_URL)
-              ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/+$/,'')}/functions/v1/notify-appointment`
-              : null;
+            // Build functions base URL. Prefer explicit env var for client:
+            const functionsBase =
+              (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL) ? process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
+              (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_URL) ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/+$/,'')}/functions/v1` :
+              (typeof window !== 'undefined' && window?.__env?.SUPABASE_FUNCTIONS_URL) ? window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
+              null;
 
-            if (!functionsUrl) throw new Error('Functions URL not available');
+            if (!functionsBase) throw new Error('Functions URL not available in environment (NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL or NEXT_PUBLIC_SUPABASE_URL)');
 
-            // Attempt to get current access token from supabase auth (if available)
+            const functionsUrl = `${functionsBase}/notify-appointment`;
+
+            // Gather an API key to send to function (optional - only if you set a public notify key)
+            const publicNotifyKey = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_NOTIFY_API_KEY) ? process.env.NEXT_PUBLIC_NOTIFY_API_KEY : (typeof window !== 'undefined' && window?.__env?.NEXT_PUBLIC_NOTIFY_API_KEY) ? window.__env.NEXT_PUBLIC_NOTIFY_API_KEY : null;
+
+            // try to obtain access token if possible (not required)
             let accessToken = null;
             try {
               if (supabase && supabase.auth) {
-                // support both older and newer clients
                 if (typeof supabase.auth.getSession === 'function') {
                   const sess = await supabase.auth.getSession();
                   accessToken = sess?.data?.session?.access_token || null;
@@ -1660,13 +1595,21 @@ export default function AgentApptPage() {
 
             const headers = { 'Content-Type': 'application/json' };
             if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-            else if (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) headers['apikey'] = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+            if (publicNotifyKey) headers['x-api-key'] = publicNotifyKey;
+
+            // AbortController for timeout
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 15000);
 
             const res = await fetch(functionsUrl, {
               method: 'POST',
               headers,
               body: JSON.stringify(notifyBody),
+              signal: controller.signal,
             });
+
+            clearTimeout(timeout);
+
             const json = await res.json().catch(() => null);
             if (!res.ok) {
               notifyResp = { ok: false, status: res.status, error: json || 'Failed' };
@@ -1680,41 +1623,14 @@ export default function AgentApptPage() {
         }
 
         if (notifyResp && notifyResp.ok) {
-          // only SMS is sent now — reflect that in UI text
-          toast({ status: 'success', title: 'Notification sent', description: 'SMS sent to driver (if phone valid).' });
+          toast({ status: 'success', title: 'Notification sent', description: 'SMS sent to driver (or scheduled).' });
         } else {
-          // reflect SMS-only failure
-          const errMsg = notifyResp && notifyResp.error ? String(notifyResp.error) : 'Unknown';
-          toast({ status: 'warning', title: 'Notification failed', description: `Appointment created but sending SMS failed: ${errMsg}` });
+          console.warn('notifyResp error:', notifyResp);
+          toast({ status: 'warning', title: 'Notification failed', description: `Appointment created but sending SMS failed.` });
         }
       } catch (notifyErr) {
         console.warn('notify error', notifyErr);
-        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
-      }
-
-      // ---------- WhatsApp: open wa.me chat to driver with appointment details ----------
-      try {
-        const apptObj = {
-          appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
-          weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
-          agentName: dbAppointment.agentName || dbAppointment.agent_name,
-          agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
-          warehouse: dbAppointment.warehouseLabel || dbAppointment.warehouse_location || dbAppointment.warehouse,
-          pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
-          truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
-          driverName: dbAppointment.driverName || dbAppointment.driver_name,
-          consolidated: dbAppointment.consolidated || dbAppointment.consolidated,
-          t1s: dbAppointment.t1s || dbAppointment.t1_records || [],
-        };
-
-        // open wa.me to driver's phone (normalized and stripped of +)
-        if (normalizedDriverPhone) {
-          openWhatsAppAppointment({ appointment: apptObj, pdfUrl: uploadedPdfUrl || null }, normalizedDriverPhone);
-          // user feedback
-          toast({ status: 'info', title: 'Opening WhatsApp', description: 'A WhatsApp window/tab should open for driver notification.' });
-        }
-      } catch (waErr) {
-        console.warn('WhatsApp notification failed', waErr);
+        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending notifications failed.' });
       }
 
       await triggerConfetti(160);
@@ -1815,17 +1731,14 @@ export default function AgentApptPage() {
               const sadNo = String(newRow.sad_no || '').trim();
               const status = String(newRow.status || '').toLowerCase();
               if (status === 'completed') {
-                // find related appointment ids via t1_records
                 try {
                   const { data: trows, error: terr } = await supabase.from('t1_records').select('appointment_id').eq('sad_no', sadNo).limit(1000);
                   if (terr) throw terr;
                   const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
                   if (apptIds.length) {
-                    // update appointments status to Completed
                     const { error: upErr } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
                     if (upErr) throw upErr;
 
-                    // log for each appointment
                     const logs = apptIds.map(id => ({
                       appointment_id: id,
                       changed_by: null,
@@ -1834,7 +1747,6 @@ export default function AgentApptPage() {
                       created_at: new Date().toISOString(),
                     }));
                     try {
-                      // attempt batched inserts
                       for (let i = 0; i < logs.length; i += 50) {
                         const chunk = logs.slice(i, i + 50);
                         await supabase.from('appointment_logs').insert(chunk);
@@ -1848,7 +1760,6 @@ export default function AgentApptPage() {
                 }
               }
 
-              // if this SAD is in the current t1s, mark as blocked client-side
               try {
                 const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
                 if (mySads.has(sadNo) && status === 'completed') {
@@ -1861,7 +1772,6 @@ export default function AgentApptPage() {
 
           sadSubRef.current = ch;
         } else {
-          // legacy realtime
           const s = supabase.from('sad_declarations').on('UPDATE', async (payload) => {
             const newRow = payload?.new;
             if (!newRow) return;
