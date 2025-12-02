@@ -1297,6 +1297,43 @@ export default function AgentApptPage() {
 
         if (uploadError) {
           console.warn('uploadPdfToStorage upload error', uploadError);
+
+          // If it's an RLS / permission issue, attempt server-side upload via edge function
+          const msg = (uploadError && uploadError.message) ? String(uploadError.message).toLowerCase() : '';
+          if (msg.includes('row-level security') || msg.includes('violates') || String(uploadError.status) === '400') {
+            console.warn('uploadPdfToStorage detected RLS-like error, will attempt server-side upload via function');
+            // prepare base64 payload
+            try {
+              const arrayBuffer = await blob.arrayBuffer();
+              const uint8 = new Uint8Array(arrayBuffer);
+              let binary = '';
+              const chunkSize = 0x8000;
+              for (let i = 0; i < uint8.length; i += chunkSize) {
+                binary += String.fromCharCode.apply(null, Array.from(uint8.subarray(i, i + chunkSize)));
+              }
+              const b64 = typeof window !== 'undefined' ? window.btoa(binary) : Buffer.from(uint8).toString('base64');
+
+              // call edge function to upload server-side
+              const notifyBody = {
+                action: 'upload_pdf',
+                filename,
+                path,
+                appointmentNumber,
+                base64: b64,
+                bucket: bucketName,
+              };
+
+              // use same function invocation helper (below) - prefer supabase.functions.invoke
+              const resp = await callNotifyFunction(notifyBody);
+              if (resp && resp.ok && resp.data && (resp.data.publicUrl || resp.data.path)) {
+                return { publicUrl: resp.data.publicUrl || null, path: resp.data.path || null };
+              } else {
+                console.warn('server-side upload via function failed', resp);
+              }
+            } catch (e) {
+              console.warn('server-side upload fallback failed', e);
+            }
+          }
         }
       } catch (e) {
         console.warn('uploadPdfToStorage upload threw', e);
@@ -1322,6 +1359,64 @@ export default function AgentApptPage() {
     } catch (e) {
       console.warn('uploadPdfToStorage failed', e);
       return { publicUrl: null, path: null };
+    }
+  }
+
+  // ---------- helper to call notify-appointment edge function (invoke or fetch fallback) ----------
+  async function callNotifyFunction(body) {
+    // returns { ok: bool, data?: any, error?: any, status?: number }
+    // Prefer supabase.functions.invoke when available (avoids CORS)
+    try {
+      if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
+        try {
+          const { data, error } = await supabase.functions.invoke('notify-appointment', { body });
+          if (error) {
+            return { ok: false, error };
+          }
+          return { ok: true, data };
+        } catch (e) {
+          // continue to fetch fallback
+          console.warn('functions.invoke failed, falling back to fetch', e);
+        }
+      }
+
+      // Fallback: direct fetch to functions URL
+      const functionsBase =
+        (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL) ? process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
+        (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_URL) ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/+$/,'')}/functions/v1` :
+        (typeof window !== 'undefined' && window?.__env?.SUPABASE_FUNCTIONS_URL) ? window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
+        null;
+
+      if (!functionsBase) {
+        return { ok: false, error: 'Functions URL not available in environment (NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL or NEXT_PUBLIC_SUPABASE_URL)' };
+      }
+
+      const functionsUrl = `${functionsBase}/notify-appointment`;
+      const publicNotifyKey = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_NOTIFY_API_KEY) ? process.env.NEXT_PUBLIC_NOTIFY_API_KEY : (typeof window !== 'undefined' && window?.__env?.NEXT_PUBLIC_NOTIFY_API_KEY) ? window.__env.NEXT_PUBLIC_NOTIFY_API_KEY : null;
+
+      const headers = { 'Content-Type': 'application/json' };
+      if (publicNotifyKey) headers['x-api-key'] = publicNotifyKey;
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
+      const res = await fetch(functionsUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+        mode: 'cors',
+      });
+
+      clearTimeout(timeout);
+
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        return { ok: false, status: res.status, error: json || 'Function returned non-OK' };
+      }
+      return { ok: true, data: json };
+    } catch (e) {
+      return { ok: false, error: e };
     }
   }
 
@@ -1538,89 +1633,14 @@ export default function AgentApptPage() {
           }
         };
 
-        let notifyResp = null;
-
-        // prefer supabase.functions.invoke if available (Supabase JS v2)
-        if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
-          try {
-            // supabase.functions.invoke will use your client's auth; still include body.apiKey if you want the function to validate a static key
-            const fnOptions = { body: notifyBody };
-            const { data, error } = await supabase.functions.invoke('notify-appointment', fnOptions);
-            if (error) {
-              console.warn('notify-appointment function error (invoke):', error);
-              notifyResp = { ok: false, error };
-            } else {
-              notifyResp = { ok: true, data };
-            }
-          } catch (fnErr) {
-            console.warn('notify invoke failed, will attempt direct fetch fallback', fnErr);
-            notifyResp = { ok: false, error: fnErr };
-          }
+        // include optional public notify key on body if desired (edge function checks x-api-key header OR body.apiKey)
+        const publicNotifyKey = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_NOTIFY_API_KEY) ? process.env.NEXT_PUBLIC_NOTIFY_API_KEY : (typeof window !== 'undefined' && window?.__env?.NEXT_PUBLIC_NOTIFY_API_KEY) ? window.__env.NEXT_PUBLIC_NOTIFY_API_KEY : null;
+        if (publicNotifyKey) {
+          // prefer to set header via callNotifyFunction - but if using invoke, header not required.
+          notifyBody.apiKey = publicNotifyKey;
         }
 
-        // fallback to direct fetch if invoke not available or failed
-        if (!notifyResp || !notifyResp.ok) {
-          try {
-            // Build functions base URL. Prefer explicit env var for client:
-            const functionsBase =
-              (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL) ? process.env.NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
-              (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_SUPABASE_URL) ? `${process.env.NEXT_PUBLIC_SUPABASE_URL.replace(/\/+$/,'')}/functions/v1` :
-              (typeof window !== 'undefined' && window?.__env?.SUPABASE_FUNCTIONS_URL) ? window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'') :
-              null;
-
-            if (!functionsBase) throw new Error('Functions URL not available in environment (NEXT_PUBLIC_SUPABASE_FUNCTIONS_URL or NEXT_PUBLIC_SUPABASE_URL)');
-
-            const functionsUrl = `${functionsBase}/notify-appointment`;
-
-            // Gather an API key to send to function (optional - only if you set a public notify key)
-            const publicNotifyKey = (typeof process !== 'undefined' && process.env && process.env.NEXT_PUBLIC_NOTIFY_API_KEY) ? process.env.NEXT_PUBLIC_NOTIFY_API_KEY : (typeof window !== 'undefined' && window?.__env?.NEXT_PUBLIC_NOTIFY_API_KEY) ? window.__env.NEXT_PUBLIC_NOTIFY_API_KEY : null;
-
-            // try to obtain access token if possible (not required)
-            let accessToken = null;
-            try {
-              if (supabase && supabase.auth) {
-                if (typeof supabase.auth.getSession === 'function') {
-                  const sess = await supabase.auth.getSession();
-                  accessToken = sess?.data?.session?.access_token || null;
-                } else if (typeof supabase.auth.session === 'function') {
-                  const sess = supabase.auth.session();
-                  accessToken = sess?.access_token || null;
-                } else if (supabase.auth.session) {
-                  accessToken = supabase.auth.session?.access_token || null;
-                }
-              }
-            } catch (e) {
-              accessToken = null;
-            }
-
-            const headers = { 'Content-Type': 'application/json' };
-            if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-            if (publicNotifyKey) headers['x-api-key'] = publicNotifyKey;
-
-            // AbortController for timeout
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 15000);
-
-            const res = await fetch(functionsUrl, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify(notifyBody),
-              signal: controller.signal,
-            });
-
-            clearTimeout(timeout);
-
-            const json = await res.json().catch(() => null);
-            if (!res.ok) {
-              notifyResp = { ok: false, status: res.status, error: json || 'Failed' };
-            } else {
-              notifyResp = { ok: true, data: json };
-            }
-          } catch (e) {
-            console.warn('notify fallback failed', e);
-            notifyResp = { ok: false, error: e };
-          }
-        }
+        const notifyResp = await callNotifyFunction(notifyBody);
 
         if (notifyResp && notifyResp.ok) {
           toast({ status: 'success', title: 'Notification sent', description: 'SMS sent to driver (or scheduled).' });
