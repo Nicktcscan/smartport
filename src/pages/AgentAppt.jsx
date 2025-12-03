@@ -1586,9 +1586,21 @@ export default function AgentApptPage() {
         } else {
           // fallback: attempt a direct fetch to SUPABASE functions endpoint
           try {
-            const publicUrl = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL))
-              ? (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)
-              : null;
+            // try to derive Supabase URL from client or env
+            let publicUrl = null;
+            try {
+              // supabase client may expose a url property
+              // @ts-ignore
+              publicUrl = supabase?.supabaseUrl || supabase?.url || null;
+            } catch (e) {
+              publicUrl = null;
+            }
+
+            if (!publicUrl) {
+              publicUrl = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL))
+                ? (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)
+                : (window && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_URL ? window.__env.NEXT_PUBLIC_SUPABASE_URL : null);
+            }
 
             const functionsUrl = publicUrl ? `${publicUrl.replace(/\/+$/,'')}/functions/v1/notify-appointment` : null;
 
@@ -1597,7 +1609,7 @@ export default function AgentApptPage() {
             // Option 1 fix: include anon key in Authorization & apikey headers so preflight and the function accept the request.
             const anonKey = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY))
               ? (process.env.REACT_APP_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-              : null;
+              : (window && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY : null);
 
             const headers = { 'Content-Type': 'application/json' };
             if (anonKey) {
