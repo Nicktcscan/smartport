@@ -102,7 +102,6 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
 
-          {/* Public Appointment route: accessible without login */}
 
           <Route
             path="/register"
@@ -147,7 +146,6 @@ function App() {
             />
 
             {/* Make Appointment accessible to logged-in users too */}
-            <Route path="/appointment" element={<Appointment />} />
 
             {/* Weighbridge */}
             <Route
@@ -268,19 +266,6 @@ function App() {
                   <Layout>
                     <Box as="main" p={4} bg="gray.50">
                       <Appointments />
-                    </Box>
-                  </Layout>
-                </ProtectedRoute>
-              }
-            />
-
-            <Route
-              path="/appointment"
-              element={
-                <ProtectedRoute allowedRoles={['admin', 'weighbridge']}>
-                  <Layout>
-                    <Box as="main" p={4} bg="gray.50">
-                      <Appointment />
                     </Box>
                   </Layout>
                 </ProtectedRoute>
