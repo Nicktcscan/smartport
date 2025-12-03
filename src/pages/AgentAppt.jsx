@@ -422,6 +422,112 @@ function AppointmentPdf({ ticket }) {
   );
 }
 
+// ---------- Utility: callNotifyFunction (tries supabase.functions.invoke then fetch fallback) ----------
+async function callNotifyFunction(notifyBody) {
+  // try supabase.functions.invoke first (supabase-js v2)
+  const stringBody = typeof notifyBody === 'string' ? notifyBody : JSON.stringify(notifyBody);
+  // timeout for fetch fallback
+  const FETCH_TIMEOUT = 12000;
+
+  // 1) try supabase.functions.invoke
+  try {
+    if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
+      // supabase.functions.invoke expects body string
+      try {
+        const { data, error } = await supabase.functions.invoke('notify-appointment', { body: stringBody });
+        if (error) {
+          // return structured error so caller can decide
+          return { ok: false, error, data: null, via: 'supabase.functions.invoke' };
+        }
+        return { ok: true, data, via: 'supabase.functions.invoke' };
+      } catch (e) {
+        // fallthrough to fetch fallback
+        console.warn('supabase.functions.invoke failed — falling back to direct fetch', e);
+      }
+    }
+  } catch (e) {
+    console.warn('invoke check failed', e);
+  }
+
+  // 2) fetch fallback to functions endpoint
+  try {
+    // Resolve functions base URL:
+    let baseUrl = null;
+    try {
+      // first try window.__env (if you use runtime env injection)
+      if (typeof window !== 'undefined' && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_URL) {
+        baseUrl = window.__env.NEXT_PUBLIC_SUPABASE_URL;
+      }
+      // then try common next/react env names exposed at build-time
+      if (!baseUrl && typeof process !== 'undefined') {
+        baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || null;
+      }
+      // last resort: try to read from supabase client object
+      if (!baseUrl && supabase && (supabase.supabaseUrl || supabase?.url || supabase?.client?.url)) {
+        baseUrl = supabase.supabaseUrl || supabase?.url || supabase?.client?.url;
+      }
+      // if still not found, try a common helper var
+      if (!baseUrl && typeof window !== 'undefined' && window.__env && window.__env.SUPABASE_FUNCTIONS_URL) {
+        baseUrl = window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/, '');
+      }
+    } catch (e) {
+      // ignore
+    }
+
+    // prefer direct functions url if you provided it at build/runtime (e.g. SUPABASE_FUNCTIONS_URL)
+    const candidate = (typeof window !== 'undefined' && window.__env && window.__env.SUPABASE_FUNCTIONS_URL)
+      ? `${window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'')}/notify-appointment`
+      : null;
+
+    const functionsUrl = candidate || (baseUrl ? `${baseUrl.replace(/\/+$/,'')}/functions/v1/notify-appointment` : null);
+    if (!functionsUrl) {
+      return { ok: false, error: new Error('Functions URL not available (set NEXT_PUBLIC_SUPABASE_URL or window.__env.SUPABASE_FUNCTIONS_URL)'), via: 'fetch' };
+    }
+
+    // get anon key if available (exposed at build-time)
+    let anonKey = null;
+    try {
+      if (typeof window !== 'undefined' && window.__env && (window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY || window.__env.REACT_APP_SUPABASE_ANON_KEY)) {
+        anonKey = window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY || window.__env.REACT_APP_SUPABASE_ANON_KEY;
+      }
+      if (!anonKey && typeof process !== 'undefined') {
+        anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.REACT_APP_SUPABASE_ANON_KEY || null;
+      }
+    } catch (e) { /* ignore */ }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (anonKey) {
+      headers['Authorization'] = `Bearer ${anonKey}`;
+      headers['apikey'] = anonKey;
+    }
+
+    // use AbortController to timeout the fetch
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+
+    const res = await fetch(functionsUrl, {
+      method: 'POST',
+      headers,
+      body: stringBody,
+      mode: 'cors',
+      credentials: 'omit',
+      signal: controller.signal,
+    });
+
+    clearTimeout(id);
+
+    let json = null;
+    try { json = await res.json().catch(() => null); } catch (_) { json = null; }
+
+    if (!res.ok) {
+      return { ok: false, status: res.status, error: json || `Function returned ${res.status}`, via: 'fetch' };
+    }
+    return { ok: true, data: json, via: 'fetch' };
+  } catch (e) {
+    return { ok: false, error: e, via: 'fetch' };
+  }
+}
+
 // ---------- Main page component ----------
 export default function AgentApptPage() {
   const toast = useToast();
@@ -1533,7 +1639,7 @@ export default function AgentApptPage() {
       } catch (e) { console.warn('log write failed', e); }
 
       // Show immediate creation success toast to agent
-      toast({ title: 'Appointment created', description: `Appointment saved — sending details to driver.`, status: 'success', duration: 6000 });
+      toast({ title: 'Appointment created', description: `Appointment saved — sending SMS to driver.`, status: 'success', duration: 6000 });
 
       // ---------- NEW: show popup message to the agent (per your request) ----------
       try {
@@ -1546,7 +1652,7 @@ export default function AgentApptPage() {
         // ignore popup errors
       }
 
-      // ---------- Notify via Supabase Edge Function (Option 1 fix: include Authorization header fallback) ----------
+      // ---------- Notify via Supabase Edge Function (robust: invoke() then fetch fallback) ----------
       try {
         const notifyBody = {
           appointment: {
@@ -1559,92 +1665,35 @@ export default function AgentApptPage() {
             agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
             id: dbAppointment.id
           },
+          pdfBase64: null,
+          pdfFilename: null,
           pdfUrl: uploadedPdfUrl || null,
           recipients: {
             driverPhone: normalizedDriverPhone,
-            agentEmail: null,
             agentName: agentName || dbAppointment.agentName || ''
           }
         };
 
-        let notifyResp = null;
-
-        // prefer supabase.functions.invoke if available (Supabase JS v2)
-        if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
-          try {
-            const { data, error } = await supabase.functions.invoke('notify-appointment', { body: notifyBody });
-            if (error) {
-              console.warn('notify-appointment function error', error);
-              notifyResp = { ok: false, error: error };
-            } else {
-              notifyResp = { ok: true, data };
-            }
-          } catch (fnErr) {
-            console.warn('notify invoke failed', fnErr);
-            notifyResp = { ok: false, error: fnErr };
-          }
-        } else {
-          // fallback: attempt a direct fetch to SUPABASE functions endpoint
-          try {
-            // try to derive Supabase URL from client or env
-            let publicUrl = null;
-            try {
-              // supabase client may expose a url property
-              // @ts-ignore
-              publicUrl = supabase?.supabaseUrl || supabase?.url || null;
-            } catch (e) {
-              publicUrl = null;
-            }
-
-            if (!publicUrl) {
-              publicUrl = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL))
-                ? (process.env.REACT_APP_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)
-                : (window && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_URL ? window.__env.NEXT_PUBLIC_SUPABASE_URL : null);
-            }
-
-            const functionsUrl = publicUrl ? `${publicUrl.replace(/\/+$/,'')}/functions/v1/notify-appointment` : null;
-
-            if (!functionsUrl) throw new Error('Functions URL not available');
-
-            // Option 1 fix: include anon key in Authorization & apikey headers so preflight and the function accept the request.
-            const anonKey = (typeof process !== 'undefined' && process.env && (process.env.REACT_APP_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY))
-              ? (process.env.REACT_APP_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)
-              : (window && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY : null);
-
-            const headers = { 'Content-Type': 'application/json' };
-            if (anonKey) {
-              headers['Authorization'] = `Bearer ${anonKey}`;
-              headers['apikey'] = anonKey;
-            }
-
-            const res = await fetch(functionsUrl, {
-              method: 'POST',
-              mode: 'cors',
-              credentials: 'omit',
-              headers,
-              body: JSON.stringify(notifyBody),
-            });
-
-            const json = await res.json().catch(() => null);
-            if (!res.ok) {
-              notifyResp = { ok: false, status: res.status, error: json || 'Failed' };
-            } else {
-              notifyResp = { ok: true, data: json };
-            }
-          } catch (e) {
-            console.warn('notify fallback failed', e);
-            notifyResp = { ok: false, error: e };
-          }
-        }
+        const notifyResp = await callNotifyFunction(notifyBody);
 
         if (notifyResp && notifyResp.ok) {
-          toast({ status: 'success', title: 'Notifications sent', description: 'SMS & Email sent (or scheduled).' });
+          // This backend only sends SMS — reflect that clearly
+          toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
         } else {
-          toast({ status: 'warning', title: 'Notification failed', description: 'Appointment created but sending SMS & Email failed.' });
+          console.warn('notifyResp failed', notifyResp);
+          // Provide actionable message to user
+          const errText = (notifyResp && notifyResp.error && notifyResp.error.message) ? notifyResp.error.message : (notifyResp && notifyResp.error ? String(notifyResp.error) : 'Unknown error');
+          toast({
+            status: 'warning',
+            title: 'SMS sending failed',
+            description: `Appointment created but SMS sending failed: ${errText}`,
+            duration: 10000,
+            isClosable: true,
+          });
         }
       } catch (notifyErr) {
         console.warn('notify error', notifyErr);
-        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending notifications failed.' });
+        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
       }
 
       await triggerConfetti(160);
