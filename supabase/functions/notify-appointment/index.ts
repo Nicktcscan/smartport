@@ -1,8 +1,6 @@
 // supabase/functions/notify-appointment/index.ts
-// Supabase Edge Function (Deno) — Upload PDF (service role) + update appointment + Twilio SMS
-// Accepts JSON body { appointment, pdfBase64?, pdfFilename?, recipients? }.
-// If pdfBase64 provided it will upload to storage using SUPABASE_SERVICE_ROLE_KEY
-// and then PATCH the appointment row to set pdf_url. Finally sends SMS via Twilio (REST API, no Node SDK).
+// Deno-based Supabase Edge Function — no Node SDKs at top-level.
+// Uses fetch to Twilio REST to avoid esm.sh/node incompatibilities.
 
 type BodyPayload = {
   apiKey?: string;
@@ -16,31 +14,24 @@ type BodyPayload = {
 };
 
 function buildCorsHeaders(req?: Request) {
-  // Prefer explicit CORS_ORIGIN env, otherwise echo request origin if present, otherwise wildcard
-  const envOrigin =
-    typeof Deno !== "undefined" && (Deno.env.get("CORS_ORIGIN") || "")
-      ? (Deno.env.get("CORS_ORIGIN") as string)
-      : "";
+  // prefer explicit CORS_ORIGIN env, otherwise echo request origin, otherwise wildcard
+  const envOrigin = typeof Deno !== "undefined" ? (Deno.env.get("CORS_ORIGIN") || "") : "";
   const reqOrigin = req && req.headers.get("origin") ? req.headers.get("origin")! : "";
-  const origin = envOrigin || reqOrigin || "*";
+  const origin = (envOrigin || reqOrigin || "*").trim();
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS,PUT,PATCH,DELETE",
-    // include commonly-sent headers during preflight from browsers & supabase clients
     "Access-Control-Allow-Headers":
       "Content-Type, Authorization, x-api-key, X-Requested-With, apikey, accept, origin",
     "Access-Control-Expose-Headers": "Content-Type",
     "Access-Control-Max-Age": "3600",
     Vary: "Origin",
   };
-
-  // Access-Control-Allow-Credentials must not be used with wildcard origin "*"
   if (origin && origin !== "*") {
     headers["Access-Control-Allow-Credentials"] = "true";
   }
-
   return headers;
 }
 
@@ -61,39 +52,33 @@ function okResponse(obj: any, req?: Request) {
   return jsonResponse(obj, 200, req);
 }
 
-// decode base64 to bytes (browser / deno atob available)
 function decodeBase64ToUint8Array(b64: string) {
   const binStr = atob(b64);
   const len = binStr.length;
   const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binStr.charCodeAt(i);
-  }
+  for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
   return bytes;
 }
 
 function log(...args: any[]) {
-  try {
-    console.log(...args);
-  } catch (e) {
-    // ignore logging failures
-  }
+  try { console.log(...args); } catch (_) {}
 }
 
-/**
- * Send SMS via Twilio REST API using Basic Auth.
- * Returns an object { ok: boolean, sid?, error?, status?, raw? }
- */
-async function sendSmsViaTwilio(accountSid: string, authToken: string, fromOrMessagingServiceSid: { from?: string; messagingServiceSid?: string }, to: string, body: string) {
+/** Small Twilio helper using fetch + Basic Auth (no SDK). */
+async function sendSmsViaTwilioRest(
+  accountSid: string,
+  authToken: string,
+  fromOrMessagingServiceSid: { from?: string; messagingServiceSid?: string },
+  to: string,
+  body: string
+) {
   try {
     if (!accountSid || !authToken) {
       return { ok: false, error: "Twilio credentials not configured" };
     }
     if (!to) return { ok: false, error: "Missing recipient phone" };
 
-    // Build auth header
     const auth = `${accountSid}:${authToken}`;
-    // btoa is available in Deno
     const basic = typeof btoa === "function" ? btoa(auth) : Buffer.from(auth).toString("base64");
 
     const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`;
@@ -117,13 +102,10 @@ async function sendSmsViaTwilio(accountSid: string, authToken: string, fromOrMes
 
     const text = await resp.text().catch(() => null);
     if (!resp.ok) {
-      // Twilio returns JSON error body; try to parse
       let parsed = null;
-      try { parsed = text ? JSON.parse(text) : null; } catch (_) { parsed = text; }
+      try { parsed = text ? JSON.parse(text) : text; } catch (_) { parsed = text; }
       return { ok: false, status: resp.status, error: parsed || `Twilio returned ${resp.status}` };
     }
-
-    // success - Twilio returns JSON
     let parsed: any = null;
     try { parsed = text ? JSON.parse(text) : null; } catch (_) { parsed = text; }
     return { ok: true, sid: parsed?.sid || null, status: parsed?.status || "queued", raw: parsed };
@@ -137,15 +119,12 @@ export const handler = async (req: Request): Promise<Response> => {
     const origin = req.headers.get("origin") || "-";
     log("notify-appointment invoked; Origin:", origin, "Method:", req.method);
 
-    // Handle CORS preflight first (return 200 OK with CORS headers)
+    // IMPORTANT: return preflight immediately before any heavy work or dynamic import
     if (req.method === "OPTIONS") {
-      return new Response("", {
-        status: 200,
-        headers: buildCorsHeaders(req),
-      });
+      // return 200 fast with CORS headers
+      return new Response("", { status: 200, headers: buildCorsHeaders(req) });
     }
 
-    // Simple GET health check
     if (req.method === "GET") {
       return textResponse("notify-appointment: ok", 200, req);
     }
@@ -154,10 +133,10 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Method not allowed" }, 405, req);
     }
 
-    // parse JSON body safely
+    // parse JSON
     const body = (await req.json().catch(() => ({}))) as BodyPayload;
 
-    // Env
+    // environment variables (read at runtime)
     const SUPABASE_URL = ((Deno.env.get("SUPABASE_URL") || "") as string).replace(/\/+$/, "");
     const SUPABASE_SERVICE_ROLE_KEY = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "") as string;
     const NOTIFY_API_KEY = (Deno.env.get("NOTIFY_API_KEY") || "") as string;
@@ -166,9 +145,9 @@ export const handler = async (req: Request): Promise<Response> => {
     const TWILIO_FROM = (Deno.env.get("TWILIO_FROM") || "") as string;
     const TWILIO_MESSAGING_SERVICE_SID = (Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") || "") as string;
 
-    // NOTE: per request, we are NOT enforcing x-api-key / Authorization in this function.
     if (NOTIFY_API_KEY) {
-      log("NOTIFY_API_KEY is set but not enforced by this function");
+      // not enforcing by default
+      log("NOTIFY_API_KEY set (not enforced)");
     }
 
     const { appointment, pdfBase64, pdfFilename, recipients } = body || {};
@@ -176,26 +155,23 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Missing appointment (id) in request body" }, 400, req);
     }
 
-    // derive driver phone
     const driverPhone =
       (recipients && recipients.driverPhone) ||
       (appointment.driverPhone || appointment.driverLicense) ||
       null;
 
-    // friendly fields
     const apptNo = appointment.appointmentNumber || appointment.appointment_number || appointment.appointmentNo || "";
     const wbNo = appointment.weighbridgeNumber || appointment.weighbridge_number || appointment.weighbridgeNo || "";
     const pickup = appointment.pickupDate || appointment.pickup_date || "";
     const truck = appointment.truckNumber || appointment.truck_number || "";
     const drvName = appointment.driverName || appointment.driver_name || "";
 
-    // simple E.164 validation
     function isValidPhone(phone: string | null | undefined) {
       if (!phone || typeof phone !== "string") return false;
       return /^\+\d{6,20}$/.test(phone.trim());
     }
 
-    // Step 1: upload PDF (if provided) using service role (PUT to /storage endpoint)
+    // Step 1: upload PDF to storage (service role) if pdfBase64 supplied
     let uploadedPublicUrl: string | null = null;
     let uploadedPath: string | null = null;
     try {
@@ -209,7 +185,6 @@ export const handler = async (req: Request): Promise<Response> => {
         uploadedPath = path;
 
         const bytes = decodeBase64ToUint8Array(pdfBase64);
-
         const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(path)}?upsert=true`;
 
         const uploadResp = await fetch(uploadUrl, {
@@ -237,7 +212,6 @@ export const handler = async (req: Request): Promise<Response> => {
       if (uploadedPublicUrl && SUPABASE_SERVICE_ROLE_KEY && SUPABASE_URL) {
         const restUrl = `${SUPABASE_URL}/rest/v1/appointments?id=eq.${encodeURIComponent(appointment.id)}`;
         const patchBody = { pdf_url: uploadedPublicUrl };
-
         const patchResp = await fetch(restUrl, {
           method: "PATCH",
           headers: {
@@ -248,7 +222,6 @@ export const handler = async (req: Request): Promise<Response> => {
           },
           body: JSON.stringify(patchBody),
         });
-
         if (!patchResp.ok) {
           const txt = await patchResp.text().catch(() => null);
           log("Appointment PATCH failed", patchResp.status, txt);
@@ -258,7 +231,7 @@ export const handler = async (req: Request): Promise<Response> => {
       log("Appointment update failed:", e);
     }
 
-    // Step 3: Build SMS and send via Twilio REST API (no Node SDK)
+    // Step 3: Send SMS via Twilio REST (no Node SDK)
     const shortPdfLink = uploadedPublicUrl || (appointment.pdfUrl || appointment.pdf_url) || "";
     const smsText =
       `Weighbridge Appointment confirmed: APPT ${apptNo}` +
@@ -269,10 +242,8 @@ export const handler = async (req: Request): Promise<Response> => {
       (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : "");
 
     let smsResult: any = { ok: false, error: "skipped" };
-
     try {
       const toPhone = (recipients && recipients.driverPhone) || driverPhone;
-      // prefer messaging service sid if provided
       const fromOrMessagingServiceSid = TWILIO_MESSAGING_SERVICE_SID ? { messagingServiceSid: TWILIO_MESSAGING_SERVICE_SID } : { from: TWILIO_FROM };
 
       if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
@@ -280,27 +251,14 @@ export const handler = async (req: Request): Promise<Response> => {
       } else if (!toPhone || !isValidPhone(toPhone)) {
         smsResult = { ok: false, error: "Invalid or missing driver phone (expected E.164 like +220...)" };
       } else {
-        const tw = await sendSmsViaTwilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, fromOrMessagingServiceSid, toPhone, smsText);
-        smsResult = tw;
+        smsResult = await sendSmsViaTwilioRest(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, fromOrMessagingServiceSid, toPhone, smsText);
       }
     } catch (e: any) {
-      const msg = e?.message || String(e);
-      smsResult = { ok: false, error: msg };
-      log("Twilio send error:", msg);
+      smsResult = { ok: false, error: e?.message || String(e) };
+      log("Twilio send error:", e);
     }
 
-    // Return success + results (with CORS headers)
-    return okResponse(
-      {
-        ok: true,
-        results: {
-          sms: smsResult,
-          uploadedPublicUrl,
-          uploadedPath,
-        },
-      },
-      req
-    );
+    return okResponse({ ok: true, results: { sms: smsResult, uploadedPublicUrl, uploadedPath } }, req);
   } catch (err: any) {
     log("Function unexpected error:", err);
     return jsonResponse({ ok: false, error: err?.message || String(err) }, 500, req);
