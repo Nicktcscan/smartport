@@ -1,6 +1,8 @@
 // supabase/functions/notify-appointment/index.ts
-// Deno-based Supabase Edge Function — no Node SDKs at top-level.
-// Uses fetch to Twilio REST to avoid esm.sh/node incompatibilities.
+// Deno-based Supabase Edge Function — lightweight, no Node SDKs at top-level.
+// Purpose: (1) handle CORS correctly including OPTIONS preflight, (2) optionally upload PDF
+// to Supabase Storage using service role, (3) PATCH appointment with pdf_url, (4) send SMS via Twilio REST API.
+// NOTE: this file intentionally avoids importing heavy Node packages (no esm.sh Twilio SDK) to prevent runtime errors.
 
 type BodyPayload = {
   apiKey?: string;
@@ -13,25 +15,62 @@ type BodyPayload = {
   };
 };
 
+function log(...args: any[]) {
+  try { console.log(...args); } catch (_) {}
+}
+
+/**
+ * Build CORS headers.
+ * Behavior:
+ *  - If CORS_ORIGIN env is set and looks like a real origin (startsWith http or contains * or comma list),
+ *    it will be used as an allow-list (if list contains the request origin it will echo it).
+ *  - If CORS_ORIGIN is not set or looks invalid (e.g. a hashed token), the function will echo the request origin
+ *    if present, otherwise fall back to "*".
+ */
 function buildCorsHeaders(req?: Request) {
-  // prefer explicit CORS_ORIGIN env, otherwise echo request origin, otherwise wildcard
-  const envOrigin = typeof Deno !== "undefined" ? (Deno.env.get("CORS_ORIGIN") || "") : "";
+  const rawEnv = (typeof Deno !== "undefined" ? (Deno.env.get("CORS_ORIGIN") || "") : "") as string;
   const reqOrigin = req && req.headers.get("origin") ? req.headers.get("origin")! : "";
-  const origin = (envOrigin || reqOrigin || "*").trim();
+  let origin = "*";
+
+  const envTrim = String(rawEnv || "").trim();
+  if (envTrim) {
+    // if env looks like a comma separated list or contains an http scheme or wildcard, treat it as allowed list
+    const parts = envTrim.split(",").map(p => p.trim()).filter(Boolean);
+    const seemsLikeOrigins = parts.some(p => p === "*" || p.startsWith("http://") || p.startsWith("https://") || p.includes("*"));
+    if (seemsLikeOrigins) {
+      // If the request origin matches one of the allowed entries, echo it.
+      if (reqOrigin && parts.some(p => p === "*" || p === reqOrigin || (p.endsWith("*") && reqOrigin.startsWith(p.replace(/\*+$/,''))))) {
+        origin = reqOrigin || "*";
+      } else if (parts.includes("*")) {
+        origin = "*";
+      } else {
+        // fallback to the first allowed origin (useful for single-value configs)
+        origin = parts[0];
+      }
+    } else {
+      // env value present but doesn't look like an origin list (maybe was mis-set) -> prefer echoing request origin
+      origin = reqOrigin || "*";
+    }
+  } else {
+    // no env provided -> echo request origin if present, otherwise wildcard
+    origin = reqOrigin || "*";
+  }
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS,PUT,PATCH,DELETE",
-    "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, x-api-key, X-Requested-With, apikey, accept, origin",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, apikey, X-Requested-With, accept, origin",
     "Access-Control-Expose-Headers": "Content-Type",
     "Access-Control-Max-Age": "3600",
     Vary: "Origin",
   };
+
   if (origin && origin !== "*") {
+    // Only set credentials true when origin is explicit (not wildcard).
     headers["Access-Control-Allow-Credentials"] = "true";
   }
+
   return headers;
 }
 
@@ -52,16 +91,13 @@ function okResponse(obj: any, req?: Request) {
   return jsonResponse(obj, 200, req);
 }
 
+// decode base64 to Uint8Array (atob available in Deno runtime)
 function decodeBase64ToUint8Array(b64: string) {
   const binStr = atob(b64);
   const len = binStr.length;
   const bytes = new Uint8Array(len);
   for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
   return bytes;
-}
-
-function log(...args: any[]) {
-  try { console.log(...args); } catch (_) {}
 }
 
 /** Small Twilio helper using fetch + Basic Auth (no SDK). */
@@ -74,12 +110,15 @@ async function sendSmsViaTwilioRest(
 ) {
   try {
     if (!accountSid || !authToken) {
-      return { ok: false, error: "Twilio credentials not configured" };
+      return { ok: false, error: "Twilio credentials not configured (server-side)" };
     }
     if (!to) return { ok: false, error: "Missing recipient phone" };
 
     const auth = `${accountSid}:${authToken}`;
-    const basic = typeof btoa === "function" ? btoa(auth) : Buffer.from(auth).toString("base64");
+    // btoa should be available in Deno. Fallback to Buffer if present.
+    const basic = (typeof btoa === "function")
+      ? btoa(auth)
+      : (typeof (globalThis as any).Buffer !== "undefined" ? (globalThis as any).Buffer.from(auth).toString("base64") : "");
 
     const url = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`;
     const params = new URLSearchParams();
@@ -116,15 +155,16 @@ async function sendSmsViaTwilioRest(
 
 export const handler = async (req: Request): Promise<Response> => {
   try {
-    const origin = req.headers.get("origin") || "-";
-    log("notify-appointment invoked; Origin:", origin, "Method:", req.method);
+    const originHeader = req.headers.get("origin") || "-";
+    log("notify-appointment invoked; Origin:", originHeader, "Method:", req.method);
 
-    // IMPORTANT: return preflight immediately before any heavy work or dynamic import
+    // Handle CORS preflight immediately to keep response fast and avoid heavy runtime init.
     if (req.method === "OPTIONS") {
-      // return 200 fast with CORS headers
-      return new Response("", { status: 200, headers: buildCorsHeaders(req) });
+      // Prefer returning 204 No Content for preflight; still include CORS headers.
+      return new Response(null, { status: 204, headers: buildCorsHeaders(req) });
     }
 
+    // Simple health-check
     if (req.method === "GET") {
       return textResponse("notify-appointment: ok", 200, req);
     }
@@ -133,10 +173,10 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Method not allowed" }, 405, req);
     }
 
-    // parse JSON
+    // parse JSON body safely
     const body = (await req.json().catch(() => ({}))) as BodyPayload;
 
-    // environment variables (read at runtime)
+    // runtime env (read inside handler)
     const SUPABASE_URL = ((Deno.env.get("SUPABASE_URL") || "") as string).replace(/\/+$/, "");
     const SUPABASE_SERVICE_ROLE_KEY = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "") as string;
     const NOTIFY_API_KEY = (Deno.env.get("NOTIFY_API_KEY") || "") as string;
@@ -146,8 +186,8 @@ export const handler = async (req: Request): Promise<Response> => {
     const TWILIO_MESSAGING_SERVICE_SID = (Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") || "") as string;
 
     if (NOTIFY_API_KEY) {
-      // not enforcing by default
-      log("NOTIFY_API_KEY set (not enforced)");
+      // not enforced here by default — consider enforcing in production if needed
+      log("NOTIFY_API_KEY is set (not enforced)");
     }
 
     const { appointment, pdfBase64, pdfFilename, recipients } = body || {};
@@ -155,6 +195,7 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Missing appointment (id) in request body" }, 400, req);
     }
 
+    // derive driver phone
     const driverPhone =
       (recipients && recipients.driverPhone) ||
       (appointment.driverPhone || appointment.driverLicense) ||
@@ -171,7 +212,7 @@ export const handler = async (req: Request): Promise<Response> => {
       return /^\+\d{6,20}$/.test(phone.trim());
     }
 
-    // Step 1: upload PDF to storage (service role) if pdfBase64 supplied
+    // Step 1: upload PDF (if provided) to Storage using SUPABASE_SERVICE_ROLE_KEY
     let uploadedPublicUrl: string | null = null;
     let uploadedPath: string | null = null;
     try {
@@ -231,7 +272,7 @@ export const handler = async (req: Request): Promise<Response> => {
       log("Appointment update failed:", e);
     }
 
-    // Step 3: Send SMS via Twilio REST (no Node SDK)
+    // Step 3: Build SMS and send via Twilio (REST)
     const shortPdfLink = uploadedPublicUrl || (appointment.pdfUrl || appointment.pdf_url) || "";
     const smsText =
       `Weighbridge Appointment confirmed: APPT ${apptNo}` +
@@ -258,9 +299,11 @@ export const handler = async (req: Request): Promise<Response> => {
       log("Twilio send error:", e);
     }
 
+    // Return unified result with CORS headers
     return okResponse({ ok: true, results: { sms: smsResult, uploadedPublicUrl, uploadedPath } }, req);
   } catch (err: any) {
     log("Function unexpected error:", err);
+    // Always include CORS headers on error responses as well
     return jsonResponse({ ok: false, error: err?.message || String(err) }, 500, req);
   }
 };
