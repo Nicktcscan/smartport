@@ -1,8 +1,11 @@
 // supabase/functions/notify-appointment/index.ts
 // Deno-based Supabase Edge Function — lightweight, no Node SDKs at top-level.
-// Purpose: (1) handle CORS correctly including OPTIONS preflight, (2) optionally upload PDF
-// to Supabase Storage using service role, (3) PATCH appointment with pdf_url, (4) send SMS via Twilio REST API.
-// NOTE: this file intentionally avoids importing heavy Node packages (no esm.sh Twilio SDK) to prevent runtime errors.
+// Purpose:
+//  1) handle CORS correctly including a very fast OPTIONS preflight (204),
+//  2) optionally upload PDF to Supabase Storage using service role,
+//  3) PATCH appointment with pdf_url,
+//  4) send SMS via Twilio REST API.
+// This file intentionally avoids heavy imports that cause runtime failures in the edge runtime.
 
 type BodyPayload = {
   apiKey?: string;
@@ -19,40 +22,54 @@ function log(...args: any[]) {
   try { console.log(...args); } catch (_) {}
 }
 
+/** Mask a secret for safe logging (don't print full secret in logs) */
+function maskSecret(s: string | null | undefined) {
+  if (!s) return '';
+  const str = String(s);
+  if (str.length <= 12) return '••••••••';
+  return `${str.slice(0, 4)}…${str.slice(-4)}`;
+}
+
 /**
  * Build CORS headers.
  * Behavior:
  *  - If CORS_ORIGIN env is set and looks like a real origin (startsWith http or contains * or comma list),
  *    it will be used as an allow-list (if list contains the request origin it will echo it).
- *  - If CORS_ORIGIN is not set or looks invalid (e.g. a hashed token), the function will echo the request origin
- *    if present, otherwise fall back to "*".
+ *  - If CORS_ORIGIN is not set or looks invalid (e.g. the dashboard shows a SHA256 digest), the function will
+ *    echo the request origin if present, otherwise fall back to "*".
  */
 function buildCorsHeaders(req?: Request) {
-  const rawEnv = (typeof Deno !== "undefined" ? (Deno.env.get("CORS_ORIGIN") || "") : "") as string;
+  let rawEnv = '';
+  try {
+    rawEnv = (typeof Deno !== "undefined" ? (Deno.env.get("CORS_ORIGIN") || "") : "") as string;
+  } catch (e) {
+    rawEnv = "";
+  }
+
   const reqOrigin = req && req.headers.get("origin") ? req.headers.get("origin")! : "";
   let origin = "*";
 
   const envTrim = String(rawEnv || "").trim();
   if (envTrim) {
-    // if env looks like a comma separated list or contains an http scheme or wildcard, treat it as allowed list
     const parts = envTrim.split(",").map(p => p.trim()).filter(Boolean);
+    // Decide if env value appears to be an origin list (contains http(s) or wildcard)
     const seemsLikeOrigins = parts.some(p => p === "*" || p.startsWith("http://") || p.startsWith("https://") || p.includes("*"));
     if (seemsLikeOrigins) {
-      // If the request origin matches one of the allowed entries, echo it.
+      // If the request origin exactly matches or matches wildcard pattern, echo it back.
       if (reqOrigin && parts.some(p => p === "*" || p === reqOrigin || (p.endsWith("*") && reqOrigin.startsWith(p.replace(/\*+$/,''))))) {
         origin = reqOrigin || "*";
       } else if (parts.includes("*")) {
         origin = "*";
       } else {
-        // fallback to the first allowed origin (useful for single-value configs)
+        // fallback to first configured origin (useful for single-value config)
         origin = parts[0];
       }
     } else {
-      // env value present but doesn't look like an origin list (maybe was mis-set) -> prefer echoing request origin
+      // If the env value doesn't look like an origin list (dashboard may show hash),
+      // prefer echoing the request origin (safe fallback).
       origin = reqOrigin || "*";
     }
   } else {
-    // no env provided -> echo request origin if present, otherwise wildcard
     origin = reqOrigin || "*";
   }
 
@@ -60,14 +77,14 @@ function buildCorsHeaders(req?: Request) {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS,PUT,PATCH,DELETE",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, apikey, X-Requested-With, accept, origin",
-    "Access-Control-Expose-Headers": "Content-Type",
+    // include common headers used by browsers / supabase client
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-api-key, apikey, X-Requested-With, accept, origin, x-client-info",
+    "Access-Control-Expose-Headers": "Content-Type, Location",
     "Access-Control-Max-Age": "3600",
     Vary: "Origin",
   };
 
   if (origin && origin !== "*") {
-    // Only set credentials true when origin is explicit (not wildcard).
     headers["Access-Control-Allow-Credentials"] = "true";
   }
 
@@ -115,7 +132,6 @@ async function sendSmsViaTwilioRest(
     if (!to) return { ok: false, error: "Missing recipient phone" };
 
     const auth = `${accountSid}:${authToken}`;
-    // btoa should be available in Deno. Fallback to Buffer if present.
     const basic = (typeof btoa === "function")
       ? btoa(auth)
       : (typeof (globalThis as any).Buffer !== "undefined" ? (globalThis as any).Buffer.from(auth).toString("base64") : "");
@@ -155,14 +171,19 @@ async function sendSmsViaTwilioRest(
 
 export const handler = async (req: Request): Promise<Response> => {
   try {
-    const originHeader = req.headers.get("origin") || "-";
-    log("notify-appointment invoked; Origin:", originHeader, "Method:", req.method);
-
-    // Handle CORS preflight immediately to keep response fast and avoid heavy runtime init.
+    // VERY IMPORTANT: handle preflight immediately before any heavy runtime work
     if (req.method === "OPTIONS") {
-      // Prefer returning 204 No Content for preflight; still include CORS headers.
+      // quick debug log (masked)
+      try {
+        const rawEnv = (typeof Deno !== "undefined" ? (Deno.env.get("CORS_ORIGIN") || "") : "") as string;
+        log("OPTIONS preflight; request Origin:", req.headers.get("origin") || "-", "CORS_ORIGIN(masked):", maskSecret(rawEnv));
+      } catch (_) { /* ignore */ }
+
       return new Response(null, { status: 204, headers: buildCorsHeaders(req) });
     }
+
+    const originHeader = req.headers.get("origin") || "-";
+    log("notify-appointment invoked; Origin:", originHeader, "Method:", req.method);
 
     // Simple health-check
     if (req.method === "GET") {
@@ -177,17 +198,19 @@ export const handler = async (req: Request): Promise<Response> => {
     const body = (await req.json().catch(() => ({}))) as BodyPayload;
 
     // runtime env (read inside handler)
-    const SUPABASE_URL = ((Deno.env.get("SUPABASE_URL") || "") as string).replace(/\/+$/, "");
-    const SUPABASE_SERVICE_ROLE_KEY = (Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "") as string;
-    const NOTIFY_API_KEY = (Deno.env.get("NOTIFY_API_KEY") || "") as string;
-    const TWILIO_ACCOUNT_SID = (Deno.env.get("TWILIO_ACCOUNT_SID") || "") as string;
-    const TWILIO_AUTH_TOKEN = (Deno.env.get("TWILIO_AUTH_TOKEN") || "") as string;
-    const TWILIO_FROM = (Deno.env.get("TWILIO_FROM") || "") as string;
-    const TWILIO_MESSAGING_SERVICE_SID = (Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") || "") as string;
+    const SUPABASE_URL = (((() => { try { return Deno.env.get("SUPABASE_URL") || ""; } catch(_) { return ""; } })()) as string).replace(/\/+$/, "");
+    const SUPABASE_SERVICE_ROLE_KEY = (() => { try { return Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || ""; } catch(_) { return ""; } })() as string;
+    const NOTIFY_API_KEY = (() => { try { return Deno.env.get("NOTIFY_API_KEY") || ""; } catch(_) { return ""; } })() as string;
+    const TWILIO_ACCOUNT_SID = (() => { try { return Deno.env.get("TWILIO_ACCOUNT_SID") || ""; } catch(_) { return ""; } })() as string;
+    const TWILIO_AUTH_TOKEN = (() => { try { return Deno.env.get("TWILIO_AUTH_TOKEN") || ""; } catch(_) { return ""; } })() as string;
+    const TWILIO_FROM = (() => { try { return Deno.env.get("TWILIO_FROM") || ""; } catch(_) { return ""; } })() as string;
+    const TWILIO_MESSAGING_SERVICE_SID = (() => { try { return Deno.env.get("TWILIO_MESSAGING_SERVICE_SID") || ""; } catch(_) { return ""; } })() as string;
+
+    // safe debug logs (masked)
+    log("Runtime env (masked): SUPABASE_URL:", maskSecret(SUPABASE_URL), "SUPABASE_SERVICE_ROLE_KEY:", maskSecret(SUPABASE_SERVICE_ROLE_KEY), "TWILIO_ACCOUNT_SID:", maskSecret(TWILIO_ACCOUNT_SID));
 
     if (NOTIFY_API_KEY) {
-      // not enforced here by default — consider enforcing in production if needed
-      log("NOTIFY_API_KEY is set (not enforced)");
+      log("NOTIFY_API_KEY is set (not enforced here)");
     }
 
     const { appointment, pdfBase64, pdfFilename, recipients } = body || {};

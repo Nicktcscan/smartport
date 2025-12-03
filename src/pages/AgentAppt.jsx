@@ -422,51 +422,74 @@ function AppointmentPdf({ ticket }) {
   );
 }
 
-// ---------- Utility: callNotifyFunction (tries supabase.functions.invoke then fetch fallback) ----------
+// ---------- Utility: callNotifyFunction (Option C) ----------
+// Try local same-origin proxy first (/api/notify-appointment), then supabase.functions.invoke, then direct fetch
 async function callNotifyFunction(notifyBody) {
-  // try supabase.functions.invoke first (supabase-js v2)
   const stringBody = typeof notifyBody === 'string' ? notifyBody : JSON.stringify(notifyBody);
-  // timeout for fetch fallback
   const FETCH_TIMEOUT = 12000;
 
-  // 1) try supabase.functions.invoke
+  // 0) Try same-origin proxy at /api/notify-appointment (Option C)
+  try {
+    // Attempt same-origin proxy first - reduces CORS issues (proxy should relay server-side)
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
+    try {
+      const res = await fetch('/api/notify-appointment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: stringBody,
+        credentials: 'same-origin',
+        signal: controller.signal,
+      });
+      clearTimeout(id);
+      let json = null;
+      try { json = await res.json().catch(() => null); } catch (_) { json = null; }
+      if (!res.ok) {
+        return { ok: false, status: res.status, error: json || `Proxy returned ${res.status}`, via: 'local-proxy' };
+      }
+      return { ok: true, data: json, via: 'local-proxy' };
+    } catch (e) {
+      clearTimeout(id);
+      // network error or 404 - fall through to other strategies
+      // console.warn('local proxy attempt failed', e);
+    }
+  } catch (e) {
+    // ignore errors here and fall back
+  }
+
+  // 1) Try supabase.functions.invoke if available (client libs, may work without CORS)
   try {
     if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
-      // supabase.functions.invoke expects body string
       try {
+        // supabase.functions.invoke accepts a string body
         const { data, error } = await supabase.functions.invoke('notify-appointment', { body: stringBody });
         if (error) {
-          // return structured error so caller can decide
           return { ok: false, error, data: null, via: 'supabase.functions.invoke' };
         }
         return { ok: true, data, via: 'supabase.functions.invoke' };
       } catch (e) {
-        // fallthrough to fetch fallback
-        console.warn('supabase.functions.invoke failed — falling back to direct fetch', e);
+        // fall through to direct fetch
+        // console.warn('supabase.functions.invoke failed:', e);
       }
     }
   } catch (e) {
-    console.warn('invoke check failed', e);
+    // ignore and continue
   }
 
-  // 2) fetch fallback to functions endpoint
+  // 2) Direct fetch to Supabase Functions endpoint as last resort
   try {
     // Resolve functions base URL:
     let baseUrl = null;
     try {
-      // first try window.__env (if you use runtime env injection)
       if (typeof window !== 'undefined' && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_URL) {
         baseUrl = window.__env.NEXT_PUBLIC_SUPABASE_URL;
       }
-      // then try common next/react env names exposed at build-time
       if (!baseUrl && typeof process !== 'undefined') {
         baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || null;
       }
-      // last resort: try to read from supabase client object
       if (!baseUrl && supabase && (supabase.supabaseUrl || supabase?.url || supabase?.client?.url)) {
         baseUrl = supabase.supabaseUrl || supabase?.url || supabase?.client?.url;
       }
-      // if still not found, try a common helper var
       if (!baseUrl && typeof window !== 'undefined' && window.__env && window.__env.SUPABASE_FUNCTIONS_URL) {
         baseUrl = window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/, '');
       }
@@ -474,17 +497,16 @@ async function callNotifyFunction(notifyBody) {
       // ignore
     }
 
-    // prefer direct functions url if you provided it at build/runtime (e.g. SUPABASE_FUNCTIONS_URL)
     const candidate = (typeof window !== 'undefined' && window.__env && window.__env.SUPABASE_FUNCTIONS_URL)
       ? `${window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'')}/notify-appointment`
       : null;
 
     const functionsUrl = candidate || (baseUrl ? `${baseUrl.replace(/\/+$/,'')}/functions/v1/notify-appointment` : null);
     if (!functionsUrl) {
-      return { ok: false, error: new Error('Functions URL not available (set NEXT_PUBLIC_SUPABASE_URL or window.__env.SUPABASE_FUNCTIONS_URL)'), via: 'fetch' };
+      return { ok: false, error: new Error('Functions URL not available (set NEXT_PUBLIC_SUPABASE_URL or provide /api/notify-appointment proxy)'), via: 'fetch' };
     }
 
-    // get anon key if available (exposed at build-time)
+    // get anon key if available
     let anonKey = null;
     try {
       if (typeof window !== 'undefined' && window.__env && (window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY || window.__env.REACT_APP_SUPABASE_ANON_KEY)) {
@@ -501,7 +523,6 @@ async function callNotifyFunction(notifyBody) {
       headers['apikey'] = anonKey;
     }
 
-    // use AbortController to timeout the fetch
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
 
@@ -1652,7 +1673,7 @@ export default function AgentApptPage() {
         // ignore popup errors
       }
 
-      // ---------- Notify via Supabase Edge Function (robust: invoke() then fetch fallback) ----------
+      // ---------- Notify via Notify function (calls callNotifyFunction which tries proxy -> invoke -> fetch) ----------
       try {
         const notifyBody = {
           appointment: {
