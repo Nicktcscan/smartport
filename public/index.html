@@ -1,7 +1,7 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
+    <meta charset="utf-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
@@ -12,15 +12,18 @@
     <meta name="description" content="SmartPort Weighbridge Management System for port operations and logistics." />
     <meta name="author" content="Nick TC-Scan (Gambia) Ltd" />
 
-    <!-- Icons -->
-    <link rel="icon" type="image/png" href="%PUBLIC_URL%/logo.png" />
-    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo.png" />
+    <!-- Icons (served from public root with Vite) -->
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <link rel="apple-touch-icon" href="/logo.png" />
 
     <!-- Manifest -->
-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" type="application/manifest+json" />
+    <link rel="manifest" href="/manifest.json" type="application/manifest+json" />
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
+
+    <!-- Vite entry -->
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

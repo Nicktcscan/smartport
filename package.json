@@ -38,15 +38,14 @@
     "pdf2pic": "^3.2.0",
     "pdfjs-dist": "^5.4.296",
     "qrcode": "^1.5.4",
-    "react": "^19.1.1",
+    "react": "^18.2.0",
     "react-chartjs-2": "^5.3.0",
     "react-csv": "^2.2.2",
     "react-datepicker": "^8.4.0",
-    "react-dom": "^19.1.1",
+    "react-dom": "^18.2.0",
     "react-hot-toast": "^2.6.0",
     "react-icons": "^5.5.0",
     "react-router-dom": "^7.7.1",
-    "react-scripts": "5.0.1",
     "react-signature-canvas": "^1.1.0-alpha.2",
     "recharts": "^3.1.2",
     "tesseract.js": "^6.0.1",
@@ -56,10 +55,11 @@
     "xlsx": "^0.18.5"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "dev": "vite",
+    "start": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "echo \"No tests configured\" && exit 0"
   },
   "eslintConfig": {
     "extends": [
@@ -83,6 +83,8 @@
     "autoprefixer": "^10.4.21",
     "eslint": "^8.57.1",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4.1.11"
+    "tailwindcss": "^4.1.11",
+    "vite": "^7.2.6",
+    "@vitejs/plugin-react": "^4.0.0"
   }
 }

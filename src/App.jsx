@@ -44,33 +44,21 @@ import AgentDashboard from './pages/AgentDashboard';
 import SADDeclaration from './pages/SADDeclaration';
 import Settings from './pages/Settings';
 
-// NEW: Appointment page (public route)
-
-/**
- * ProtectedRoute
- * - children: react node
- * - allowedRoles: array|string of allowed roles (e.g. ['admin','weighbridge'])
- *
- * Behavior:
- * - If not authenticated -> redirect to /login
- * - If authenticated but role not allowed -> redirect to a sensible landing based on role
- */
+// ProtectedRoute component (keeps your original behavior)
 const ProtectedRoute = ({ children, allowedRoles = [] }) => {
   const { user } = useAuth();
 
   if (!user) return <Navigate to="/login" replace />;
 
-  // normalize allowedRoles and user role
   const allowed = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
   const userRole = typeof user.role === 'string' ? user.role : (user.role && user.role[0]) || '';
 
-  // if allowed is empty, treat as no restriction (but avoid accidental openness)
+  // if allowed is empty treat as no restriction
   if (allowed.length === 0) {
     return children;
   }
 
   if (!allowed.includes(userRole)) {
-    // fallback redirection based on role
     switch (userRole) {
       case 'admin':
         return <Navigate to="/admin" replace />;
@@ -96,7 +84,6 @@ function App() {
   const { user, loading } = useAuth();
   const location = useLocation();
 
-  // While AuthContext is determining session, show a centered loading spinner.
   if (loading) {
     return (
       <Center minH="100vh" bg="gray.50" p={4}>
@@ -108,7 +95,6 @@ function App() {
     );
   }
 
-  // Helper to detect if path is a static asset (file extensions) - case-insensitive
   const isStaticAsset = !!location.pathname.match(/\.(js|css|png|jpg|jpeg|gif|ico|json|svg|txt|woff|woff2|ttf|eot|map)$/i);
 
   return (
@@ -117,7 +103,7 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
 
-          {/* Public Appointment route: accessible without login, rendered standalone (no Layout/Header) */}
+          {/* Public Appointment route: accessible without login */}
           <Route path="/appointment" element={<Appointment />} />
 
           <Route
@@ -131,7 +117,6 @@ function App() {
             }
           />
 
-          {/* If user is not authenticated and path is not a static asset, redirect to login */}
           <Route
             path="*"
             element={isStaticAsset ? null : <Navigate to="/login" replace />}
@@ -139,7 +124,6 @@ function App() {
         </Routes>
       ) : (
         <>
-          {/* Hide global Header when viewing the public-style appointment page */}
           {location.pathname !== '/appointment' && <Header />}
 
           <Routes>
@@ -164,7 +148,7 @@ function App() {
               }
             />
 
-            {/* Make Appointment accessible to logged-in users too (standalone, no Layout/Header) */}
+            {/* Make Appointment accessible to logged-in users too */}
             <Route path="/appointment" element={<Appointment />} />
 
             {/* Weighbridge */}
