@@ -21,11 +21,11 @@ if (!rootEl) {
 createRoot(rootEl).render(
   <React.StrictMode>
     <ChakraProvider>
-      <AuthProvider>
         <BrowserRouter>
+        <AuthProvider>
           <App />
+        </AuthProvider>
         </BrowserRouter>
-      </AuthProvider>
     </ChakraProvider>
   </React.StrictMode>
 );

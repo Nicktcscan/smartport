@@ -26,7 +26,6 @@ import ExitTrucks from './pages/ExitTrucks';
 import Finance from './pages/FinanceDashboard';
 import FinanceSAD from './pages/FinanceSAD';
 import Appointments from './pages/Appointments';
-import Appointment from './pages/appointment';
 import AgentSAD from './pages/AgentSAD';
 import AgentAppt from './pages/AgentAppt';
 import AgentApptsCreated from './pages/AgentApptscreated';
@@ -104,7 +103,6 @@ function App() {
           <Route path="/login" element={<Login />} />
 
           {/* Public Appointment route: accessible without login */}
-          <Route path="/appointment" element={<Appointment />} />
 
           <Route
             path="/register"

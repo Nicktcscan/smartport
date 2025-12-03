@@ -20,13 +20,38 @@ const AuthContext = createContext();
  * - Starts inactivity timer (auto-logout)
  * - Listens to auth state changes from Supabase while avoiding noisy re-resolves
  *
- * Key fix:
- * - Avoid duplicate inserts into `users` when a row with the same email exists under a different id.
- * - If a users row is missing for the current user id, check by email first. If an existing email-row is found,
- *   use its role rather than attempting to blindly insert and risk a unique constraint error.
+ * Safe navigation:
+ * - We attempt to call useNavigate(). If the component is mounted outside a Router,
+ *   useNavigate() will throw; we catch that and provide a stable fallback that uses
+ *   window.location (replace or assign).
  */
 export const AuthProvider = ({ children }) => {
-  const navigate = useNavigate();
+  // Attempt to obtain react-router navigate; if it throws (no Router), fallback.
+  let navAttempt = null;
+  try {
+    // This may throw if we're not inside a Router — that's fine, we'll catch.
+    navAttempt = useNavigate();
+  } catch (e) {
+    navAttempt = null;
+  }
+
+  // store a stable ref to the navigation function (either react-router's or a fallback)
+  const navigateRef = useRef(
+    navAttempt ||
+      ((path, opts = {}) => {
+        try {
+          if (typeof window !== 'undefined') {
+            if (opts && opts.replace) {
+              window.location.replace(path);
+            } else {
+              window.location.href = path;
+            }
+          }
+        } catch (err) {
+          // ignore
+        }
+      })
+  );
 
   // application user object (null when unauthenticated)
   const [user, setUser] = useState(null);
@@ -42,30 +67,28 @@ export const AuthProvider = ({ children }) => {
   const lastResolvedUserRef = useRef({ id: null, role: null });
 
   // Helper: navigate to role's landing page (use replace to avoid polluting history)
-  const redirectToDashboard = useCallback(
-    (role) => {
-      switch (role) {
-        case 'admin':
-          navigate('/admin', { replace: true });
-          break;
-        case 'customs':
-          navigate('/customs', { replace: true });
-          break;
-        case 'agent':
-          navigate('/agent', { replace: true });
-          break;
-        case 'outgate':
-          navigate('/outgate', { replace: true });
-          break;
-        case 'weighbridge':
-          navigate('/dashboard', { replace: true });
-          break;
-        default:
-          navigate('/', { replace: true });
-      }
-    },
-    [navigate]
-  );
+  const redirectToDashboard = useCallback((role) => {
+    const navigate = navigateRef.current;
+    switch (role) {
+      case 'admin':
+        navigate('/admin', { replace: true });
+        break;
+      case 'customs':
+        navigate('/customs', { replace: true });
+        break;
+      case 'agent':
+        navigate('/agent', { replace: true });
+        break;
+      case 'outgate':
+        navigate('/outgate', { replace: true });
+        break;
+      case 'weighbridge':
+        navigate('/dashboard', { replace: true });
+        break;
+      default:
+        navigate('/', { replace: true });
+    }
+  }, []); // stable: uses navigateRef which is a ref (stable)
 
   // Logout helper: sets local cleanup, signs out at Supabase, and navigates to login.
   const logout = useCallback(async () => {
@@ -92,14 +115,14 @@ export const AuthProvider = ({ children }) => {
 
     // navigate to login (replace so Back doesn't return to restricted page)
     try {
-      navigate('/login', { replace: true });
+      navigateRef.current('/login', { replace: true });
     } catch (e) {
       // ignore navigation errors
     }
 
     // allow future sign-outs to proceed
     justLoggedOutRef.current = false;
-  }, [navigate]);
+  }, []);
 
   // Resets the inactivity timer (30 minutes by default)
   const resetInactivityTimer = useCallback(() => {
@@ -205,6 +228,7 @@ export const AuthProvider = ({ children }) => {
               );
             } catch (e) {}
           }
+          setLoading(false);
           return;
         }
 
@@ -357,7 +381,7 @@ export const AuthProvider = ({ children }) => {
           localStorage.removeItem('user');
         } catch (e) {}
         try {
-          navigate('/login', { replace: true });
+          navigateRef.current('/login', { replace: true });
         } catch (e) {
           // ignore
         }
@@ -388,9 +412,9 @@ export const AuthProvider = ({ children }) => {
       }
       clearTimeout(timeoutRef.current);
     };
-    // intentionally minimal dependency array; setUserOnly, logout and navigate are stable callbacks
+    // intentionally minimal dependency array; setUserOnly and logout are stable callbacks
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setUserOnly, logout, navigate]);
+  }, [setUserOnly, logout]);
 
   // Activity listeners to reset inactivity timer
   useEffect(() => {

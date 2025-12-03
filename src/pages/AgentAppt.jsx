@@ -1,5 +1,4 @@
 /* eslint-disable no-useless-escape */
-/* eslint-disable no-dupe-keys */
 /* eslint-disable react/jsx-no-undef */
 // pages/AgentAppt.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -1283,7 +1282,6 @@ export default function AgentApptPage() {
           // even if fetch failed, return data based on inserted values (including barcode_payload)
           return {
             appointment: {
-              id: appointmentId,
               appointmentNumber,
               weighbridgeNumber,
               warehouse: appointmentInsert.warehouse_location,
@@ -1323,7 +1321,6 @@ export default function AgentApptPage() {
             totalDocumentedWeight: fullAppointment.total_documented_weight,
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
-            id: fullAppointment.id,
             barcode_payload: fullAppointment.barcode_payload || appointmentInsert.barcode_payload || '',
           }
         };
