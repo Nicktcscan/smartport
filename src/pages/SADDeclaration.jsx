@@ -139,6 +139,11 @@ export default function SADDeclaration() {
   const [completeTarget, setCompleteTarget] = useState(null);
   const completeCancelRef = useRef();
 
+  // delete confirm
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const deleteCancelRef = useRef();
+
   const [activity, setActivity] = useState([]);
 
   // realtime
@@ -338,20 +343,52 @@ export default function SADDeclaration() {
     return uploaded;
   };
 
+  // --- validation for registration form (all mandatory) ---
+  const isRegistrationValid = () => {
+    const sadNoTrim = String(sadNo || '').trim();
+    if (!sadNoTrim) return false;
+    if (!regime) return false;
+    const declStr = parseNumberString(declaredWeight);
+    if (!declStr) return false;
+    const declNum = Number(declStr);
+    if (!Number.isFinite(declNum) || declNum <= 0) return false;
+    if (!docs || docs.length === 0) return false;
+    return true;
+  };
+
   // create SAD - now storing regime as code (IM4/EX1/IM7)
   const handleCreateSAD = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!sadNo || !declaredWeight) {
-      toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
+
+    // enforce mandatory fields
+    const sadNoTrim = String(sadNo || '').trim();
+    const declStr = parseNumberString(declaredWeight);
+    const declNum = declStr === '' ? NaN : Number(declStr);
+
+    if (!sadNoTrim) {
+      toast({ title: 'Missing SAD number', description: 'SAD Number is required', status: 'warning' });
       return;
     }
+    if (!regime) {
+      toast({ title: 'Missing regime', description: 'Regime is required', status: 'warning' });
+      return;
+    }
+    if (!declStr || !Number.isFinite(declNum) || declNum <= 0) {
+      toast({ title: 'Invalid declared weight', description: 'Declared Weight (kg) must be a number greater than 0', status: 'warning' });
+      return;
+    }
+    if (!docs || docs.length === 0) {
+      toast({ title: 'Missing documents', description: 'Attach at least one document', status: 'warning' });
+      return;
+    }
+
     setLoading(true);
     try {
       const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
-      const docRecords = await uploadDocs(sadNo, docs);
-      const trimmedSad = String(sadNo).trim();
+      const docRecords = await uploadDocs(sadNoTrim, docs);
+      const trimmedSad = sadNoTrim;
 
-      // regime conversion if user typed a word
+      // regime conversion if user typed a word (shouldn't be necessary since select forces codes)
       let regimeCode = regime;
       if (!regimeCode && typeof regime === 'string') {
         const low = regime.trim().toLowerCase();
@@ -361,7 +398,7 @@ export default function SADDeclaration() {
       const payload = {
         sad_no: trimmedSad,
         regime: regimeCode || null,
-        declared_weight: Number(parseNumberString(declaredWeight) || 0),
+        declared_weight: Number(declNum || 0),
         docs: docRecords,
         status: 'In Progress',
         manual_update: false,
@@ -632,6 +669,67 @@ export default function SADDeclaration() {
       toast({ title: 'Archive failed', description: err?.message || 'Unexpected', status: 'error' });
     } finally {
       setArchiveOpen(false); setArchiveTarget(null);
+    }
+  };
+
+  // --- DELETE SAD (admin) ---
+  const requestDeleteSad = (sad_no) => { setDeleteTarget(sad_no); setDeleteOpen(true); };
+
+  const confirmDeleteSad = async () => {
+    const target = deleteTarget;
+    setDeleteOpen(false);
+    setDeleteTarget(null);
+    if (!target) return;
+
+    setLoading(true);
+    try {
+      // 1) Attempt to fetch the SAD row to get docs paths (best-effort)
+      let sadRow = null;
+      try {
+        const { data, error } = await supabase.from('sad_declarations').select('*').eq('sad_no', target).maybeSingle();
+        if (!error && data) sadRow = data;
+      } catch (e) {
+        console.warn('could not fetch sad row before delete', e);
+      }
+
+      // 2) Remove attached documents from storage (best-effort)
+      try {
+        if (sadRow && Array.isArray(sadRow.docs) && sadRow.docs.length) {
+          const paths = sadRow.docs.map(d => d.path).filter(Boolean);
+          if (paths.length) {
+            // Supabase storage remove expects array of paths
+            const { error: rmErr } = await supabase.storage.from(SAD_DOCS_BUCKET).remove(paths);
+            if (rmErr) console.warn('could not remove some docs from storage', rmErr);
+          }
+        }
+      } catch (e) {
+        console.warn('error removing docs from storage', e);
+      }
+
+      // 3) Delete child tickets and reports_generated (best-effort)
+      try {
+        const { error: tErr } = await supabase.from('tickets').delete().eq('sad_no', target);
+        if (tErr) console.warn('could not delete tickets for sad', tErr);
+      } catch (e) { console.warn('tickets delete error', e); }
+
+      try {
+        const { error: rErr } = await supabase.from('reports_generated').delete().eq('sad_no', target);
+        if (rErr) console.warn('could not delete reports_generated for sad', rErr);
+      } catch (e) { console.warn('reports_generated delete error', e); }
+
+      // 4) Delete the sad_declarations row
+      const { error } = await supabase.from('sad_declarations').delete().eq('sad_no', target);
+      if (error) throw error;
+
+      await pushActivity(`Deleted SAD ${target}`);
+      toast({ title: 'Deleted', description: `SAD ${target} has been deleted`, status: 'success' });
+      fetchSADs();
+    } catch (err) {
+      console.error('confirmDeleteSad', err);
+      toast({ title: 'Delete failed', description: err?.message || 'Could not delete SAD', status: 'error' });
+      fetchSADs();
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -958,6 +1056,7 @@ export default function SADDeclaration() {
 `;
 
   const RowMotion = motion(Tr);
+  const createDisabled = !isRegistrationValid();
 
   return (
     <Container maxW="8xl" py={6} className="sad-container">
@@ -1000,14 +1099,14 @@ export default function SADDeclaration() {
 
       {/* Inline create form */}
       <Box as="form" onSubmit={(e) => { e.preventDefault(); handleCreateSAD(); }} bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
-        <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
+        <Text fontWeight="semibold" mb={2}>Register a new SAD (all fields mandatory)</Text>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>SAD Number</FormLabel>
             <Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} placeholder="e.g. 25" />
           </FormControl>
 
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>Regime</FormLabel>
             <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
               {REGIME_OPTIONS.map(code => (
@@ -1018,12 +1117,12 @@ export default function SADDeclaration() {
             </Select>
           </FormControl>
 
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>Declared Weight (kg)</FormLabel>
             <Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} placeholder="e.g. 100000" />
           </FormControl>
 
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>Attach Docs</FormLabel>
             <Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} />
             <Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text>
@@ -1031,7 +1130,7 @@ export default function SADDeclaration() {
         </SimpleGrid>
 
         <HStack mt={3}>
-          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button">Register SAD</Button>
+          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button" isDisabled={createDisabled}>Register SAD</Button>
           <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
 
           <Box ml="auto" display="flex" gap={2}>
@@ -1157,6 +1256,7 @@ export default function SADDeclaration() {
                               <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
                               <MenuDivider />
                               <MenuItem icon={<FaTrashAlt />} onClick={() => { setArchiveTarget(s.sad_no); setArchiveOpen(true); }}>Archive SAD</MenuItem>
+                              <MenuItem icon={<FaTrashAlt />} onClick={() => requestDeleteSad(s.sad_no)} style={{ color: '#b91c1c' }}>Delete SAD</MenuItem>
                             </MenuList>
                           </Menu>
                         </HStack>
@@ -1381,6 +1481,20 @@ export default function SADDeclaration() {
         </AlertDialogOverlay>
       </AlertDialog>
 
+      {/* Delete confirm */}
+      <AlertDialog isOpen={deleteOpen} leastDestructiveRef={deleteCancelRef} onClose={() => setDeleteOpen(false)}>
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Delete SAD</AlertDialogHeader>
+            <AlertDialogBody>Are you absolutely sure you want to permanently delete SAD {deleteTarget}? This will remove the SAD row and associated tickets/reports (best-effort). This action cannot be undone.</AlertDialogBody>
+            <AlertDialogFooter>
+              <Button ref={deleteCancelRef} onClick={() => setDeleteOpen(false)} type="button">Cancel</Button>
+              <Button colorScheme="red" onClick={confirmDeleteSad} ml={3} type="button">Yes, delete</Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
+
       {/* Docs modal */}
       <Modal isOpen={docsModal.open} onClose={() => setDocsModal({ open: false, docs: [], sad_no: null })} size="lg" scrollBehavior="inside">
         <ModalOverlay />
@@ -1445,21 +1559,21 @@ export default function SADDeclaration() {
               <Box style={{ width: 48, height: 48, borderRadius: 12, background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
                 ✨
               </Box>
-              <Box><Text fontWeight="bold">Create New SAD</Text><Text fontSize="sm" color="gray.500">Holographic registration</Text></Box>
+              <Box><Text fontWeight="bold">Create New SAD</Text><Text fontSize="sm" color="gray.500">Holographic registration (all fields mandatory)</Text></Box>
             </Flex>
           </ModalHeader>
           <ModalCloseButton />
           <ModalBody>
             <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-              <FormControl><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
-              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
-              <FormControl><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
-              <FormControl><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
+              <FormControl isRequired><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
+              <FormControl isRequired><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
+              <FormControl isRequired><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
+              <FormControl isRequired><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
             </SimpleGrid>
           </ModalBody>
           <ModalFooter>
             <Button variant="ghost" onClick={closeOrb}>Cancel</Button>
-            <Button colorScheme="teal" ml={3} onClick={handleCreateSAD} isLoading={loading}>Create SAD</Button>
+            <Button colorScheme="teal" ml={3} onClick={handleCreateSAD} isLoading={loading} isDisabled={createDisabled}>Create SAD</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>

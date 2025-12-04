@@ -1,4 +1,5 @@
 /* eslint-disable no-useless-escape */
+/* eslint-disable no-dupe-keys */
 /* eslint-disable react/jsx-no-undef */
 // pages/AgentAppt.jsx
 import { useState, useEffect, useMemo, useRef } from 'react';
@@ -30,32 +31,6 @@ import gnswlogo from '../assets/gnswlogo.png';
 import logo from '../assets/logo.png';
 import MonoFont from '../assets/RobotoMono-Regular.ttf';
 Font.register({ family: 'Mono', src: MonoFont });
-
-// ---------- Browser polyfills & safe plugin registration ----------
-
-// Buffer polyfill for browser (avoids "Buffer is not defined")
-if (typeof window !== 'undefined') {
-  // dynamic import to avoid bundler issues if buffer isn't available server-side
-  import('buffer').then(mod => {
-    try { window.Buffer = mod.Buffer; } catch (e) { /* ignore */ }
-  }).catch(() => { /* ignore */ });
-}
-
-// Attempt safe Chart.js Filler registration (no-op if Chart isn't present)
-if (typeof window !== 'undefined') {
-  (async () => {
-    try {
-      const ChartModule = await import('chart.js');
-      const Chart = ChartModule.Chart || ChartModule.default || ChartModule;
-      const Filler = ChartModule.Filler || ChartModule.filler || ChartModule.plugins?.filler;
-      if (Chart && Filler && typeof Chart.register === 'function') {
-        try { Chart.register(Filler); } catch (e) { /* ignore registration errors */ }
-      }
-    } catch (e) {
-      // Chart not present or failed to register — ignore, this is defensive only
-    }
-  })();
-}
 
 // ---------- Config ----------
 const WAREHOUSES = [
@@ -133,7 +108,7 @@ const pdfStyles = StyleSheet.create({
   },
 });
 
-// ---------- Barcode generator (Code39 via JsBarcode) ----------
+// ---------- Barcode generator helpers ----------
 async function ensureJsBarcodeLoaded() {
   if (typeof window === 'undefined') return;
   if (window.JsBarcode) return;
@@ -180,16 +155,11 @@ async function generateFallbackDataUrl(payloadStr, width = 420, height = 48) {
     canvas.width = Math.round(width);
     canvas.height = Math.round(height);
     const ctx = canvas.getContext('2d');
-    // white background
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // draw a black rectangle to mimic a barcode area
     ctx.fillStyle = '#000';
     const pad = 6;
     ctx.fillRect(pad, pad, canvas.width - pad * 2, canvas.height - pad * 2);
-
-    // overlay payload as white text (centered)
     ctx.fillStyle = '#fff';
     const fontSize = Math.max(10, Math.floor((canvas.height - pad * 2) * 0.35));
     ctx.font = `${fontSize}px monospace`;
@@ -197,7 +167,6 @@ async function generateFallbackDataUrl(payloadStr, width = 420, height = 48) {
     ctx.textAlign = 'center';
     const txt = String(payloadStr || '').toUpperCase();
     ctx.fillText(txt, canvas.width / 2, canvas.height / 2);
-
     return canvas.toDataURL('image/png');
   } catch (e) {
     console.warn('generateFallbackDataUrl failed', e);
@@ -274,25 +243,30 @@ async function triggerConfetti(count = 140) {
   }
 }
 
-// ---------- Helper: ensure Gambian country code +220 ----------
-function formatPhone(raw) {
-  if (!raw) return '';
-  let s = String(raw || '').trim();
-  // keep leading + if present
-  if (s.startsWith('+')) {
-    // normalize to remove spaces/dashes
-    return '+' + s.slice(1).replace(/[^\d]/g, '');
+// ---------- Phone normalization helper (auto-saves +220) ----------
+function normalizePhone(input) {
+  const s = String(input || '').trim();
+  if (!s) return '';
+  // remove non-digits except leading +
+  let digits = s.replace(/[^\d+]/g, '');
+  // if it begins with '+' keep it, else strip non-digits
+  if (digits.startsWith('+')) {
+    digits = digits.slice(1).replace(/\D/g, '');
+  } else {
+    digits = digits.replace(/\D/g, '');
   }
-  // remove non-digits
-  s = s.replace(/[^\d]/g, '');
-  // remove leading zeros
-  s = s.replace(/^0+/, '');
-  // if already starts with country code 220
-  if (s.startsWith('220')) {
-    return '+' + s;
+  if (!digits) return '';
+  // handle various forms:
+  if (digits.startsWith('00220')) return `+${digits.slice(2)}`; // 00220...
+  if (digits.startsWith('220')) return `+${digits}`; // 220...
+  if (digits.startsWith('0')) {
+    // local form: 0xxxxxxx -> drop 0 and prefix +220
+    return `+220${digits.slice(1)}`;
   }
-  // otherwise prefix with +220
-  return '+220' + s;
+  // if length looks local (<=8 or 7) assume local number without 0 -> prefix +220
+  if (digits.length <= 8) return `+220${digits}`;
+  // otherwise if already has country but missing plus:
+  return `+${digits}`;
 }
 
 // ---------- PDF component ----------
@@ -352,7 +326,7 @@ function AppointmentPdf({ ticket }) {
               <PdfText style={pdfStyles.label}>Warehouse :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.warehouse}</PdfText>
 
-              <PdfText style={pdfStyles.label}>Pick-up Date :</PdfText>
+              <PdfText style={pdfStyles.label}>Discharge Date :</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.pickupDate}</PdfText>
 
               <PdfText style={pdfStyles.label}>Consolidated :</PdfText>
@@ -367,7 +341,7 @@ function AppointmentPdf({ ticket }) {
             </PdfView>
 
             <PdfView style={{ width: '48%', zIndex: 3 }}>
-              <PdfText style={pdfStyles.label}>Driver License :</PdfText>
+              <PdfText style={pdfStyles.label}>Driver's Phone:</PdfText>
               <PdfText style={pdfStyles.value}>{ticketData.driverLicense}</PdfText>
             </PdfView>
           </PdfView>
@@ -421,133 +395,6 @@ function AppointmentPdf({ ticket }) {
   );
 }
 
-// ---------- Utility: callNotifyFunction (Option C) ----------
-// Try local same-origin proxy first (/api/notify-appointment), then supabase.functions.invoke, then direct fetch
-async function callNotifyFunction(notifyBody) {
-  const stringBody = typeof notifyBody === 'string' ? notifyBody : JSON.stringify(notifyBody);
-  const FETCH_TIMEOUT = 12000;
-
-  // 0) Try same-origin proxy at /api/notify-appointment (Option C)
-  try {
-    // Attempt same-origin proxy first - reduces CORS issues (proxy should relay server-side)
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-    try {
-      const res = await fetch('/api/notify-appointment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: stringBody,
-        credentials: 'same-origin',
-        signal: controller.signal,
-      });
-      clearTimeout(id);
-      let json = null;
-      try { json = await res.json().catch(() => null); } catch (_) { json = null; }
-      if (!res.ok) {
-        return { ok: false, status: res.status, error: json || `Proxy returned ${res.status}`, via: 'local-proxy' };
-      }
-      return { ok: true, data: json, via: 'local-proxy' };
-    } catch (e) {
-      clearTimeout(id);
-      // network error or 404 - fall through to other strategies
-      // console.warn('local proxy attempt failed', e);
-    }
-  } catch (e) {
-    // ignore errors here and fall back
-  }
-
-  // 1) Try supabase.functions.invoke if available (client libs, may work without CORS)
-  try {
-    if (supabase && supabase.functions && typeof supabase.functions.invoke === 'function') {
-      try {
-        // supabase.functions.invoke accepts a string body
-        const { data, error } = await supabase.functions.invoke('notify-appointment', { body: stringBody });
-        if (error) {
-          return { ok: false, error, data: null, via: 'supabase.functions.invoke' };
-        }
-        return { ok: true, data, via: 'supabase.functions.invoke' };
-      } catch (e) {
-        // fall through to direct fetch
-        // console.warn('supabase.functions.invoke failed:', e);
-      }
-    }
-  } catch (e) {
-    // ignore and continue
-  }
-
-  // 2) Direct fetch to Supabase Functions endpoint as last resort
-  try {
-    // Resolve functions base URL:
-    let baseUrl = null;
-    try {
-      if (typeof window !== 'undefined' && window.__env && window.__env.NEXT_PUBLIC_SUPABASE_URL) {
-        baseUrl = window.__env.NEXT_PUBLIC_SUPABASE_URL;
-      }
-      if (!baseUrl && typeof process !== 'undefined') {
-        baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || null;
-      }
-      if (!baseUrl && supabase && (supabase.supabaseUrl || supabase?.url || supabase?.client?.url)) {
-        baseUrl = supabase.supabaseUrl || supabase?.url || supabase?.client?.url;
-      }
-      if (!baseUrl && typeof window !== 'undefined' && window.__env && window.__env.SUPABASE_FUNCTIONS_URL) {
-        baseUrl = window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/, '');
-      }
-    } catch (e) {
-      // ignore
-    }
-
-    const candidate = (typeof window !== 'undefined' && window.__env && window.__env.SUPABASE_FUNCTIONS_URL)
-      ? `${window.__env.SUPABASE_FUNCTIONS_URL.replace(/\/+$/,'')}/notify-appointment`
-      : null;
-
-    const functionsUrl = candidate || (baseUrl ? `${baseUrl.replace(/\/+$/,'')}/functions/v1/notify-appointment` : null);
-    if (!functionsUrl) {
-      return { ok: false, error: new Error('Functions URL not available (set NEXT_PUBLIC_SUPABASE_URL or provide /api/notify-appointment proxy)'), via: 'fetch' };
-    }
-
-    // get anon key if available
-    let anonKey = null;
-    try {
-      if (typeof window !== 'undefined' && window.__env && (window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY || window.__env.REACT_APP_SUPABASE_ANON_KEY)) {
-        anonKey = window.__env.NEXT_PUBLIC_SUPABASE_ANON_KEY || window.__env.REACT_APP_SUPABASE_ANON_KEY;
-      }
-      if (!anonKey && typeof process !== 'undefined') {
-        anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.REACT_APP_SUPABASE_ANON_KEY || null;
-      }
-    } catch (e) { /* ignore */ }
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (anonKey) {
-      headers['Authorization'] = `Bearer ${anonKey}`;
-      headers['apikey'] = anonKey;
-    }
-
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), FETCH_TIMEOUT);
-
-    const res = await fetch(functionsUrl, {
-      method: 'POST',
-      headers,
-      body: stringBody,
-      mode: 'cors',
-      credentials: 'omit',
-      signal: controller.signal,
-    });
-
-    clearTimeout(id);
-
-    let json = null;
-    try { json = await res.json().catch(() => null); } catch (_) { json = null; }
-
-    if (!res.ok) {
-      return { ok: false, status: res.status, error: json || `Function returned ${res.status}`, via: 'fetch' };
-    }
-    return { ok: true, data: json, via: 'fetch' };
-  } catch (e) {
-    return { ok: false, error: e, via: 'fetch' };
-  }
-}
-
 // ---------- Main page component ----------
 export default function AgentApptPage() {
   const toast = useToast();
@@ -561,7 +408,7 @@ export default function AgentApptPage() {
   const [consolidated, setConsolidated] = useState('N');
   const [truckNumber, setTruckNumber] = useState('');
   const [driverName, setDriverName] = useState('');
-  const [driverLicense, setDriverLicense] = useState(''); // actually phone
+  const [driverLicense, setDriverLicense] = useState(''); // visible phone input (user may enter local number)
 
   const [t1s, setT1s] = useState([]);
   const [isT1ModalOpen, setT1ModalOpen] = useState(false);
@@ -611,10 +458,6 @@ export default function AgentApptPage() {
 
   // promise resolver ref so ensureDriverRegistered can await registration
   const regPromiseRef = useRef(null);
-
-  // ---------- NEW: Created Popup state (per your earlier request) ----------
-  const [createdPopupOpen, setCreatedPopupOpen] = useState(false);
-  const [createdPopupInfo, setCreatedPopupInfo] = useState({ appointmentNumber: '', driverPhone: '' });
 
   // utility UI highlights
   const pulseRow = (index) => {
@@ -856,6 +699,10 @@ export default function AgentApptPage() {
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
   // ---------- NEW: driver name & phone check logic (debounced) ----------
+  //  - if exact driver name exists -> autopopulate phone
+  //  - if phone exists -> autopopulate name (if driverName empty); if name differs -> friendly message and block
+  //  - if both name+phone entered and not registered -> open quick-register modal (which now returns a Promise and continues)
+
   useEffect(() => {
     // watch driverName and attempt to auto-fill phone when exact match exists
     const nm = String(driverName || '').trim();
@@ -870,6 +717,7 @@ export default function AgentApptPage() {
     if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
     driverCheckTimerRef.current = setTimeout(async () => {
       try {
+        // case-insensitive exact-ish match (use ilike)
         const { data, error } = await supabase
           .from('drivers')
           .select('*')
@@ -889,7 +737,7 @@ export default function AgentApptPage() {
           setFoundDriver(drv);
           setDriverRegistered(true);
           if (drv.phone) {
-            setDriverLicense(drv.phone);
+            setDriverLicense(drv.phone); // show stored normalized phone
           }
           setDriverCheckStatus('exists');
         } else {
@@ -920,7 +768,9 @@ export default function AgentApptPage() {
     if (driverCheckTimerRef.current) clearTimeout(driverCheckTimerRef.current);
     driverCheckTimerRef.current = setTimeout(async () => {
       try {
-        const normalized = formatPhone(ph);
+        const normalized = normalizePhone(ph);
+        if (!normalized) { setDriverCheckStatus(null); return; }
+
         const { data, error } = await supabase
           .from('drivers')
           .select('*')
@@ -934,15 +784,19 @@ export default function AgentApptPage() {
         }
 
         if (data) {
+          // found by phone
           const drv = data;
           setFoundDriver(drv);
 
+          // Auto-populate name when driverName is empty (symmetry)
           if (!driverName || String(driverName).trim().length === 0) {
             if (drv.name) setDriverName(drv.name);
             setDriverRegistered(true);
             setDriverCheckStatus('exists');
-            setDriverLicense(drv.phone);
+            // ensure visible phone shows normalized stored version
+            setDriverLicense(drv.phone || normalized);
           } else {
+            // if a name is already typed and doesn't match the record -> block & inform
             if (String((drv.name || '').trim()).toLowerCase() !== String((driverName || '').trim()).toLowerCase()) {
               setDriverRegistered(false);
               setDriverCheckStatus('phone_taken');
@@ -953,12 +807,14 @@ export default function AgentApptPage() {
                 duration: 8000,
               });
             } else {
+              // names match (case-insensitive) -> OK
               setDriverRegistered(true);
               setDriverCheckStatus('exists');
-              setDriverLicense(drv.phone);
+              setDriverLicense(drv.phone || normalized);
             }
           }
         } else {
+          // no driver with that phone
           setFoundDriver(null);
           setDriverRegistered(false);
           setDriverCheckStatus('not_found');
@@ -975,29 +831,36 @@ export default function AgentApptPage() {
   }, [driverLicense, driverName, toast]);
 
   // ---------- helper run before opening Confirm: ensure driver registration ----------
+  // returns a Promise that resolves { ok: true, driver } or { ok: false, reason }
   async function ensureDriverRegistered() {
     const name = String(driverName || '').trim();
-    const phone = String(driverLicense || '').trim();
-
-    if (!name || !phone) {
+    const phoneRaw = String(driverLicense || '').trim();
+    if (!name || !phoneRaw) {
       toast({ status: 'error', title: 'Driver name & phone required', description: 'Please fill both driver name and phone number' });
       return { ok: false, reason: 'missing' };
     }
 
-    try {
-      const normalizedPhone = formatPhone(phone);
+    const phone = normalizePhone(phoneRaw);
+    if (!phone) {
+      toast({ status: 'error', title: 'Invalid phone', description: 'Please enter a valid phone number' });
+      return { ok: false, reason: 'invalid_phone' };
+    }
 
-      // check by phone first
-      const { data: byPhone, error: phoneErr } = await supabase.from('drivers').select('*').eq('phone', normalizedPhone).maybeSingle();
+    try {
+      // check by phone first (normalized)
+      const { data: byPhone, error: phoneErr } = await supabase.from('drivers').select('*').eq('phone', phone).maybeSingle();
       if (phoneErr) console.warn('ensureDriverRegistered phoneErr', phoneErr);
 
       if (byPhone) {
+        // phone exists
         if (String((byPhone.name || '').trim()).toLowerCase() === name.toLowerCase()) {
           setFoundDriver(byPhone);
           setDriverRegistered(true);
-          setDriverLicense(byPhone.phone || normalizedPhone);
+          // ensure visible phone shows normalized
+          setDriverLicense(byPhone.phone || phone);
           return { ok: true, driver: byPhone };
         }
+        // phone used by another driver -> block
         setDriverCheckStatus('phone_taken');
         toast({ status: 'error', title: 'Phone already exists', description: 'This phone number exists for another driver — please use the registered driver.' });
         return { ok: false, reason: 'phone_taken' };
@@ -1007,9 +870,9 @@ export default function AgentApptPage() {
       const { error: nameErr } = await supabase.from('drivers').select('*').ilike('name', name).limit(5);
       if (nameErr) console.warn('ensureDriverRegistered nameErr', nameErr);
 
-      // prepare modal values for quick register
+      // prepare quick-register modal with normalized phone prefilled
       setRegName(name);
-      setRegPhone(normalizedPhone);
+      setRegPhone(phone);
       setRegLicense('');
       setRegPhotoFile(null);
 
@@ -1036,11 +899,15 @@ export default function AgentApptPage() {
       return;
     }
 
+    const phone = normalizePhone(phoneRaw);
+    if (!phone) {
+      toast({ status: 'error', title: 'Invalid phone', description: 'Please enter a valid phone number' });
+      return;
+    }
+
     setIsRegisteringDriver(true);
 
     try {
-      const normalizedPhone = formatPhone(phoneRaw);
-
       // Attempt to upload photo first (if provided)
       let photoUrl = null;
       if (regPhotoFile) {
@@ -1048,33 +915,28 @@ export default function AgentApptPage() {
           const safeName = name.replace(/[^a-z0-9\-_\s]/gi, '').replace(/\s+/g, '-').toLowerCase().slice(0, 40);
           const ext = (regPhotoFile.name || '').split('.').pop() || 'jpg';
           const path = `drivers/${Date.now()}-${safeName}.${ext}`;
-          try {
-            const { error: uploadErr } = await supabase.storage.from('drivers').upload(path, regPhotoFile, { upsert: true, contentType: regPhotoFile.type });
-            if (uploadErr) {
-              console.warn('driver photo upload failed', uploadErr);
-              toast({ status: 'warning', title: 'Photo upload failed', description: 'Driver will be created without photo.' });
-            } else {
-              try {
-                const { data: urlData } = supabase.storage.from('drivers').getPublicUrl(path);
-                photoUrl = urlData?.publicUrl || null;
-              } catch (ee) {
-                try {
-                  const { data: signedData } = await supabase.storage.from('drivers').createSignedUrl(path, 60 * 60);
-                  photoUrl = signedData?.signedUrl || null;
-                } catch (e2) { /* ignore */ }
-              }
-            }
-          } catch (uploadException) {
-            console.warn('driver photo upload threw', uploadException);
+          const { error: uploadErr } = await supabase.storage.from('drivers').upload(path, regPhotoFile, { upsert: true, contentType: regPhotoFile.type });
+          if (uploadErr) {
+            console.warn('driver photo upload failed', uploadErr);
             toast({ status: 'warning', title: 'Photo upload failed', description: 'Driver will be created without photo.' });
+          } else {
+            try {
+              const { data: urlData } = supabase.storage.from('drivers').getPublicUrl(path);
+              photoUrl = urlData?.publicUrl || null;
+            } catch (ee) {
+              try {
+                const { data: signedData } = await supabase.storage.from('drivers').createSignedUrl(path, 60 * 60);
+                photoUrl = signedData?.signedUrl || null;
+              } catch (e2) { /* ignore */ }
+            }
           }
         } catch (e) {
           console.warn('photo upload flow threw', e);
         }
       }
 
-      // Insert driver row (ensure phone is normalized)
-      const payload = { name, phone: normalizedPhone, license_number: licenseNum || null, photo_url: photoUrl || null };
+      // Insert driver row (phone saved normalized)
+      const payload = { name, phone, license_number: licenseNum || null, photo_url: photoUrl || null };
       const { data, error } = await supabase.from('drivers').insert([payload]).select().maybeSingle();
 
       if (error) {
@@ -1091,17 +953,19 @@ export default function AgentApptPage() {
         throw error;
       }
 
+      // success: close modal, set driver fields and resolve registration promise if waiting
       const created = data || null;
       setFoundDriver(created);
       setDriverRegistered(true);
       setDriverName(created?.name || name);
-      setDriverLicense(created?.phone || normalizedPhone);
+      setDriverLicense(created?.phone || phone);
 
       toast({ status: 'success', title: 'Driver registered', description: `${name} saved.` });
       try { await triggerConfetti(120); } catch (_) {}
 
       setDriverRegModalOpen(false);
 
+      // resolve awaiting promise (if any)
       if (regPromiseRef.current) {
         regPromiseRef.current({ ok: true, driver: created });
         regPromiseRef.current = null;
@@ -1118,15 +982,17 @@ export default function AgentApptPage() {
     }
   };
 
+  // when modal is closed/cancelled by user
   const handleDriverRegModalClose = () => {
     setDriverRegModalOpen(false);
+    // if someone is awaiting registration, resolve as cancelled
     if (regPromiseRef.current) {
       regPromiseRef.current({ ok: false, reason: 'cancelled' });
       regPromiseRef.current = null;
     }
   };
 
-  // ---------------- existing generateUniqueNumbers, createDirectlyInSupabase etc remain -----------------------------
+  // ---------------- existing generateUniqueNumbers, createDirectlyInSupabase etc remain but with openConfirm calling ensureDriverRegistered -------------
   async function generateUniqueNumbers(pickupDateValue) {
     const maxAttempts = 10;
     const d = new Date(pickupDateValue);
@@ -1183,7 +1049,7 @@ export default function AgentApptPage() {
     return await generateUniqueNumbers(pickupDateValue);
   }
 
-  // ---------- createDirectlyInSupabase (unchanged except phone usage remains as provided) ----------
+  // ---------- createDirectlyInSupabase (unchanged semantics) ----------
   const createDirectlyInSupabase = async (payload) => {
     if (!supabase) throw new Error('Supabase client not available.');
 
@@ -1266,6 +1132,7 @@ export default function AgentApptPage() {
         if (t1Rows.length > 0) {
           const { error: t1Err } = await supabase.from('t1_records').insert(t1Rows);
           if (t1Err) {
+            // roll back appointment insertion if t1 insert failed
             try { await supabase.from('appointments').delete().eq('id', appointmentId); } catch (_) {}
             throw t1Err;
           }
@@ -1282,6 +1149,7 @@ export default function AgentApptPage() {
           // even if fetch failed, return data based on inserted values (including barcode_payload)
           return {
             appointment: {
+              id: appointmentId,
               appointmentNumber,
               weighbridgeNumber,
               warehouse: appointmentInsert.warehouse_location,
@@ -1321,6 +1189,7 @@ export default function AgentApptPage() {
             totalDocumentedWeight: fullAppointment.total_documented_weight,
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
+            id: fullAppointment.id,
             barcode_payload: fullAppointment.barcode_payload || appointmentInsert.barcode_payload || '',
           }
         };
@@ -1401,7 +1270,7 @@ export default function AgentApptPage() {
     return ticket;
   }
 
-  // ---------- PDF upload helper (appointments bucket) ----------
+  // ---------- uploadPdfToStorage (unchanged) ----------
   async function uploadPdfToStorage(blob, appointmentNumber) {
     if (!blob) return { publicUrl: null, path: null };
 
@@ -1420,20 +1289,16 @@ export default function AgentApptPage() {
         fileForUpload = uint8;
       }
 
-      let uploadRes;
       try {
-        const { data: uploadData, error: uploadError } = await supabase.storage
+        const { error: uploadError } = await supabase.storage
           .from(bucketName)
           .upload(path, fileForUpload, { upsert: true, contentType: 'application/pdf' });
 
-        uploadRes = { data: uploadData, error: uploadError };
         if (uploadError) {
           console.warn('uploadPdfToStorage upload error', uploadError);
         }
       } catch (e) {
         console.warn('uploadPdfToStorage upload threw', e);
-        // eslint-disable-next-line no-unused-vars
-        uploadRes = { data: null, error: e };
       }
 
       try {
@@ -1516,7 +1381,7 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // ---------- handleCreateAppointment (modified to call notify edge function) ----------
+  // ---------- handleCreateAppointment (unchanged except phone normalization in payload) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
@@ -1569,9 +1434,7 @@ export default function AgentApptPage() {
 
     setLoadingCreate(true);
 
-    // ensure driver phone is normalized for saving & notifications
-    const normalizedDriverPhone = formatPhone(driverLicense);
-
+    const normalizedDriverPhone = normalizePhone(String(driverLicense || '').trim());
     const payload = {
       warehouse,
       warehouseLabel: (WAREHOUSES.find(w => w.value === warehouse) || {}).label || warehouse,
@@ -1581,7 +1444,7 @@ export default function AgentApptPage() {
       consolidated,
       truckNumber: truckNumber.trim(),
       driverName: driverName.trim(),
-      driverLicense: normalizedDriverPhone, // store normalized phone
+      driverLicense: normalizedDriverPhone, // store normalized +220...
       regime: '',
       totalDocumentedWeight: '',
       appointmentNumber: previewAppointmentNumber || undefined,
@@ -1611,7 +1474,6 @@ export default function AgentApptPage() {
       });
 
       // generate PDF & download & upload
-      let uploadedPdfUrl = null;
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
@@ -1629,12 +1491,8 @@ export default function AgentApptPage() {
         try {
           const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
-            uploadedPdfUrl = publicUrl;
-            // Update appointment row with the public URL (or signed URL). Keep using pdf_url column.
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           } else if (path && dbAppointment.id) {
-            uploadedPdfUrl = path;
-            // store path as fallback
             await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
@@ -1656,63 +1514,7 @@ export default function AgentApptPage() {
         }]);
       } catch (e) { console.warn('log write failed', e); }
 
-      // Show immediate creation success toast to agent
-      toast({ title: 'Appointment created', description: `Appointment saved — sending SMS to driver.`, status: 'success', duration: 6000 });
-
-      // ---------- NEW: show popup message to the agent (per your request) ----------
-      try {
-        setCreatedPopupInfo({
-          appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number || '',
-          driverPhone: normalizedDriverPhone || '',
-        });
-        setCreatedPopupOpen(true);
-      } catch (e) {
-        // ignore popup errors
-      }
-
-      // ---------- Notify via Notify function (calls callNotifyFunction which tries proxy -> invoke -> fetch) ----------
-      try {
-        const notifyBody = {
-          appointment: {
-            appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
-            weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
-            pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
-            truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
-            driverName: dbAppointment.driverName || dbAppointment.driver_name,
-            agentName: dbAppointment.agentName || dbAppointment.agent_name,
-            agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
-            id: dbAppointment.id
-          },
-          pdfBase64: null,
-          pdfFilename: null,
-          pdfUrl: uploadedPdfUrl || null,
-          recipients: {
-            driverPhone: normalizedDriverPhone,
-            agentName: agentName || dbAppointment.agentName || ''
-          }
-        };
-
-        const notifyResp = await callNotifyFunction(notifyBody);
-
-        if (notifyResp && notifyResp.ok) {
-          // This backend only sends SMS — reflect that clearly
-          toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
-        } else {
-          console.warn('notifyResp failed', notifyResp);
-          // Provide actionable message to user
-          const errText = (notifyResp && notifyResp.error && notifyResp.error.message) ? notifyResp.error.message : (notifyResp && notifyResp.error ? String(notifyResp.error) : 'Unknown error');
-          toast({
-            status: 'warning',
-            title: 'SMS sending failed',
-            description: `Appointment created but SMS sending failed: ${errText}`,
-            duration: 10000,
-            isClosable: true,
-          });
-        }
-      } catch (notifyErr) {
-        console.warn('notify error', notifyErr);
-        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
-      }
+      toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
       await triggerConfetti(160);
 
@@ -1724,6 +1526,9 @@ export default function AgentApptPage() {
       setPreviewWeighbridgeNumber('');
       setOrbOpen(false);
       setBlockedSads([]);
+      setFoundDriver(null);
+      setDriverRegistered(false);
+      setDriverCheckStatus(null);
     } catch (err) {
       console.error('Create appointment (DB) failed', err);
       const message = err?.message || String(err);
@@ -1831,7 +1636,6 @@ export default function AgentApptPage() {
                       created_at: new Date().toISOString(),
                     }));
                     try {
-                      // attempt batched inserts
                       for (let i = 0; i < logs.length; i += 50) {
                         const chunk = logs.slice(i, i + 50);
                         await supabase.from('appointment_logs').insert(chunk);
@@ -1958,7 +1762,7 @@ export default function AgentApptPage() {
 
            <FormControl isRequired>
             <FormLabel>Driver Phone Number</FormLabel>
-            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="Driver Phone Number" />
+            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="e.g. 7701234 (we save as +220...)" />
             {/* Inline driver check status messages */}
             {driverCheckStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking driver info…</Text>}
             {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Driver found, you may proceed now!</Text>}
@@ -1972,7 +1776,6 @@ export default function AgentApptPage() {
             <Text className="muted" mt={1}>Enter the full name of the driver (registered drivers will appear automatically).</Text>
           </FormControl>
 
-        
         </SimpleGrid>
 
         <Divider my={4} />
@@ -2171,7 +1974,7 @@ export default function AgentApptPage() {
         </ModalContent>
       </Modal>
 
-      {/* ---------- Quick Register Driver Modal (opened when name+phone not found) ---------- */}
+      {/* Quick Register Driver Modal */}
       <Modal isOpen={isDriverRegModalOpen} onClose={handleDriverRegModalClose} isCentered>
         <ModalOverlay />
         <ModalContent maxW="md" borderRadius="lg">
@@ -2186,7 +1989,7 @@ export default function AgentApptPage() {
 
               <FormControl isRequired>
                 <FormLabel>Phone</FormLabel>
-                <ChakraInput value={regPhone} onChange={(e) => setRegPhone(e.target.value)} placeholder="+220 ..." />
+                <ChakraInput value={regPhone} onChange={(e) => setRegPhone(e.target.value)} placeholder="e.g. 7701234 (we will save as +220...)" />
               </FormControl>
 
               <FormControl>
@@ -2217,29 +2020,6 @@ export default function AgentApptPage() {
           <ModalFooter>
             <Button variant="ghost" onClick={handleDriverRegModalClose} mr={3}>Cancel</Button>
             <Button colorScheme="teal" onClick={registerDriverQuick} isLoading={isRegisteringDriver}>Register Driver & Continue</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
-      {/* ---------- CREATED POPUP: informs agent that appointment created & driver will receive details ---------- */}
-      <Modal isOpen={createdPopupOpen} onClose={() => setCreatedPopupOpen(false)} isCentered>
-        <ModalOverlay />
-        <ModalContent maxW="md" borderRadius="lg">
-          <ModalHeader>Appointment Created</ModalHeader>
-          <ModalCloseButton />
-          <ModalBody>
-            <Stack spacing={3}>
-              <Text>
-                Appointment <b>{createdPopupInfo.appointmentNumber || '—'}</b> has been created.
-              </Text>
-              <Text>
-                Appointment details will be sent to the driver's phone number: <b>{createdPopupInfo.driverPhone || '—'}</b>.
-              </Text>
-              <Text className="muted">You will receive a confirmation here when SMS delivery completes (or fails).</Text>
-            </Stack>
-          </ModalBody>
-          <ModalFooter>
-            <Button colorScheme="blue" onClick={() => setCreatedPopupOpen(false)}>OK</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
