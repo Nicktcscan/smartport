@@ -12,7 +12,7 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import TicketDetails from './pages/TicketDetails';
 import OutgateDashboard from './pages/OutgateDashboard';
-import AdminPanelPage from './pages/AdminPanelPage';
+import AdminPanel from './pages/AdminPanel';
 import UsersPage from './pages/UsersPage';
 import RolesPermissionsPage from './pages/RolesPermissionsPage';
 import GateOperationsPage from './pages/GateOperationsPage';
@@ -102,7 +102,6 @@ function App() {
         <Routes>
           <Route path="/login" element={<Login />} />
 
-
           <Route
             path="/register"
             element={
@@ -134,7 +133,8 @@ function App() {
                 ) : user.role === 'outgate' ? (
                   <Navigate to="/outgate" replace />
                 ) : user.role === 'weighbridge' ? (
-                  <Navigate to="/weighbridge" replace />
+                  // weighbridge users now land on the weighbridge Dashboard page
+                  <Navigate to="/dashboard" replace />
                 ) : user.role === 'agent' ? (
                   <Navigate to="/agent" replace />
                 ) : user.role === 'finance' ? (
@@ -409,7 +409,7 @@ function App() {
               path="/admin"
               element={
                 <ProtectedRoute allowedRoles={['admin']}>
-                  <AdminPanelPage />
+                  <AdminPanel />
                 </ProtectedRoute>
               }
             />

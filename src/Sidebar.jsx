@@ -34,7 +34,8 @@ import { useAuth } from './context/AuthContext';
 
 // Admin menu
 const adminNavItems = [
-  { path: '/dashboard', label: 'Dashboard', icon: FaTachometerAlt },
+  // Admin should go to /admin (AdminPanelPage)
+  { path: '/admin', label: 'Admin Dashboard', icon: FaTachometerAlt },
   { path: '/sad-declarations', label: 'SAD Declaration', icon: FaFileAlt },
   { path: '/tickets', label: 'Upload Ticket', icon: FaUpload },
   { path: '/manual-entry', label: 'Manual Entry', icon: FaEdit },

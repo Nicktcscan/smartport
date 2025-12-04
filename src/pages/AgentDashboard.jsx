@@ -172,17 +172,23 @@ export default function OutgateReports() {
     return hh * 60 + mm;
   };
 
-  // Helper: map an outgate row to the UI shape used in this component
-  const mapOutgateRow = (row) => {
-    // Important: keep weighed_at separate from exitTime
-    // weighed_at => row.date (timestamp from tickets when weighed)
-    // exitTime => row.created_at (when outgate record was created / exit confirmed)
+  /**
+   * mapOutgateRow
+   * - row: outgate row
+   * - ticketSubmittedAt: optional Date/string from tickets.submitted_at (preferred)
+   *
+   * Behavior: prefer ticketSubmittedAt for weighed_at. fallback to outgate.date or row.submitted_at.
+   */
+  const mapOutgateRow = (row, ticketSubmittedAt = null) => {
+    // pick weighed_at: prefer ticketSubmittedAt -> row.submitted_at -> row.date -> null
+    const weighedAt = ticketSubmittedAt || row.submitted_at || row.date || null;
+
     return {
       ticketId: row.ticket_id || (row.id ? String(row.id) : `${Math.random()}`),
       data: {
         sadNo: row.sad_no ?? '',
         ticketNo: row.ticket_no ?? '',
-        weighed_at: row.date ?? null, // weighbridge timestamp
+        weighed_at: weighedAt ?? null,
         exitTime: row.created_at ?? null, // outgate created_at (exit time)
         gnswTruckNo: row.vehicle_number ?? '',
         gross: row.gross ?? null,
@@ -200,7 +206,7 @@ export default function OutgateReports() {
   };
 
   // Utility that returns the filtered tickets from an original array given current date/time filters
-  // Filters are applied against the WEIGHED_AT (row.date) as before (so date/time range filters control weighed_at)
+  // Filters are applied against the WEIGHED_AT (row.weighed_at) as requested.
   const computeFilteredFromOriginal = (originalArr) => {
     if (!originalArr) return [];
 
@@ -214,7 +220,7 @@ export default function OutgateReports() {
     const truckFilterLower = (truckFilter || '').trim().toLowerCase();
 
     const filtered = originalArr.filter((t) => {
-      const dRaw = t.data.weighed_at; // filter by weighed_at
+      const dRaw = t.data.weighed_at; // filter by weighed_at (now ticket.submitted_at when available)
       const d = dRaw ? new Date(dRaw) : null;
       if (!d) return false;
       if (hasDateRange) {
@@ -290,7 +296,30 @@ export default function OutgateReports() {
 
       if (error) throw error;
 
-      const mapped = (data || []).map(mapOutgateRow);
+      // Build ticket lookup map: fetch tickets by ticket_no found in outgate rows and map -> submitted_at
+      const ticketNumbers = Array.from(new Set((data || []).map((r) => r.ticket_no).filter(Boolean)));
+      let ticketMap = {};
+      if (ticketNumbers.length > 0) {
+        try {
+          const { data: ticketsData, error: ticketsErr } = await supabase
+            .from('tickets')
+            .select('ticket_no, submitted_at')
+            .in('ticket_no', ticketNumbers);
+          if (!ticketsErr && Array.isArray(ticketsData)) {
+            ticketsData.forEach((t) => {
+              if (t && t.ticket_no) ticketMap[String(t.ticket_no)] = t.submitted_at || null;
+            });
+          }
+        } catch (e) {
+          console.warn('ticket lookup failed', e);
+        }
+      }
+
+      // Map using ticketMap preference for weighed_at
+      const mapped = (data || []).map((r) => {
+        const submittedAt = r.ticket_no ? ticketMap[String(r.ticket_no)] : null;
+        return mapOutgateRow(r, submittedAt || null);
+      });
 
       // ensure newest first (by exitTime / created_at)
       mapped.sort((a, b) => {
@@ -491,14 +520,32 @@ export default function OutgateReports() {
     let isUnsubscribed = false;
     let subscription = null;
 
-    const handleIncomingRow = (payload) => {
+    const handleIncomingRow = async (payload) => {
       if (!payload) return;
       const row = payload.new ?? payload;
       if (!row) return;
       const rowSad = (row.sad_no || '').toString().toLowerCase();
       if (!rowSad.includes(queryLower)) return;
 
-      const mapped = mapOutgateRow(row);
+      // Attempt to fetch ticket.submitted_at for the incoming ticket_no (preferred)
+      let submittedAt = null;
+      try {
+        if (row.ticket_no) {
+          const { data: ticketData, error: ticketErr } = await supabase
+            .from('tickets')
+            .select('submitted_at')
+            .eq('ticket_no', row.ticket_no)
+            .maybeSingle();
+          if (!ticketErr && ticketData) {
+            submittedAt = ticketData.submitted_at || null;
+          }
+        }
+      } catch (e) {
+        // ignore ticket lookup failure, fallback to row.date
+        console.warn('realtime ticket lookup failed', e);
+      }
+
+      const mapped = mapOutgateRow(row, submittedAt || null);
 
       // Insert into sadOriginal (newest-first), dedupe and recompute filtered results centrally
       setSadOriginal((prev) => {
@@ -712,7 +759,6 @@ export default function OutgateReports() {
                   <StatHelpText>{sadMeta.sadExists ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
                 </Stat>
 
-                {/* Discrepancy card: appears only when dischargedWeight > declaredWeight */}
                 {(sadMeta.declaredWeight != null && sadMeta.dischargedWeight > sadMeta.declaredWeight) ? (
                   <Stat bg="red.50" px={4} py={3} borderRadius="md" boxShadow="sm">
                     <StatLabel>Discrepancy</StatLabel>
@@ -722,7 +768,6 @@ export default function OutgateReports() {
                     </StatHelpText>
                   </Stat>
                 ) : (
-                  // Show a calming card when no discrepancy
                   <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
                     <StatLabel>Discrepancy</StatLabel>
                     <StatNumber>{sadMeta.declaredWeight != null ? `${formatWeight(Math.max(0, (sadMeta.dischargedWeight || 0) - (sadMeta.declaredWeight || 0)))} KG` : '—'}</StatNumber>
