@@ -12,7 +12,7 @@ import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
 import TicketDetails from './pages/TicketDetails';
 import OutgateDashboard from './pages/OutgateDashboard';
-import AdminPanel from './pages/AdminPanel';
+import AdminPanelPage from './pages/AdminPanelPage';
 import UsersPage from './pages/UsersPage';
 import RolesPermissionsPage from './pages/RolesPermissionsPage';
 import GateOperationsPage from './pages/GateOperationsPage';
@@ -409,7 +409,7 @@ function App() {
               path="/admin"
               element={
                 <ProtectedRoute allowedRoles={['admin']}>
-                  <AdminPanel />
+                  <AdminPanelPage />
                 </ProtectedRoute>
               }
             />
