@@ -317,6 +317,55 @@ function getTicketDate(ticket) {
   return getTicketSubmittedAt(ticket);
 }
 
+// ---------- NEW helper: robust createdBy resolver ----------
+function resolveCreatedBy(ticket) {
+  // Return a clean display string for the Created By / Operator column.
+  // Checks: ticket.data.createdBy, ticket.data.operator, ticket.data.user_id, ticket.data.created_by, email/uuid heuristics, else 'N/A'.
+  if (!ticket) return 'N/A';
+  const d = ticket.data || {};
+
+  const tryValues = [
+    d.createdBy,
+    d.created_by,
+    d.operator,
+    d.user_id,
+    d.userId,
+    d.operator_name,
+    d.username,
+  ];
+
+  const normalize = (v) => {
+    if (v === null || v === undefined) return null;
+    const s = String(v || '').trim();
+    return s === '' ? null : s;
+  };
+
+  for (const v of tryValues) {
+    const n = normalize(v);
+    if (n) {
+      // if it's an email -> return local part or full email
+      if (n.includes('@')) return n;
+      // if it's a UUID-looking string, shorten it for readability
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(n)) {
+        return `${n.slice(0, 8)}...`;
+      }
+      return n;
+    }
+  }
+
+  // fallback: try ticket.user_id or ticket.created_by at root level
+  const rootPossible = normalize(ticket.user_id) || normalize(ticket.created_by) || normalize(ticket.createdAt);
+  if (rootPossible) {
+    if (rootPossible.includes('@')) return rootPossible;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rootPossible)) {
+      return `${rootPossible.slice(0, 8)}...`;
+    }
+    return rootPossible;
+  }
+
+  return 'N/A';
+}
+
 // =======================================
 // PDF components (SAD column removed)
 function PdfTicketRow({ ticket }) {
@@ -326,7 +375,7 @@ function PdfTicketRow({ ticket }) {
   const truckText = d.gnswTruckNo ?? d.anpr ?? d.truckOnWb ?? d.truckNo ?? 'N/A';
   const dateText = getTicketDate(ticket) ? getTicketDate(ticket).toLocaleString() : 'N/A';
   const driverText = d.driver ?? 'N/A';
-  const createdByText = d.createdBy ?? d.operator ?? 'N/A';
+  const createdByText = resolveCreatedBy(ticket);
 
   const cell = (style, content, rightAlign = false) => (
     <PdfView style={[pdfStyles.cellBase, style]}>
@@ -843,7 +892,7 @@ export default function WeightReports() {
           driver: ticket.driver || 'N/A',
           consignee: ticket.consignee,
           operator: ticket.operator || '',
-          createdBy: ticket.created_by || null,
+          createdBy: ticket.created_by ?? ticket.createdBy ?? null,
           user_id: ticket.user_id || null,
           status: ticket.status,
           consolidated: ticket.consolidated,
@@ -1291,7 +1340,7 @@ export default function WeightReports() {
         d.net ?? '',
         d.consignee ?? '',
         d.operator ?? '',
-        d.createdBy ?? '',
+        resolveCreatedBy(t) ?? '',
         d.containerNo ?? '',
         d.passNumber ?? '',
         d.scaleName ?? '',
@@ -2062,7 +2111,7 @@ export default function WeightReports() {
                   const computed = computeWeightsFromObj({ gross: t.data.gross, tare: t.data.tare, net: t.data.net });
                   const displayTruck = t.data.gnswTruckNo || t.data.truckOnWb || t.data.anpr || t.data.truckNo || 'N/A';
                   const displayDriver = t.data.driver || 'N/A';
-                  const displayCreated = t.data.createdBy || t.data.operator || 'N/A';
+                  const displayCreated = resolveCreatedBy(t);
                   return (
                     <Box key={t.ticketId} className="glass-card" p={3}>
                       <Flex justify="space-between" align="start" gap={3} wrap="wrap">
@@ -2165,7 +2214,7 @@ export default function WeightReports() {
                       });
                       const displayDriver = ticket.data.driver || 'N/A';
                       const displayTruck = ticket.data.gnswTruckNo || ticket.data.truckOnWb || ticket.data.anpr || ticket.data.truckNo || 'N/A';
-                      const displayCreated = ticket.data.createdBy || ticket.data.operator || 'N/A';
+                      const displayCreated = resolveCreatedBy(ticket);
 
                       return (
                         <Tr key={ticket.ticketId}>
@@ -2335,7 +2384,7 @@ export default function WeightReports() {
 
                         <HStack>
                           <Icon as={FaUserTie} />
-                          <Text><b>Operator:</b> {selectedTicket.data.createdBy || selectedTicket.data.operator || 'N/A'}</Text>
+                          <Text><b>Operator:</b> {resolveCreatedBy(selectedTicket)}</Text>
                         </HStack>
 
                         <HStack>

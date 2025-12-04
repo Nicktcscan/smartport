@@ -7,9 +7,11 @@ import {
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
+  Tooltip, Box as ChakraBox, SimpleGrid as ChakraSimpleGrid,
 } from '@chakra-ui/react';
 import {
   FaPlus, FaFileExport, FaEllipsisV, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
+  FaEnvelope, FaEdit, FaInfoCircle
 } from 'react-icons/fa';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
@@ -111,9 +113,9 @@ export default function SADDeclaration() {
   // docs modal
   const [docsModal, setDocsModal] = useState({ open: false, docs: [], sad_no: null });
 
-  // details modal (shows declared/discharged/status/createdAt/createdBy + tickets)
+  // details modal (AgentDashboard-like)
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [detailsData, setDetailsData] = useState({ sad: null, tickets: [], created_by_username: null, loading: false });
+  const [detailsData, setDetailsData] = useState({ sad: null, tickets: [], created_by_username: null, completed_by_username: null, loading: false });
 
   // filters / NL / paging / sorting
   const [nlQuery, setNlQuery] = useState('');
@@ -142,9 +144,17 @@ export default function SADDeclaration() {
   // orb CTA
   const { isOpen: orbOpen, onOpen: openOrb, onClose: closeOrb } = useDisclosure();
 
+  // status edit modal
+  const { isOpen: statusEditOpen, onOpen: openStatusEdit, onClose: closeStatusEdit } = useDisclosure();
+  const [statusEditTarget, setStatusEditTarget] = useState(null);
+  const [statusEditValue, setStatusEditValue] = useState('');
+
   // map of created_by -> username for showing who created SADs
   const createdByMapRef = useRef({});
   const createdByMap = createdByMapRef.current;
+
+  // map of completed_by recorded by the UI (fallback if DB has no column)
+  const completedByMapRef = useRef({});
 
   // current logged-in user (agent)
   const [currentUser, setCurrentUser] = useState(null);
@@ -378,7 +388,7 @@ export default function SADDeclaration() {
       } catch (uErr) { throw uErr; }
 
       uploaded.push({ name: f.name, path: filePath, url, tags: [], parsed: null });
-      await pushActivity(`Uploaded doc ${f.name} for SAD ${sad_no}`, { sad_no, file: f.name });
+      await pushActivity(`Uploaded doc ${f.name} for SAD ${sad_no}`, { sad_no, file: f.name, uploaded_by: currentUser?.id || null });
     }
     return uploaded;
   };
@@ -386,10 +396,13 @@ export default function SADDeclaration() {
   // create SAD - now storing regime as code (IM4/EX1/IM7)
   const handleCreateSAD = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
-    if (!sadNo || !declaredWeight) {
-      toast({ title: 'Missing values', description: 'Provide SAD number and declared weight', status: 'warning' });
+
+    // Require all fields
+    if (!sadNo || !declaredWeight || !regime || !docs || docs.length === 0) {
+      toast({ title: 'Missing values', description: 'All fields are required (SAD, Regime, Declared Weight, at least one Document)', status: 'warning' });
       return;
     }
+
     setLoading(true);
     try {
       const currentUserObj = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
@@ -427,7 +440,7 @@ export default function SADDeclaration() {
       }
 
       toast({ title: 'SAD registered', description: `SAD ${trimmedSad} created`, status: 'success' });
-      await pushActivity(`Created SAD ${trimmedSad}`);
+      await pushActivity(`Created SAD ${trimmedSad}`, { created_by: currentUser?.id || null });
       setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]);
       fetchSADs();
       closeOrb();
@@ -439,7 +452,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // open SAD detail (existing)
+  // open SAD detail (existing) - kept for backward compatibility (simple list)
   const openSadDetail = async (sad) => {
     setSelectedSad(sad);
     setIsModalOpen(true);
@@ -451,7 +464,7 @@ export default function SADDeclaration() {
       setDetailTickets(data || []);
       const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
       setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)), ticket_count: (data || []).length }));
-      await pushActivity(`Viewed SAD ${sad.sad_no} details`);
+      await pushActivity(`Viewed SAD ${sad.sad_no} details`, { viewed_by: currentUser?.id || null });
     } catch (err) {
       console.error('openSadDetail', err);
       toast({ title: 'Failed to load tickets', description: err?.message || 'Unexpected', status: 'error' });
@@ -461,27 +474,48 @@ export default function SADDeclaration() {
     }
   };
 
-  // open details modal
+  // open details modal (AgentDashboard-like) - now fetch declaration row (to get completed_at)
   const openDetailsModal = async (sad) => {
-    setDetailsData({ sad, tickets: [], created_by_username: sad.created_by_username || null, loading: true });
+    setDetailsData({ sad: null, tickets: [], created_by_username: sad.created_by_username || null, completed_by_username: null, loading: true });
     setDetailsOpen(true);
     try {
       const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+
+      // fetch declaration row (to get most current fields including completed_at)
+      let decl = sad;
+      try {
+        const { data: sadRow, error: sadErr } = await supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle();
+        if (!sadErr && sadRow) decl = { ...sadRow };
+      } catch (e) { /* ignore */ }
+
+      // fetch tickets
       const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (!error) {
-        let createdByUsername = sad.created_by_username || null;
-        if (!createdByUsername && sad.created_by) {
+      if (error) {
+        setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
+      } else {
+        let createdByUsername = decl.created_by ? (createdByMapRef.current[decl.created_by] || null) : null;
+        if (!createdByUsername && decl.created_by) {
           try {
-            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sad.created_by).maybeSingle();
+            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', decl.created_by).maybeSingle();
             if (u) {
               createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
               createdByUsername = u.username || u.email || null;
             }
           } catch (e) { /* ignore */ }
         }
-        setDetailsData({ sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
-      } else {
-        setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
+
+        // determine completed_by username: prefer decl.completed_by (if column exists), else local completedByMapRef
+        let completedByUsername = null;
+        if (decl.completed_by) {
+          completedByUsername = createdByMapRef.current[decl.completed_by] || decl.completed_by;
+        } else if (completedByMapRef.current[trimmed]) {
+          completedByUsername = completedByMapRef.current[trimmed];
+        }
+
+        const computedTotal = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
+        const sd = { ...decl, total_recorded_weight: Number(decl.total_recorded_weight || computedTotal), ticket_count: (tickets || []).length };
+
+        setDetailsData({ sad: sd, tickets: tickets || [], created_by_username: createdByUsername, completed_by_username: completedByUsername, loading: false });
       }
     } catch (err) {
       console.error('openDetailsModal', err);
@@ -490,19 +524,67 @@ export default function SADDeclaration() {
     }
   };
 
-  // update status quick action
+  // update status quick action (simple)
   const updateSadStatus = async (sad_no, newStatus) => {
+    // compatibility wrapper - uses advanced function
+    return updateSadStatusWithCompletion(sad_no, newStatus);
+  };
+
+  // advanced status update that also sets completed_at and attempts to set completed_by
+  const updateSadStatusWithCompletion = async (sad_no, newStatus) => {
     try {
+      const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
       const payload = { status: newStatus, updated_at: new Date().toISOString(), manual_update: true };
-      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
-      if (error) throw error;
-      toast({ title: 'Status updated', description: `${sad_no} status set to ${newStatus}`, status: 'success' });
-      await pushActivity(`Status of ${sad_no} set to ${newStatus}`);
+
+      let setCompletedBy = false;
+      if (newStatus === 'Completed') {
+        payload.completed_at = new Date().toISOString();
+        if (currentUser && currentUser.id) {
+          payload.completed_by = currentUser.id; // try to set if column exists
+          setCompletedBy = true;
+        }
+      } else {
+        // if changing away from completed, clear completed_at (optional)
+        payload.completed_at = null;
+        payload.completed_by = null;
+      }
+
+      // attempt update
+      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', trimmed);
+      if (error) {
+        // if error likely due to completed_by column missing, retry without completed_by
+        console.warn('update error, retrying without completed_by if present', error);
+        const fallbackPayload = { ...payload };
+        if (!setCompletedBy) {
+          delete fallbackPayload.completed_by;
+        } else {
+          delete fallbackPayload.completed_by;
+        }
+        const { error: err2 } = await supabase.from('sad_declarations').update(fallbackPayload).eq('sad_no', trimmed);
+        if (err2) throw err2;
+      }
+
+      // if newStatus is completed, record who completed in local map (fallback)
+      if (newStatus === 'Completed' && currentUser) {
+        const uname = (currentUser.user_metadata && (currentUser.user_metadata.full_name || currentUser.user_metadata.fullName)) || currentUser.email || currentUser.id;
+        completedByMapRef.current[trimmed] = uname;
+      } else {
+        // clear local map if uncompleting
+        if (completedByMapRef.current[trimmed]) delete completedByMapRef.current[trimmed];
+      }
+
+      toast({ title: 'Status updated', description: `${trimmed} set to ${newStatus}`, status: 'success' });
+      await pushActivity(`Status of ${trimmed} set to ${newStatus}`, { sad_no: trimmed, newStatus, by: currentUser?.id || null });
       fetchSADs();
-      if (selectedSad && selectedSad.sad_no === sad_no) openSadDetail({ sad_no });
+
+      // if details modal open for this sad, refresh it
+      if (detailsData?.sad?.sad_no === trimmed) openDetailsModal({ sad_no: trimmed });
+
+      return true;
     } catch (err) {
-      console.error('updateSadStatus', err);
+      console.error('updateSadStatusWithCompletion', err);
       toast({ title: 'Update failed', description: err?.message || 'Unexpected', status: 'error' });
+      return false;
     }
   };
 
@@ -510,7 +592,7 @@ export default function SADDeclaration() {
   const confirmMarkCompleted = async () => {
     const target = completeTarget; setCompleteOpen(false); setCompleteTarget(null);
     if (!target) return;
-    try { setLoading(true); await updateSadStatus(target, 'Completed'); } catch (e) { console.error('confirmMarkCompleted', e); } finally { setLoading(false); }
+    try { setLoading(true); await updateSadStatusWithCompletion(target, 'Completed'); } catch (e) { console.error('confirmMarkCompleted', e); } finally { setLoading(false); }
   };
 
   const recalcTotalForSad = async (sad_no) => {
@@ -520,7 +602,7 @@ export default function SADDeclaration() {
       if (error) throw error;
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
       await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
-      await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
+      await pushActivity(`Recalculated total for ${trimmed}: ${total}`, { sad_no: trimmed, by: currentUser?.id || null });
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
     } catch (err) {
@@ -534,7 +616,7 @@ export default function SADDeclaration() {
       const { error } = await supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
       if (error) throw error;
       toast({ title: 'Archived', description: `SAD ${sad_no} archived`, status: 'info' });
-      await pushActivity(`Archived SAD ${sad_no}`);
+      await pushActivity(`Archived SAD ${sad_no}`, { by: currentUser?.id || null });
       fetchSADs();
     } catch (err) {
       console.error('archiveSad', err);
@@ -559,7 +641,7 @@ export default function SADDeclaration() {
       }];
       exportToCSV(rows, `sad_${s.sad_no}_export.csv`);
       toast({ title: 'Export started', description: `SAD ${s.sad_no} exported`, status: 'success' });
-      await pushActivity(`Exported SAD ${s.sad_no}`);
+      await pushActivity(`Exported SAD ${s.sad_no}`, { by: currentUser?.id || null });
     } catch (err) {
       console.error('exportSingleSAD', err);
       toast({ title: 'Export failed', description: err?.message || 'Unexpected', status: 'error' });
@@ -592,7 +674,7 @@ export default function SADDeclaration() {
       }
 
       await fetchSADs(filter);
-      await pushActivity(`Search: "${nlQuery}"`, filter);
+      await pushActivity(`Search: "${nlQuery}"`, { by: currentUser?.id || null, filter });
     } catch (e) {
       console.error('NL query failed', e);
       toast({ title: 'Search failed', description: e?.message || 'Unexpected', status: 'error' });
@@ -605,7 +687,7 @@ export default function SADDeclaration() {
     const declared = Number(s.declared_weight || 0);
     if (!declared) {
       toast({ title: 'No declared weight', description: `SAD ${s.sad_no} has no declared weight to compare.`, status: 'warning' });
-      await pushActivity(`Explain: no declared weight for ${s.sad_no}`);
+      await pushActivity(`Explain: no declared weight for ${s.sad_no}`, { by: currentUser?.id || null });
       return;
     }
     const diff = recorded - declared;
@@ -619,10 +701,10 @@ export default function SADDeclaration() {
       msg = `Recorded is ${Math.abs(diff).toLocaleString()} kg (${Math.abs(pct)}%) lower than declared — check missing tickets or document mismatch.`;
     }
     toast({ title: `Discrepancy for ${s.sad_no}`, description: msg, status: 'info', duration: 10000 });
-    await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`);
+    await pushActivity(`Explained discrepancy for ${s.sad_no}: ${msg}`, { by: currentUser?.id || null });
   };
 
-  // generate printable report (iframe-based)
+  // generate printable report (iframe-based) - reused by modal
   const generatePdfReport = async (s) => {
     try {
       const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
@@ -826,7 +908,7 @@ export default function SADDeclaration() {
       const blob = new Blob([csv], { type: 'text/csv' });
       const { error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
       if (error) throw error;
-      await pushActivity('Manual backup uploaded', { path: filename });
+      await pushActivity('Manual backup uploaded', { path: filename, by: currentUser?.id || null });
       toast({ title: 'Backup uploaded', description: `Saved as ${filename}`, status: 'success' });
     } catch (err) {
       console.error('backup failed', err);
@@ -849,6 +931,16 @@ export default function SADDeclaration() {
 .table-responsive { margin-top:18px; }
 .table thead th { background: linear-gradient(90deg,#b02a37,#8a1f27); color:var(--text-light); border:none; padding:12px 8px; font-weight:700; text-align:center; }
 .table tbody td { background: #fff; padding:12px 8px; border-radius:8px; vertical-align:middle; text-align:center; color:var(--text-dark); border: 1px solid rgba(2,6,23,0.06) }
+.sad-link {
+  background: linear-gradient(90deg,#6D28D9,#06B6D4);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight:700;
+  text-decoration: none;
+  border-bottom: 2px dotted rgba(0,0,0,0.06);
+}
+.sad-link:hover { filter: brightness(1.05); transform: translateY(-1px); text-decoration: underline; }
 @media (max-width:780px) {
   .table thead { display:none; }
   .table tbody tr { display:block; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96)); margin-bottom:14px; border-radius:14px; padding:12px; box-shadow: 0 8px 24px rgba(2,6,23,0.04);}
@@ -864,6 +956,42 @@ export default function SADDeclaration() {
 `;
 
   const RowMotion = motion(Tr);
+
+  // validation for create
+  const canCreate = !!(sadNo && sadNo.toString().trim() && declaredWeight && regime && docs && docs.length > 0);
+
+  // helper to email modal SAD summary (simple mailto)
+  const emailSad = (s) => {
+    try {
+      const subject = encodeURIComponent(`SAD ${s.sad_no} Report`);
+      const bodyLines = [
+        `SAD: ${s.sad_no}`,
+        `Declared weight: ${Number(s.declared_weight || 0).toLocaleString()} kg`,
+        `Discharged weight: ${Number(s.total_recorded_weight || 0).toLocaleString()} kg`,
+        `Status: ${s.status || '—'}`,
+        '',
+        'Tickets attached in exported report (if generated).'
+      ];
+      const body = encodeURIComponent(bodyLines.join('\n'));
+      window.location.href = `mailto:?subject=${subject}&body=${body}`;
+    } catch (e) {
+      console.warn('email failed', e);
+    }
+  };
+
+  // open status edit modal
+  const openStatusEditorFor = (s) => {
+    setStatusEditTarget(s);
+    setStatusEditValue(s.status || 'In Progress');
+    openStatusEdit();
+  };
+
+  const confirmStatusEdit = async () => {
+    if (!statusEditTarget) return;
+    const sad_no = statusEditTarget.sad_no;
+    closeStatusEdit();
+    await updateSadStatusWithCompletion(sad_no, statusEditValue);
+  };
 
   return (
     <Container maxW="8xl" py={6} className="sad-container">
@@ -907,13 +1035,14 @@ export default function SADDeclaration() {
       {/* Inline create form */}
       <Box as="form" onSubmit={(e) => { e.preventDefault(); handleCreateSAD(); }} bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6}>
         <Text fontWeight="semibold" mb={2}>Register a new SAD</Text>
+        <Text fontSize="sm" color="gray.600" mb={2}><FaInfoCircle style={{ marginRight: 8 }} />All fields are required.</Text>
         <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3}>
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>SAD Number</FormLabel>
             <Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} placeholder="e.g. 25" />
           </FormControl>
 
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>Regime</FormLabel>
             <Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>
               {REGIME_OPTIONS.map(code => (
@@ -924,20 +1053,20 @@ export default function SADDeclaration() {
             </Select>
           </FormControl>
 
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>Declared Weight (kg)</FormLabel>
             <Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} placeholder="e.g. 100000" />
           </FormControl>
 
-          <FormControl>
+          <FormControl isRequired>
             <FormLabel>Attach Docs</FormLabel>
             <Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} />
-            <Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text>
+            <Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected — at least one required</Text>
           </FormControl>
         </SimpleGrid>
 
         <HStack mt={3}>
-          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button">Register SAD</Button>
+          <Button colorScheme="teal" leftIcon={<FaPlus />} onClick={handleCreateSAD} isLoading={loading} type="button" isDisabled={!canCreate}>Register SAD</Button>
           <Button type="button" onClick={() => { setSadNo(''); setRegime(''); setDeclaredWeight(''); setDocs([]); }}>Reset</Button>
 
           <Box ml="auto" display="flex" gap={2}>
@@ -998,88 +1127,125 @@ export default function SADDeclaration() {
       {/* Table */}
       <Box bg="white" p={4} borderRadius="md" boxShadow="sm" mb={6} className="table-responsive">
         {loading ? <Spinner /> : (
-          <Table size="sm" variant="striped" className="table">
-            <Thead>
-              <Tr>
-                <Th>SAD</Th>
-                <Th>Regime</Th>
-                <Th isNumeric>Declared (kg)</Th>
-                <Th isNumeric>Discharged (kg)</Th>
-                <Th isNumeric>No. of Transactions</Th>
-                <Th>Status</Th>
-                <Th>Discrepancy</Th>
-                <Th>Actions</Th>
-              </Tr>
-            </Thead>
-            <Tbody>
-              <AnimatePresence>
-                {pagedSads.map((s) => {
-                  const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
+          <Box overflowX="auto">
+            <Table size="sm" variant="striped" className="table">
+              <Thead>
+                <Tr>
+                  <Th>SAD</Th>
+                  <Th>Regime</Th>
+                  <Th isNumeric>Declared (kg)</Th>
+                  <Th isNumeric>Discharged (kg)</Th>
+                  <Th isNumeric>No. of Transactions</Th>
+                  <Th>Status</Th>
+                  <Th>Discrepancy</Th>
+                  <Th>Actions</Th>
+                </Tr>
+              </Thead>
+              <Tbody>
+                <AnimatePresence>
+                  {pagedSads.map((s) => {
+                    const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
 
-                  // discrepancy color rules required:
-                  // red when discharged > declared (discrepancy > 0)
-                  // blue when discharged < declared (discrepancy < 0)
-                  // green when equal (discrepancy === 0)
-                  let discColor = 'green.600';
-                  if (discrepancy > 0) discColor = 'red.600';
-                  else if (discrepancy < 0) discColor = 'blue.600';
-                  else discColor = 'green.600';
+                    // discrepancy color rules required:
+                    // red when discharged > declared (discrepancy > 0)
+                    // blue when discharged < declared (discrepancy < 0)
+                    // green when equal (discrepancy === 0)
+                    let discColor = 'green.600';
+                    if (discrepancy > 0) discColor = 'red.600';
+                    else if (discrepancy < 0) discColor = 'blue.600';
+                    else discColor = 'green.600';
 
-                  const statusDotColor = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
-                  const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
-                  const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
+                    const statusDotColor = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
+                    const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
+                    const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
 
-                  return (
-                    <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
-                      <Td data-label="SAD"><Text fontWeight="bold">{s.sad_no}</Text></Td>
-                      <Td data-label="Regime"><Text>{regimeDisplay}</Text></Td>
-                      <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
-                      <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
-                      <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
-                      <Td data-label="Status">
-                        <VStack align="start" spacing={1}>
+                    // tooltip content (multi-line)
+                    const declared = Number(s.declared_weight || 0).toLocaleString();
+                    const recorded = Number(s.total_recorded_weight || 0).toLocaleString();
+                    const discrepancyText = discrepancy === 0 ? '0' : discrepancy.toLocaleString();
+                    const creator = s.created_by_username || (s.created_by ? (createdByMap[s.created_by] || s.created_by) : '—');
+
+                    const tooltipNode = (
+                      <ChakraBox p={2}>
+                        <Text fontSize="sm"><strong>Declared:</strong> {declared} kg</Text>
+                        <Text fontSize="sm"><strong>Discharged:</strong> {recorded} kg</Text>
+                        <Text fontSize="sm"><strong>Status:</strong> {s.status || '—'}</Text>
+                        <Text fontSize="sm"><strong>Discrepancy:</strong> {discrepancyText} kg</Text>
+                        <Text fontSize="sm"><strong>Created by:</strong> {creator}</Text>
+                      </ChakraBox>
+                    );
+
+                    return (
+                      <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
+                        <Td data-label="SAD" style={{ maxWidth: 220, overflowWrap: 'break-word' }}>
+                          <Tooltip label={tooltipNode} placement="top" hasArrow openDelay={180}>
+                            <Button
+                              variant="ghost"
+                              onClick={() => openDetailsModal(s)}
+                              aria-label={`Open details for SAD ${s.sad_no}`}
+                              title={`Open details for ${s.sad_no}`}
+                              className="sad-link"
+                              style={{ padding: 0 }}
+                            >
+                              {s.sad_no}
+                            </Button>
+                          </Tooltip>
+                        </Td>
+                        <Td data-label="Regime"><Text>{regimeDisplay}</Text></Td>
+                        <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
+                        <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
+                        <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
+                        <Td data-label="Status">
+                          <VStack align="start" spacing={1}>
+                            <HStack>
+                              <Box width="10px" height="10px" borderRadius="full" bg={statusDotColor} />
+                              <Text color={statusDotColor} fontWeight="medium">{s.status}</Text>
+                            </HStack>
+                          </VStack>
+                        </Td>
+                        <Td data-label="Discrepancy">
+                          <Text color={discColor}>
+                            {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
+                          </Text>
+                        </Td>
+                        <Td data-label="Actions">
                           <HStack>
-                            <Box width="10px" height="10px" borderRadius="full" bg={statusDotColor} />
-                            <Text color={statusDotColor} fontWeight="medium">{s.status}</Text>
+                            <Menu>
+                              <MenuButton as={IconButton} aria-label="Actions" icon={<FaEllipsisV />} size="sm" />
+                              <MenuList>
+                                <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
+                                <MenuItem icon={<FaEdit />} onClick={() => openStatusEditorFor(s)}>Edit SAD status</MenuItem>
+                                <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
+                                <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
+                                {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
+                                <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
+                                <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
+                                <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
+                                <MenuDivider />
+                                <MenuItem icon={<FaTrashAlt />} onClick={() => { setArchiveTarget(s.sad_no); setArchiveOpen(true); }}>Archive SAD</MenuItem>
+                              </MenuList>
+                            </Menu>
                           </HStack>
-                        </VStack>
-                      </Td>
-                      <Td data-label="Discrepancy">
-                        <Text color={discColor}>
-                          {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
-                        </Text>
-                      </Td>
-                      <Td data-label="Actions">
-                        <HStack>
-                          <Menu>
-                            <MenuButton as={IconButton} aria-label="Actions" icon={<FaEllipsisV />} size="sm" />
-                            <MenuList>
-                              <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
-                              <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
-                              <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
-                              {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
-                              <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
-                              <MenuItem icon={<FaFilePdf />} onClick={() => generatePdfReport(s)}>Print / Save PDF</MenuItem>
-                              <MenuItem icon={<FaFileExport />} onClick={() => exportSingleSAD(s)}>Export CSV</MenuItem>
-                              <MenuDivider />
-                              <MenuItem icon={<FaTrashAlt />} onClick={() => { setArchiveTarget(s.sad_no); setArchiveOpen(true); }}>Archive SAD</MenuItem>
-                            </MenuList>
-                          </Menu>
-                        </HStack>
-                      </Td>
-                    </RowMotion>
-                  );
-                })}
-              </AnimatePresence>
-            </Tbody>
-          </Table>
+                        </Td>
+                      </RowMotion>
+                    );
+                  })}
+                </AnimatePresence>
+              </Tbody>
+            </Table>
+          </Box>
         )}
       </Box>
 
-      {/* Details modal */}
-      <Modal isOpen={detailsOpen} onClose={() => setDetailsOpen(false)} size="xl" scrollBehavior="inside">
+      {/* Details modal (AgentDashboard-like) - heavier width so content fits */}
+      <Modal isOpen={detailsOpen} onClose={() => setDetailsOpen(false)} size="6xl" scrollBehavior="inside">
         <ModalOverlay />
-        <ModalContent>
+        <ModalContent
+          // increase width by about 50% of typical xl (responsive)
+          maxW={{ base: '95vw', md: '90vw', lg: '1200px' }}
+          width={{ base: '95vw', md: '90vw', lg: '1200px' }}
+          margin="24px auto"
+        >
           <ModalHeader>Details — SAD {detailsData?.sad?.sad_no}</ModalHeader>
           <ModalCloseButton />
           <ModalBody>
@@ -1087,47 +1253,94 @@ export default function SADDeclaration() {
               <>
                 {detailsData.sad ? (
                   <>
-                    <Text mb={2}>Declared weight: <strong>{Number(detailsData.sad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                    <Text mb={2}>
-                      Discharged weight: <strong>{Number(detailsData.sad.total_recorded_weight || 0).toLocaleString()} kg</strong>
-                    </Text>
+                    {/* Stats cards — same appearance as AgentDashboard (responsive) */}
+                    <ChakraSimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mb={4}>
+                      <Box>
+                        <Stat bg="blue.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                          <StatLabel>Declared Weight</StatLabel>
+                          <StatNumber>{Number(detailsData.sad.declared_weight || 0).toLocaleString()}</StatNumber>
+                          <StatHelpText>From SAD Declaration</StatHelpText>
+                        </Stat>
+                      </Box>
 
-                    {/* show colored discrepancy */}
-                    {(() => {
-                      const recorded = Number(detailsData.sad.total_recorded_weight || 0);
-                      const declared = Number(detailsData.sad.declared_weight || 0);
-                      const diff = recorded - declared;
-                      let color = 'green.600';
-                      if (diff > 0) color = 'red.600';
-                      else if (diff < 0) color = 'blue.600';
-                      else color = 'green.600';
-                      return (
-                        <Text mb={3} color={color}>
-                          Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
-                        </Text>
-                      );
-                    })()}
+                      <Box>
+                        <Stat bg="green.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                          <StatLabel>Discharged Weight</StatLabel>
+                          <StatNumber>{Number(detailsData.sad.total_recorded_weight != null ? detailsData.sad.total_recorded_weight : (detailsData.tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0)).toLocaleString()}</StatNumber>
+                          <StatHelpText>Sum of tickets</StatHelpText>
+                        </Stat>
+                      </Box>
 
-                    <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
-                    <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
-                    <Text mb={4}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
+                      <Box>
+                        <Stat bg="gray.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                          <StatLabel>SAD Status</StatLabel>
+                          <StatNumber>{detailsData.sad.status || 'Unknown'}</StatNumber>
+                          <StatHelpText>{detailsData.sad.total_recorded_weight != null ? 'Declaration exists in DB' : 'No declaration found'}</StatHelpText>
+                        </Stat>
+                      </Box>
+
+                      <Box>
+                        {(() => {
+                          const recorded = Number(detailsData.sad.total_recorded_weight || 0);
+                          const declared = Number(detailsData.sad.declared_weight || 0);
+                          if (declared != null && declared > 0 && recorded > declared) {
+                            const diff = recorded - declared;
+                            const pct = declared > 0 ? (diff / declared) * 100 : null;
+                            return (
+                              <Stat bg="red.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                                <StatLabel>Discrepancy</StatLabel>
+                                <StatNumber>{diff.toLocaleString()} kg</StatNumber>
+                                <StatHelpText>{pct != null ? `${pct.toFixed(1)}% over declared` : 'Over declared weight'}</StatHelpText>
+                              </Stat>
+                            );
+                          }
+                          return (
+                            <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
+                              <StatLabel>Discrepancy</StatLabel>
+                              <StatNumber>{detailsData.sad.declared_weight != null ? `${Math.max(0, (detailsData.sad.total_recorded_weight || 0) - (detailsData.sad.declared_weight || 0)).toLocaleString()} kg` : '—'}</StatNumber>
+                              <StatHelpText>{detailsData.sad.declared_weight != null ? 'Within declared limits' : 'No declared weight'}</StatHelpText>
+                            </Stat>
+                          );
+                        })()}
+                      </Box>
+                    </ChakraSimpleGrid>
+
+                    {/* Action buttons like AgentDashboard */}
+                    <Flex gap={3} align="center" mb={3} wrap="wrap">
+                      <Button size="sm" colorScheme="blue" onClick={() => { generatePdfReport(detailsData.sad); }}>Print / Save PDF</Button>
+                      <Button size="sm" onClick={() => exportSingleSAD(detailsData.sad)}>Export CSV</Button>
+                      <Button size="sm" onClick={() => recalcTotalForSad(detailsData.sad.sad_no)}>Recalc Totals</Button>
+                      <Button size="sm" onClick={() => handleExplainDiscrepancy(detailsData.sad)}>Explain discrepancy</Button>
+                      <Button size="sm" leftIcon={<FaEnvelope />} onClick={() => emailSad(detailsData.sad)}>Email</Button>
+                    </Flex>
+
+                    <Text mb={1}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
+                    <Text mb={1}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
+
+                    {/* Completed fields */}
+                    <Text mb={3}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleString() : '—'}</strong></Text>
+                    <Text mb={4}>Completed By: <strong>{detailsData.completed_by_username || (detailsData.sad && detailsData.sad.completed_by ? (createdByMap[detailsData.sad.completed_by] || detailsData.sad.completed_by) : (completedByMapRef.current[detailsData.sad?.sad_no] || '—'))}</strong></Text>
 
                     <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
-                    {detailsData.tickets && detailsData.tickets.length ? (
-                      <Table size="sm">
-                        <Thead><Tr><Th>Ticket</Th><Th>Truck</Th><Th isNumeric>Net (kg)</Th><Th>Date</Th></Tr></Thead>
-                        <Tbody>
-                          {detailsData.tickets.map(t => (
-                            <Tr key={t.ticket_id || t.ticket_no}>
-                              <Td>{t.ticket_no}</Td>
-                              <Td>{t.gnsw_truck_no || t.truck_no || '—'}</Td>
-                              <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
-                              <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
-                            </Tr>
-                          ))}
-                        </Tbody>
-                      </Table>
-                    ) : <Text>No tickets recorded.</Text>}
+
+                    <Box overflowX="auto" mb={4}>
+                      {detailsData.tickets && detailsData.tickets.length ? (
+                        <Table size="sm">
+                          <Thead><Tr><Th>Ticket</Th><Th>Truck</Th><Th isNumeric>Net (kg)</Th><Th>Date</Th></Tr></Thead>
+                          <Tbody>
+                            {detailsData.tickets.map(t => (
+                              <Tr key={t.ticket_id || t.ticket_no}>
+                                <Td style={{ maxWidth: 200, overflowWrap: 'break-word' }}>{t.ticket_no}</Td>
+                                <Td>{t.gnsw_truck_no || t.truck_no || '—'}</Td>
+                                <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
+                                <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
+                              </Tr>
+                            ))}
+                          </Tbody>
+                        </Table>
+                      ) : <Text>No tickets recorded.</Text>}
+                    </Box>
+
                   </>
                 ) : <Text>No data</Text>}
               </>
@@ -1139,10 +1352,36 @@ export default function SADDeclaration() {
         </ModalContent>
       </Modal>
 
+      {/* Status Edit modal */}
+      <Modal isOpen={statusEditOpen} onClose={closeStatusEdit} isCentered>
+        <ModalOverlay />
+        <ModalContent maxW={{ base: '90vw', md: '480px' }}>
+          <ModalHeader>Edit SAD Status</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <FormControl>
+              <FormLabel>Select Status</FormLabel>
+              <Select value={statusEditValue} onChange={(e) => setStatusEditValue(e.target.value)}>
+                <option value="In Progress">In Progress</option>
+                <option value="On Hold">On Hold</option>
+                <option value="Completed">Completed</option>
+              </Select>
+            </FormControl>
+            {statusEditValue === 'Completed' && (
+              <Text mt={3} fontSize="sm" color="gray.600">Marking as Completed will set Completed At to now and record who completed it.</Text>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" onClick={closeStatusEdit}>Cancel</Button>
+            <Button colorScheme="teal" ml={3} onClick={confirmStatusEdit}>Save</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
       {/* SAD detail modal (existing) */}
       <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} size="xl" scrollBehavior="inside">
         <ModalOverlay />
-        <ModalContent>
+        <ModalContent maxW={{ base: '95vw', md: '800px' }}>
           <ModalHeader>SAD {selectedSad?.sad_no}</ModalHeader>
           <ModalCloseButton />
           <ModalBody>
@@ -1172,21 +1411,23 @@ export default function SADDeclaration() {
 
                 <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
                 {detailLoading ? <Text>Loading...</Text> : (
-                  <Table size="sm">
-                    <Thead>
-                      <Tr><Th>Ticket</Th><Th>Truck</Th><Th isNumeric>Net (kg)</Th><Th>Date</Th></Tr>
-                    </Thead>
-                    <Tbody>
-                      {detailTickets.map(t => (
-                        <Tr key={t.ticket_id || t.ticket_no}>
-                          <Td>{t.ticket_no}</Td>
-                          <Td>{t.gnsw_truck_no}</Td>
-                          <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
-                          <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
-                        </Tr>
-                      ))}
-                    </Tbody>
-                  </Table>
+                  <Box overflowX="auto">
+                    <Table size="sm">
+                      <Thead>
+                        <Tr><Th>Ticket</Th><Th>Truck</Th><Th isNumeric>Net (kg)</Th><Th>Date</Th></Tr>
+                      </Thead>
+                      <Tbody>
+                        {detailTickets.map(t => (
+                          <Tr key={t.ticket_id || t.ticket_no}>
+                            <Td>{t.ticket_no}</Td>
+                            <Td>{t.gnsw_truck_no}</Td>
+                            <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
+                            <Td>{t.date ? new Date(t.date).toLocaleDateString() : '—'}</Td>
+                          </Tr>
+                        ))}
+                      </Tbody>
+                    </Table>
+                  </Box>
                 )}
               </>
             )}
@@ -1235,25 +1476,27 @@ export default function SADDeclaration() {
             {(!docsModal.docs || !docsModal.docs.length) ? (
               <Text color="gray.500">No documents attached</Text>
             ) : (
-              <Table size="sm">
-                <Thead>
-                  <Tr><Th>Filename</Th><Th>Tags</Th><Th>Actions</Th></Tr>
-                </Thead>
-                <Tbody>
-                  {docsModal.docs.map((d, i) => (
-                    <Tr key={i}>
-                      <Td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name || d.path || 'doc'}</Td>
-                      <Td>{(d.tags || []).length ? (d.tags.map((t, j) => <Tag key={j} size="sm" mr={1}><TagLabel>{t}</TagLabel></Tag>)) : <Text color="gray.500">—</Text>}</Td>
-                      <Td>
-                        <HStack>
-                          <Button size="xs" onClick={() => { window.open(d.url, '_blank', 'noopener'); }}>Open</Button>
-                          <IconButton size="xs" aria-label="Download" icon={<FaDownload />} onClick={() => { if (d.url) window.open(d.url, '_blank'); }} />
-                        </HStack>
-                      </Td>
-                    </Tr>
-                  ))}
-                </Tbody>
-              </Table>
+              <Box overflowX="auto">
+                <Table size="sm">
+                  <Thead>
+                    <Tr><Th>Filename</Th><Th>Tags</Th><Th>Actions</Th></Tr>
+                  </Thead>
+                  <Tbody>
+                    {docsModal.docs.map((d, i) => (
+                      <Tr key={i}>
+                        <Td style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name || d.path || 'doc'}</Td>
+                        <Td>{(d.tags || []).length ? (d.tags.map((t, j) => <Tag key={j} size="sm" mr={1}><TagLabel>{t}</TagLabel></Tag>)) : <Text color="gray.500">—</Text>}</Td>
+                        <Td>
+                          <HStack>
+                            <Button size="xs" onClick={() => { window.open(d.url, '_blank', 'noopener'); }}>Open</Button>
+                            <IconButton size="xs" aria-label="Download" icon={<FaDownload />} onClick={() => { if (d.url) window.open(d.url, '_blank'); }} />
+                          </HStack>
+                        </Td>
+                      </Tr>
+                    ))}
+                  </Tbody>
+                </Table>
+              </Box>
             )}
           </ModalBody>
           <ModalFooter>
@@ -1289,21 +1532,21 @@ export default function SADDeclaration() {
               <Box style={{ width: 48, height: 48, borderRadius: 12, background: 'linear-gradient(90deg,#7b61ff,#3ef4d0)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
                 ✨
               </Box>
-              <Box><Text fontWeight="bold">Create New SAD</Text><Text fontSize="sm" color="gray.500">Holographic registration</Text></Box>
+              <Box><Text fontWeight="bold">Create New SAD</Text><Text fontSize="sm" color="gray.500">Holographic registration (all fields required)</Text></Box>
             </Flex>
           </ModalHeader>
           <ModalCloseButton />
           <ModalBody>
             <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
-              <FormControl><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
-              <FormControl><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
-              <FormControl><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
-              <FormControl><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected</Text></FormControl>
+              <FormControl isRequired><FormLabel>SAD Number</FormLabel><Input value={sadNo} onChange={(e) => setSadNo(e.target.value)} /></FormControl>
+              <FormControl isRequired><FormLabel>Regime</FormLabel><Select placeholder="Select regime" value={regime} onChange={(e) => setRegime(e.target.value)}>{REGIME_OPTIONS.map(code => <option key={code} value={code}>{REGIME_LABEL_MAP[code] ? `${REGIME_LABEL_MAP[code]} (${code})` : code}</option>)}</Select></FormControl>
+              <FormControl isRequired><FormLabel>Declared Weight (kg)</FormLabel><Input type="text" value={formatNumber(declaredWeight)} onChange={(e) => setDeclaredWeight(parseNumberString(e.target.value))} /></FormControl>
+              <FormControl isRequired><FormLabel>Attach Documents</FormLabel><Input type="file" multiple onChange={(e) => { const arr = Array.from(e.target.files || []); setDocs(arr); toast({ title: 'Files attached', description: `${arr.length} file(s) attached`, status: 'info' }); }} /><Text fontSize="sm" color="gray.500" mt={1}>{docs.length} file(s) selected — at least one required</Text></FormControl>
             </SimpleGrid>
           </ModalBody>
           <ModalFooter>
             <Button variant="ghost" onClick={closeOrb}>Cancel</Button>
-            <Button colorScheme="teal" ml={3} onClick={handleCreateSAD} isLoading={loading}>Create SAD</Button>
+            <Button colorScheme="teal" ml={3} onClick={handleCreateSAD} isLoading={loading} isDisabled={!canCreate}>Create SAD</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
