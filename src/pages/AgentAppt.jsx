@@ -8,7 +8,7 @@ import {
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   IconButton, Badge, Divider, VStack, useBreakpointValue, Flex, InputGroup, InputRightElement, RadioGroup, Radio, Tooltip,
-  Image as ChakraImage
+  Image as ChakraImage, Spinner
 } from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -269,6 +269,25 @@ function normalizePhone(input) {
   return `+${digits}`;
 }
 
+// Auto-format phone for display while typing (adds +220 and spacing for Gambian numbers)
+function formatPhoneForDisplay(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  // if user already types plus, show normalized
+  const normalized = normalizePhone(s);
+  if (!normalized) return s;
+  // format +220 NNN NNNN or +220 NNN NNN
+  if (normalized.startsWith('+220')) {
+    const rest = normalized.slice(4); // after +220
+    if (rest.length <= 3) return `+220 ${rest}`;
+    if (rest.length <= 6) return `+220 ${rest.slice(0,3)} ${rest.slice(3)}`;
+    // if more, split into groups of 3/4
+    return `+220 ${rest.slice(0,3)} ${rest.slice(3,7)}${rest.length>7 ? ` ${rest.slice(7)}` : ''}`;
+  }
+  // fallback simple grouping
+  return normalized;
+}
+
 // ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
@@ -420,6 +439,11 @@ export default function AgentApptPage() {
   const [isConfirmOpen, setConfirmOpen] = useState(false);
   const [loadingCreate, setLoadingCreate] = useState(false);
 
+  // sms sending states
+  const [smsSending, setSmsSending] = useState(false);
+  const [smsAttempts, setSmsAttempts] = useState(0);
+  const [smsResult, setSmsResult] = useState(null);
+
   // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
   const [previewWeighbridgeNumber, setPreviewWeighbridgeNumber] = useState('');
@@ -527,6 +551,7 @@ export default function AgentApptPage() {
       .highlight-flash { box-shadow: 0 0 0 6px rgba(96,165,250,0.12) !important; transition: box-shadow 0.5s ease; }
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
       .muted { color: #6b7280; font-size: 0.9rem; }
+      .sms-loading-hint { display:flex; align-items:center; gap:8px; font-size:0.95rem; color:#4a5568; }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -699,10 +724,6 @@ export default function AgentApptPage() {
   const removeT1 = (idx) => { setT1s((p) => p.filter((_, i) => i !== idx)); toast({ status: 'info', title: 'T1 removed' }); };
 
   // ---------- NEW: driver name & phone check logic (debounced) ----------
-  //  - if exact driver name exists -> autopopulate phone
-  //  - if phone exists -> autopopulate name (if driverName empty); if name differs -> friendly message and block
-  //  - if both name+phone entered and not registered -> open quick-register modal (which now returns a Promise and continues)
-
   useEffect(() => {
     // watch driverName and attempt to auto-fill phone when exact match exists
     const nm = String(driverName || '').trim();
@@ -803,7 +824,7 @@ export default function AgentApptPage() {
               toast({
                 status: 'error',
                 title: 'Phone already registered',
-                description: `This phone number belongs to "${drv.name}". Please use the correct phone or select the registered driver.`,
+                description: `This phone number belongs to "${drv.name}". Please use the registered phone or select the registered driver.`,
                 duration: 8000,
               });
             } else {
@@ -831,7 +852,6 @@ export default function AgentApptPage() {
   }, [driverLicense, driverName, toast]);
 
   // ---------- helper run before opening Confirm: ensure driver registration ----------
-  // returns a Promise that resolves { ok: true, driver } or { ok: false, reason }
   async function ensureDriverRegistered() {
     const name = String(driverName || '').trim();
     const phoneRaw = String(driverLicense || '').trim();
@@ -1324,6 +1344,88 @@ export default function AgentApptPage() {
     }
   }
 
+  // ---------- Try to call notify-appointment function (tries supabase.functions.invoke then fetch) ----------
+  async function callNotifyFunction(body) {
+    // Try supabase.functions.invoke where available
+    try {
+      if (supabase && typeof supabase.functions?.invoke === 'function') {
+        const res = await supabase.functions.invoke('notify-appointment', { body: JSON.stringify(body) });
+        // supabase.functions.invoke returns { data, error } in many versions
+        if (res?.error) return { ok: false, error: res.error };
+        // sometimes returns data property
+        return { ok: true, data: res?.data ?? res };
+      }
+    } catch (e) {
+      console.warn('supabase.functions.invoke error (will fallback):', e);
+    }
+
+    // Fallback: direct fetch to functions path (uses anon key)
+    try {
+      const functionsUrl = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/+$/, '') + '/functions/v1/notify-appointment';
+      const anon = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+      const resp = await fetch(functionsUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: anon,
+        },
+        body: JSON.stringify(body),
+      });
+      const txt = await resp.text();
+      let parsed;
+      try { parsed = txt ? JSON.parse(txt) : null; } catch (_) { parsed = txt; }
+      if (!resp.ok) return { ok: false, error: parsed || `status ${resp.status}` };
+      return { ok: true, data: parsed };
+    } catch (e) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  }
+
+  // ---------- Notify with retry/backoff (uses callNotifyFunction) ----------
+  async function notifyWithRetries(notifyBody, maxAttempts = 3) {
+    setSmsSending(true);
+    setSmsAttempts(0);
+    setSmsResult(null);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      setSmsAttempts(attempt);
+      toast({
+        status: 'info',
+        title: attempt === 1 ? 'Sending SMS' : `Retrying SMS (attempt ${attempt})`,
+        description: attempt === 1 ? 'Notifying driver — sending SMS now.' : `Attempt ${attempt} to send SMS.`,
+        duration: 3000,
+      });
+
+      try {
+        const resp = await callNotifyFunction(notifyBody);
+        if (resp && resp.ok) {
+          setSmsResult({ ok: true, data: resp.data });
+          toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
+          setSmsSending(false);
+          return { ok: true, data: resp.data };
+        } else {
+          const err = resp?.error || 'Unknown error';
+          toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 140), duration: 4000 });
+          // exponential backoff
+          const wait = 800 * Math.pow(2, attempt - 1);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+      } catch (e) {
+        console.warn('notify attempt error', e);
+        toast({ status: 'warning', title: `SMS attempt ${attempt} error`, description: String(e?.message || e), duration: 4000 });
+        const wait = 800 * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+    }
+
+    setSmsSending(false);
+    setSmsResult({ ok: false, error: 'All attempts failed' });
+    toast({ status: 'error', title: 'SMS sending failed', description: 'All retry attempts failed. You can retry from the appointment details page.' });
+    return { ok: false, error: 'exhausted' };
+  }
+
   // ---------- Modified openConfirm: generate numbers, set preview, but ensure driver registered first ----------
   const openConfirm = async () => {
     // first run the driver registration/verification step (this will open modal and resolve automatically if needed)
@@ -1381,7 +1483,7 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // ---------- handleCreateAppointment (unchanged except phone normalization in payload) ----------
+  // ---------- handleCreateAppointment (modified to call notify edge function with retries) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
@@ -1474,6 +1576,7 @@ export default function AgentApptPage() {
       });
 
       // generate PDF & download & upload
+      let uploadedPdfUrl = null;
       try {
         const doc = <AppointmentPdf ticket={printable} />;
         const asPdf = pdfRender(doc);
@@ -1491,8 +1594,10 @@ export default function AgentApptPage() {
         try {
           const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
+            uploadedPdfUrl = publicUrl;
             await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
           } else if (path && dbAppointment.id) {
+            uploadedPdfUrl = path;
             await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
           }
         } catch (e) {
@@ -1514,7 +1619,53 @@ export default function AgentApptPage() {
         }]);
       } catch (e) { console.warn('log write failed', e); }
 
+      // Inform user DB created
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
+
+      // ---------- NEW: send SMS via Edge function with retries ----------
+      try {
+        // Build notify body
+        const notifyBody = {
+          appointment: {
+            appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
+            weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
+            pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
+            truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
+            driverName: dbAppointment.driverName || dbAppointment.driver_name,
+            agentName: dbAppointment.agentName || dbAppointment.agent_name,
+            agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
+            id: dbAppointment.id,
+            pdfUrl: uploadedPdfUrl || dbAppointment.pdf_url || null,
+          },
+          pdfBase64: null,
+          pdfFilename: null,
+          pdfUrl: uploadedPdfUrl || null,
+          recipients: {
+            driverPhone: normalizedDriverPhone,
+            agentName: agentName || dbAppointment.agentName || ''
+          }
+        };
+
+        // show a toast and loading indicator
+        toast({ status: 'info', title: 'Sending SMS', description: 'Attempting to notify the driver via SMS...', duration: 2500 });
+
+        const notifyResp = await notifyWithRetries(notifyBody, 3);
+        // notifyWithRetries already shows toasts for success/failure
+
+        if (notifyResp && notifyResp.ok) {
+          // optionally update appointment with notify status (non-blocking)
+          try {
+            await supabase.from('appointments').update({ last_notification_status: 'sent', last_notification_response: notifyResp.data }).eq('id', dbAppointment.id);
+          } catch (e) { /* ignore update failure */ }
+        } else {
+          try {
+            await supabase.from('appointments').update({ last_notification_status: 'failed' }).eq('id', dbAppointment.id);
+          } catch (e) {}
+        }
+      } catch (notifyErr) {
+        console.warn('Notification flow failed', notifyErr);
+        toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
+      }
 
       await triggerConfetti(160);
 
@@ -1543,6 +1694,8 @@ export default function AgentApptPage() {
       }
     } finally {
       setLoadingCreate(false);
+      setSmsSending(false);
+      setSmsAttempts(0);
     }
   };
 
@@ -1762,7 +1915,22 @@ export default function AgentApptPage() {
 
            <FormControl isRequired>
             <FormLabel>Driver Phone Number</FormLabel>
-            <ChakraInput value={driverLicense} onChange={(e) => setDriverLicense(e.target.value)} placeholder="e.g. 7701234 (we save as +220...)" />
+            <ChakraInput
+              value={driverLicense}
+              onChange={(e) => {
+                // auto-format while typing for user-friendly display
+                const raw = e.target.value || '';
+                const formatted = formatPhoneForDisplay(raw);
+                // but keep original when formatting fails to avoid overwriting
+                setDriverLicense(formatted || raw);
+              }}
+              onBlur={() => {
+                // ensure saved display uses normalized (E.164)
+                const norm = normalizePhone(driverLicense);
+                if (norm) setDriverLicense(norm);
+              }}
+              placeholder="e.g. 7701234 (we save as +220...)"
+            />
             {/* Inline driver check status messages */}
             {driverCheckStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking driver info…</Text>}
             {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Driver found, you may proceed now!</Text>}
@@ -1965,11 +2133,20 @@ export default function AgentApptPage() {
                   </Table>
                 </Box>
               </Box>
+
+              {/* SMS sending hint */}
+              {smsSending && (
+                <Box className="sms-loading-hint" mt={2}>
+                  <Spinner size="sm" /> <Text>Sending SMS to driver (attempt {smsAttempts})…</Text>
+                </Box>
+              )}
             </Stack>
           </ModalBody>
           <ModalFooter>
             <Button onClick={closeConfirm} mr={3}>Cancel</Button>
-            <Button colorScheme="blue" leftIcon={<DownloadIcon />} onClick={handleCreateAppointment} isLoading={loadingCreate}>Confirm & Download Ticket</Button>
+            <Button colorScheme="blue" leftIcon={<DownloadIcon />} onClick={handleCreateAppointment} isLoading={loadingCreate}>
+              Confirm & Download Ticket
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
