@@ -7,6 +7,7 @@ import {
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
+  Tooltip, Badge, Grid,
 } from '@chakra-ui/react';
 import {
   FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
@@ -114,6 +115,13 @@ export default function SADDeclaration() {
   // details modal (shows declared/discharged/status/createdAt/createdBy + tickets)
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsData, setDetailsData] = useState({ sad: null, tickets: [], created_by_username: null, loading: false });
+
+  // transaction breakdown modal (NEW: uses AgentSAD styling)
+  const [txnModalOpen, setTxnModalOpen] = useState(false);
+  const [txnModalLoading, setTxnModalLoading] = useState(false);
+  const [txnModalSadNo, setTxnModalSadNo] = useState(null);
+  const [txnModalTickets, setTxnModalTickets] = useState([]);
+  const [txnCounts, setTxnCounts] = useState({ manual: 0, uploaded: 0, total: 0, others: 0 });
 
   // filters / NL / paging / sorting
   const [nlQuery, setNlQuery] = useState('');
@@ -910,6 +918,49 @@ export default function SADDeclaration() {
     }
   };
 
+  // ------------------- Transaction modal helpers -------------------
+  const openTxnModal = async (sad) => {
+    const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
+    setTxnModalSadNo(trimmed);
+    setTxnModalLoading(true);
+    setTxnModalOpen(true);
+    try {
+      const { data: tickets = [], error } = await supabase
+        .from('tickets')
+        .select('ticket_no, net, weight, gnsw_truck_no, date')
+        .eq('sad_no', trimmed)
+        .order('date', { ascending: false })
+        .limit(1000);
+
+      if (error) {
+        throw error;
+      }
+
+      // classify manual vs uploaded
+      const manual = (tickets || []).filter(t => /^M-/i.test(String(t.ticket_no || ''))).length;
+      const uploaded = (tickets || []).filter(t => /^\d+/.test(String(t.ticket_no || ''))).length;
+      const others = (tickets || []).length - manual - uploaded;
+
+      setTxnCounts({ manual, uploaded, total: (tickets || []).length, others });
+      setTxnModalTickets(tickets || []);
+      await pushActivity(`Viewed transactions breakdown for ${trimmed}`);
+    } catch (e) {
+      console.error('openTxnModal failed', e);
+      toast({ title: 'Could not load transactions', description: e?.message || 'Unexpected', status: 'error' });
+      setTxnCounts({ manual: 0, uploaded: 0, total: 0, others: 0 });
+      setTxnModalTickets([]);
+    } finally {
+      setTxnModalLoading(false);
+    }
+  };
+
+  const closeTxnModal = () => {
+    setTxnModalOpen(false);
+    setTxnModalTickets([]);
+    setTxnModalSadNo(null);
+    setTxnCounts({ manual: 0, uploaded: 0, total: 0, others: 0 });
+  };
+
   // UI derived values
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
@@ -1041,12 +1092,91 @@ export default function SADDeclaration() {
 .table-responsive { margin-top:18px; }
 .table thead th { background: linear-gradient(90deg,#b02a37,#8a1f27); color:var(--text-light); border:none; padding:12px 8px; font-weight:700; text-align:center; }
 .table tbody td { background: #fff; padding:12px 8px; border-radius:8px; vertical-align:middle; text-align:center; color:var(--text-dark); border: 1px solid rgba(2,6,23,0.06) }
+
+/* reuse the AgentSAD tx-badge look */
+.sad-link {
+  background: linear-gradient(90deg,#6D28D9,#06B6D4);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight:700;
+  text-decoration: none;
+  border-bottom: 2px dotted rgba(0,0,0,0.06);
+}
+.sad-link:hover { filter: brightness(1.05); transform: translateY(-1px); text-decoration: underline; }
+
+.tx-badge {
+  background: linear-gradient(90deg,#7b61ff,#06b6d4);
+  color: white;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-weight: 700;
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(99,102,241,0.12);
+  display:inline-flex;
+  flex-direction:column;
+  align-items:center;
+  gap:4px;
+}
+.tx-sub { font-size: 11px; opacity: 0.95; display:block; margin-top:2px; color: rgba(255,255,255,0.95); font-weight:600; }
+
+/* fallback txn-pill (kept for any places still referencing it) */
+.txn-pill {
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 10px;
+  border-radius:999px;
+  background: linear-gradient(90deg,#0ea5a0, #06b6d4);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 8px 24px rgba(6,182,212,0.12);
+  cursor: pointer;
+  transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+}
+.txn-pill:hover { transform: translateY(-2px); box-shadow: 0 16px 40px rgba(6,182,212,0.18); opacity: 0.98; }
+
+/* luxury modal style override (kept mostly for other modals) */
+.lux-modal .chakra-modal__content {
+  border-radius: 16px;
+  padding: 0;
+  overflow: hidden;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+  box-shadow: 0 30px 80px rgba(2,6,23,0.12);
+}
+.lux-modal .modal-header {
+  padding: 18px 20px;
+  background: linear-gradient(90deg,#7b61ff,#3ef4d0);
+  color: white;
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.lux-modal .modal-body {
+  padding: 18px;
+}
+.lux-modal .modal-footer { padding: 12px 18px; }
+
+/* pill badges inside modal */
+.txn-badge {
+  border-radius: 10px;
+  padding: 8px 12px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  box-shadow: 0 6px 20px rgba(2,6,23,0.06);
+  background: #fff;
+}
+
+/* responsive */
 @media (max-width:780px) {
   .table thead { display:none; }
   .table tbody tr { display:block; background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(255,255,255,0.96)); margin-bottom:14px; border-radius:14px; padding:12px; box-shadow: 0 8px 24px rgba(2,6,23,0.04);}
   .table tbody td { display:block; text-align:left; padding:8px 0; border: none; }
   .table tbody td::before { content: attr(data-label); display:inline-block; width:130px; font-weight:700; color:var(--muted); }
 }
+
+/* orb CTA */
 .orb-cta {
   position:fixed; right:28px; bottom:28px; z-index:2400;
   width:72px;height:72px;border-radius:999px;background:linear-gradient(90deg,#7b61ff,#3ef4d0); color:#fff; cursor:pointer;
@@ -1208,10 +1338,6 @@ export default function SADDeclaration() {
               <AnimatePresence>
                 {pagedSads.map((s) => {
                   const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
-                  // discrepancy color rules required:
-                  // red when discharged > declared (discrepancy > 0)
-                  // blue when discharged < declared (discrepancy < 0)
-                  // green when equal (discrepancy === 0)
                   let discColor = 'green.600';
                   if (discrepancy > 0) discColor = 'red.600';
                   else if (discrepancy < 0) discColor = 'blue.600';
@@ -1219,7 +1345,7 @@ export default function SADDeclaration() {
 
                   const color = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
-                  const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
+                  const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code
 
                   return (
                     <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
@@ -1227,7 +1353,25 @@ export default function SADDeclaration() {
                       <Td data-label="Regime"><Text>{regimeDisplay}</Text></Td>
                       <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
                       <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
-                      <Td data-label="No. of Transactions" isNumeric><Text>{Number(s.ticket_count || 0).toLocaleString()}</Text></Td>
+
+                      {/* Upgraded Number of Transactions cell (AgentSAD look) */}
+                      <Td data-label="No. of Transactions" isNumeric>
+                        <Tooltip label="Click to view breakdown (manual vs uploaded)" placement="top" openDelay={150}>
+                          <Button
+                            variant="ghost"
+                            onClick={() => openTxnModal(s)}
+                            aria-label={`View transactions for ${s.sad_no}`}
+                            title="View transactions breakdown"
+                            style={{ padding: 0 }}
+                          >
+                            <Box className="tx-badge">
+                              <span style={{ fontSize: 14 }}>{Number(s.ticket_count || 0).toLocaleString()}</span>
+                              <span className="tx-sub">transactions</span>
+                            </Box>
+                          </Button>
+                        </Tooltip>
+                      </Td>
+
                       <Td data-label="Status">
                         <VStack align="start" spacing={1}>
                           <HStack>
@@ -1269,6 +1413,75 @@ export default function SADDeclaration() {
           </Table>
         )}
       </Box>
+
+      {/* Transactions modal — matches AgentSAD style */}
+      <Modal isOpen={txnModalOpen} onClose={closeTxnModal} isCentered size="md" motionPreset="scale">
+        <ModalOverlay />
+        <ModalContent borderRadius="12px" padding={0}>
+          <ModalHeader>Transactions — {txnModalSadNo}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            {txnModalLoading ? (
+              <Flex align="center" justify="center" py={8}><Spinner /></Flex>
+            ) : (
+              <>
+                <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3} mb={4}>
+                  <Box p={4} borderRadius="md" bg="linear-gradient(90deg,#111827,#6d28d9)" color="white" boxShadow="sm">
+                    <Text fontSize="sm" opacity={0.9}>Manual tickets</Text>
+                    <Text fontSize="2xl" fontWeight="700" mt={2}>{txnCounts.manual.toLocaleString()}</Text>
+                    <Text fontSize="xs" mt={1} opacity={0.85}>Start with <code>M-</code></Text>
+                  </Box>
+
+                  <Box p={4} borderRadius="md" bg="linear-gradient(90deg,#06b6d4,#0ea5a0)" color="white" boxShadow="sm">
+                    <Text fontSize="sm" opacity={0.9}>Uploaded (numeric)</Text>
+                    <Text fontSize="2xl" fontWeight="700" mt={2}>{txnCounts.uploaded.toLocaleString()}</Text>
+                    <Text fontSize="xs" mt={1} opacity={0.85}>Starts with numbers</Text>
+                  </Box>
+                </SimpleGrid>
+
+                <Box mb={3}>
+                  <Text fontSize="sm" color="gray.600">Total transactions: <strong>{txnCounts.total.toLocaleString()}</strong></Text>
+                </Box>
+
+                <Box mb={2}>
+                  <Text fontSize="sm" mb={2} fontWeight="semibold">Recent / sample tickets</Text>
+                  {txnModalTickets && txnModalTickets.length ? (
+                    <Box maxH="260px" overflowY="auto" border="1px solid" borderColor="gray.100" borderRadius="md" p={2}>
+                      <Table size="sm">
+                        <Thead>
+                          <Tr><Th>Ticket</Th><Th>Truck</Th><Th isNumeric>Net</Th></Tr>
+                        </Thead>
+                        <Tbody>
+                          {txnModalTickets.slice(0, 200).map((t, i) => (
+                            <Tr key={`${t.ticket_no || 't'}-${i}`}>
+                              <Td style={{ maxWidth: 160, overflowWrap: 'break-word' }}>{t.ticket_no}</Td>
+                              <Td>{t.gnsw_truck_no || '—'}</Td>
+                              <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
+                            </Tr>
+                          ))}
+                        </Tbody>
+                      </Table>
+                    </Box>
+                  ) : <Text color="gray.500">No tickets to show.</Text>}
+                </Box>
+
+                <Text fontSize="xs" color="gray.500">Tip: manual tickets are those created by manual entry and start with <code>M-</code>. Uploaded tickets are typically numeric IDs.</Text>
+              </>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="ghost" onClick={closeTxnModal}>Close</Button>
+            <Button colorScheme="teal" ml={3} onClick={() => {
+              // convenience: open details modal for the same SAD
+              if (txnModalSadNo) {
+                const match = sads.find(x => x.sad_no === txnModalSadNo);
+                if (match) openDetailsModal(match);
+                closeTxnModal();
+              }
+            }}>Open SAD Details</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
 
       {/* Details modal */}
       <Modal isOpen={detailsOpen} onClose={() => setDetailsOpen(false)} size="xl" scrollBehavior="inside">
