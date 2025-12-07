@@ -680,7 +680,7 @@ export default function SADDeclaration() {
         const { error: err2 } = await supabase.from('sad_declarations').update(fallbackPayload).eq('sad_no', trimmed);
         if (err2) throw err2;
       }
-
+    
       // if newStatus is completed, record who completed in local map (fallback)
       if (newStatus === 'Completed' && currentUser) {
         const uname = (currentUser.user_metadata && (currentUser.user_metadata.full_name || currentUser.user_metadata.fullName)) || currentUser.email || currentUser.id;
