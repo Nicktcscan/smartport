@@ -302,7 +302,7 @@ function normalizeTruckNumber(raw) {
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
-    appointmentNumber: t.appointmentNumber || t.appointment_number || '',
+    appointmentNumber: t.appointmentNumber || t.appointment_number || t.appointmentNo || t.appointment_no || '',
     weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
     agentTin: t.agentTin || t.agent_tin || '',
     agentName: t.agentName || t.agent_name || '',
@@ -1363,32 +1363,53 @@ export default function AgentApptPage() {
     // Try supabase.functions.invoke where available
     try {
       if (supabase && typeof supabase.functions?.invoke === 'function') {
+        // Some supabase client versions accept an object body, others require string.
+        // We'll send stringified body for maximum compatibility.
         const res = await supabase.functions.invoke('notify-appointment', { body: JSON.stringify(body) });
-        // supabase.functions.invoke returns { data, error } in many versions
+        // Normalize return shape: many versions return { data, error } or the raw Response-like
         if (res?.error) return { ok: false, error: res.error };
-        // sometimes returns data property
+        // If res has status and not ok, treat as error
+        if (typeof res?.status === 'number' && res.status >= 400) {
+          return { ok: false, error: res?.data ?? ('status ' + res.status) };
+        }
         return { ok: true, data: res?.data ?? res };
       }
     } catch (e) {
+      // if invoke fails, we'll fallback to fetch below
       console.warn('supabase.functions.invoke error (will fallback):', e);
     }
 
     // Fallback: direct fetch to functions path (uses anon key)
     try {
-      const functionsUrl = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/+$/, '') + '/functions/v1/notify-appointment';
+      const base = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/+$/, '');
+      if (!base) throw new Error('Missing VITE_SUPABASE_URL');
+      const functionsUrl = `${base}/functions/v1/notify-appointment`;
       const anon = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+
+      const headers = {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      };
+      if (anon) {
+        headers.apikey = anon;
+        // also send Authorization Bearer for servers expecting it
+        headers.Authorization = `Bearer ${anon}`;
+      }
+
       const resp = await fetch(functionsUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: anon,
-        },
+        headers,
+        // note: this will trigger preflight if Authorization is present - ensure server allows it
         body: JSON.stringify(body),
       });
-      const txt = await resp.text();
+
+      const text = await resp.text();
       let parsed;
-      try { parsed = txt ? JSON.parse(txt) : null; } catch (_) { parsed = txt; }
-      if (!resp.ok) return { ok: false, error: parsed || `status ${resp.status}` };
+      try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = text; }
+
+      if (!resp.ok) {
+        return { ok: false, error: parsed || `status ${resp.status}` };
+      }
       return { ok: true, data: parsed };
     } catch (e) {
       return { ok: false, error: e?.message || String(e) };
