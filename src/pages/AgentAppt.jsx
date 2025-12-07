@@ -8,7 +8,7 @@ import {
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   IconButton, Badge, Divider, VStack, useBreakpointValue, Flex, InputGroup, InputRightElement, RadioGroup, Radio, Tooltip,
-  Image as ChakraImage, Spinner
+  Image as ChakraImage, Spinner, CircularProgress, CircularProgressLabel
 } from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -288,21 +288,18 @@ function formatPhoneForDisplay(raw) {
   return normalized;
 }
 
-// ---------- Truck normalization helper ----------
+// ---------- Truck number normalization helper ----------
 function normalizeTruckNumber(raw) {
-  if (!raw && raw !== '') return '';
-  try {
-    return String(raw || '').replace(/\s+/g, '').toUpperCase();
-  } catch (e) {
-    return String(raw || '');
-  }
+  // remove ALL whitespace and uppercase
+  if (!raw) return '';
+  return String(raw).replace(/\s+/g, '').toUpperCase();
 }
 
 // ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
   const ticketData = {
-    appointmentNumber: t.appointmentNumber || t.appointment_number || t.appointmentNo || t.appointment_no || '',
+    appointmentNumber: t.appointmentNumber || t.appointment_number || '',
     weighbridgeNumber: t.weighbridgeNumber || t.weighbridge_number || '',
     agentTin: t.agentTin || t.agent_tin || '',
     agentName: t.agentName || t.agent_name || '',
@@ -561,7 +558,8 @@ export default function AgentApptPage() {
       .highlight-flash { box-shadow: 0 0 0 6px rgba(96,165,250,0.12) !important; transition: box-shadow 0.5s ease; }
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
       .muted { color: #6b7280; font-size: 0.9rem; }
-      .sms-loading-hint { display:flex; align-items:center; gap:8px; font-size:0.95rem; color:#4a5568; }
+      .sms-loading-hint { display:flex; align-items:center; gap:12px; font-size:0.95rem; color:#1f2937; background: linear-gradient(90deg, rgba(59,130,246,0.06), rgba(167,139,250,0.04)); padding:10px 12px; border-radius:10px; border:1px solid rgba(59,130,246,0.08); }
+      .sms-loading-hint p { margin:0; font-weight:600; }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -620,11 +618,7 @@ export default function AgentApptPage() {
     if (!agentName.trim()) { toast({ status: 'error', title: 'Agent Name required' }); return false; }
     if (!warehouse) { toast({ status: 'error', title: 'Warehouse required' }); return false; }
     if (!pickupDate) { toast({ status: 'error', title: 'Pick-up Date required' }); return false; }
-
-    // use normalized truck value for validation (auto-remove spaces)
-    const normalizedTruckForValidation = normalizeTruckNumber(truckNumber).trim();
-    if (!normalizedTruckForValidation) { toast({ status: 'error', title: 'Truck Number required' }); return false; }
-
+    if (!truckNumber.trim()) { toast({ status: 'error', title: 'Truck Number required' }); return false; }
     if (!driverName.trim()) { toast({ status: 'error', title: 'Driver Name required' }); return false; }
     if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver Phone required' }); return false; }
     if (t1s.length === 0) { toast({ status: 'error', title: 'Please add at least one T1 record' }); return false; }
@@ -1358,57 +1352,23 @@ export default function AgentApptPage() {
     }
   }
 
-  // ---------- Try to call notify-appointment function (tries supabase.functions.invoke then fetch) ----------
-  async function callNotifyFunction(body) {
-    // Try supabase.functions.invoke where available
+  // ---------- NEW: client -> Vercel serverless SMS API helper (replaces previous notify-edge logic) ----------
+  async function sendSmsViaServerless(body) {
+    // default path is relative to site root; override with VITE_SENDSMS_URL env if needed
+    const url = (import.meta.env.VITE_SENDSMS_URL || '/api/sendSMS');
     try {
-      if (supabase && typeof supabase.functions?.invoke === 'function') {
-        // Some supabase client versions accept an object body, others require string.
-        // We'll send stringified body for maximum compatibility.
-        const res = await supabase.functions.invoke('notify-appointment', { body: JSON.stringify(body) });
-        // Normalize return shape: many versions return { data, error } or the raw Response-like
-        if (res?.error) return { ok: false, error: res.error };
-        // If res has status and not ok, treat as error
-        if (typeof res?.status === 'number' && res.status >= 400) {
-          return { ok: false, error: res?.data ?? ('status ' + res.status) };
-        }
-        return { ok: true, data: res?.data ?? res };
-      }
-    } catch (e) {
-      // if invoke fails, we'll fallback to fetch below
-      console.warn('supabase.functions.invoke error (will fallback):', e);
-    }
-
-    // Fallback: direct fetch to functions path (uses anon key)
-    try {
-      const base = (import.meta.env.VITE_SUPABASE_URL || '').replace(/\/+$/, '');
-      if (!base) throw new Error('Missing VITE_SUPABASE_URL');
-      const functionsUrl = `${base}/functions/v1/notify-appointment`;
-      const anon = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
-
-      const headers = {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      };
-      if (anon) {
-        headers.apikey = anon;
-        // also send Authorization Bearer for servers expecting it
-        headers.Authorization = `Bearer ${anon}`;
-      }
-
-      const resp = await fetch(functionsUrl, {
+      const resp = await fetch(url, {
         method: 'POST',
-        headers,
-        // note: this will trigger preflight if Authorization is present - ensure server allows it
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify(body),
       });
-
-      const text = await resp.text();
+      const txt = await resp.text().catch(() => null);
       let parsed;
-      try { parsed = text ? JSON.parse(text) : null; } catch (e) { parsed = text; }
-
+      try { parsed = txt ? JSON.parse(txt) : null; } catch (_) { parsed = txt; }
       if (!resp.ok) {
-        return { ok: false, error: parsed || `status ${resp.status}` };
+        return { ok: false, status: resp.status, error: parsed || `status ${resp.status}` };
       }
       return { ok: true, data: parsed };
     } catch (e) {
@@ -1416,7 +1376,7 @@ export default function AgentApptPage() {
     }
   }
 
-  // ---------- Notify with retry/backoff (uses callNotifyFunction) ----------
+  // ---------- Notify with retry/backoff (now uses sendSmsViaServerless) ----------
   async function notifyWithRetries(notifyBody, maxAttempts = 3) {
     setSmsSending(true);
     setSmsAttempts(0);
@@ -1428,18 +1388,18 @@ export default function AgentApptPage() {
         status: 'info',
         title: attempt === 1 ? 'Sending SMS' : `Retrying SMS (attempt ${attempt})`,
         description: attempt === 1 ? 'Notifying driver — sending SMS now.' : `Attempt ${attempt} to send SMS.`,
-        duration: 3000,
+        duration: 2500,
       });
 
       try {
-        const resp = await callNotifyFunction(notifyBody);
+        const resp = await sendSmsViaServerless(notifyBody);
         if (resp && resp.ok) {
           setSmsResult({ ok: true, data: resp.data });
           toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
           setSmsSending(false);
           return { ok: true, data: resp.data };
         } else {
-          const err = resp?.error || 'Unknown error';
+          const err = resp?.error || resp?.data || 'Unknown error';
           toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 140), duration: 4000 });
           // exponential backoff
           const wait = 800 * Math.pow(2, attempt - 1);
@@ -1469,15 +1429,6 @@ export default function AgentApptPage() {
       // ensureDriverRegistered already opened modal or showed toast with reason — stop
       return;
     }
-
-    // Normalize truck number before validation to avoid user entering spaces only
-    const normalizedTruckAhead = normalizeTruckNumber(truckNumber);
-    if (!normalizedTruckAhead) {
-      toast({ status: 'error', title: 'Truck Number required' });
-      return;
-    }
-    // update visible field (UX) so preview shows normalized
-    setTruckNumber(normalizedTruckAhead);
 
     if (!validateMainForm()) return;
 
@@ -1527,7 +1478,7 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // ---------- handleCreateAppointment (modified to call notify edge function with retries) ----------
+  // ---------- handleCreateAppointment (modified to call notify serverless with retries) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
@@ -1580,14 +1531,8 @@ export default function AgentApptPage() {
 
     setLoadingCreate(true);
 
-    // Normalize driver phone
     const normalizedDriverPhone = normalizePhone(String(driverLicense || '').trim());
-
-    // Normalize truck number (remove all spaces and uppercase) and update UI
-    const normalizedTruckNumber = normalizeTruckNumber(truckNumber);
-    if (normalizedTruckNumber) {
-      setTruckNumber(normalizedTruckNumber);
-    }
+    const normalizedTruckNumber = normalizeTruckNumber(String(truckNumber || '').trim());
 
     const payload = {
       warehouse,
@@ -1596,7 +1541,7 @@ export default function AgentApptPage() {
       agentName: agentName.trim(),
       agentTin: agentTin.trim(),
       consolidated,
-      truckNumber: normalizedTruckNumber, // store normalized truck number
+      truckNumber: normalizedTruckNumber, // store normalized truck number (no spaces, uppercase)
       driverName: driverName.trim(),
       driverLicense: normalizedDriverPhone, // store normalized +220...
       regime: '',
@@ -1674,7 +1619,7 @@ export default function AgentApptPage() {
       // Inform user DB created
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
-      // ---------- NEW: send SMS via Edge function with retries ----------
+      // ---------- NEW: send SMS via serverless (Vercel) with retries ----------
       try {
         // Build notify body
         const notifyBody = {
@@ -1698,8 +1643,8 @@ export default function AgentApptPage() {
           }
         };
 
-        // show a toast and loading indicator
-        toast({ status: 'info', title: 'Sending SMS', description: 'Attempting to notify the driver via SMS...', duration: 2500 });
+        // show a toast and loading indicator (UI also shows styled loader)
+        toast({ status: 'info', title: 'Sending SMS', description: 'Attempting to notify the driver via SMS...', duration: 2000 });
 
         const notifyResp = await notifyWithRetries(notifyBody, 3);
         // notifyWithRetries already shows toasts for success/failure
@@ -1966,12 +1911,16 @@ export default function AgentApptPage() {
               value={truckNumber}
               onChange={(e) => setTruckNumber(e.target.value)}
               onBlur={() => {
-                // normalize UI display (remove whitespace, uppercase)
+                // when user leaves input, normalize in-place so they see final format
                 const norm = normalizeTruckNumber(truckNumber);
                 if (norm) setTruckNumber(norm);
               }}
-              placeholder="Truck Plate / No. e.g. BJL8392H"
+              placeholder="Truck Plate / No."
             />
+            <Text className="muted" mt={1}>
+              Expected format example: BJL8392H — Normalized:&nbsp;
+              <Text as="span" fontWeight="semibold">{normalizeTruckNumber(truckNumber) || '—'}</Text>
+            </Text>
           </FormControl>
 
            <FormControl isRequired>
@@ -2172,7 +2121,10 @@ export default function AgentApptPage() {
               <Text><b>Agent:</b> {agentName} ({agentTin})</Text>
               <Text><b>Warehouse:</b> {(WAREHOUSES.find(w => w.value === warehouse) || {}).label}</Text>
               <Text><b>Pick-up Date:</b> {pickupDate}</Text>
-              <Text><b>Truck:</b> {truckNumber}</Text>
+              <Text>
+                <b>Truck:</b> {truckNumber}
+                {normalizeTruckNumber(truckNumber) ? <Text as="span" fontSize="sm" color="gray.600"> &nbsp;(normalized: {normalizeTruckNumber(truckNumber)})</Text> : null}
+              </Text>
               <Text><b>Driver:</b> {driverName} — {driverLicense}</Text>
               <Text><b>Consolidated:</b> {consolidated}</Text>
 
@@ -2195,10 +2147,16 @@ export default function AgentApptPage() {
                 </Box>
               </Box>
 
-              {/* SMS sending hint */}
+              {/* SMS sending hint (styled) */}
               {smsSending && (
                 <Box className="sms-loading-hint" mt={2}>
-                  <Spinner size="sm" /> <Text>Sending SMS to driver (attempt {smsAttempts})…</Text>
+                  <CircularProgress value={Math.min(100, smsAttempts * (100 / 3))} size="44px" thickness="8px" capIsRound>
+                    <CircularProgressLabel>{smsAttempts}/3</CircularProgressLabel>
+                  </CircularProgress>
+                  <Box>
+                    <Text as="p">Sending SMS to driver</Text>
+                    <Text fontSize="sm" color="gray.600">Attempt {smsAttempts} — we will retry automatically on failure.</Text>
+                  </Box>
                 </Box>
               )}
             </Stack>
@@ -2260,7 +2218,7 @@ export default function AgentApptPage() {
             <Button colorScheme="teal" onClick={registerDriverQuick} isLoading={isRegisteringDriver}>Register Driver & Continue</Button>
           </ModalFooter>
         </ModalContent>
-      </Modal> 
+      </Modal>
 
     </Container>
   );
