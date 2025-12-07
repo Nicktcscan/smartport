@@ -264,6 +264,7 @@ export default function SADDeclaration() {
 
       // get counts per sad (tickets across DB)
       const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
+      let countsMap = {};
       if (sadNos.length) {
         const countResults = await runInBatches(sadNos, 25, async (sadKey) => {
           try {
@@ -282,18 +283,46 @@ export default function SADDeclaration() {
           }
         });
 
-        const countsMap = {};
+        countsMap = {};
         for (const r of countResults) countsMap[String(r.sadKey)] = Number(r.count || 0);
+      }
 
-        for (let i = 0; i < normalized.length; i++) {
-          const s = normalized[i];
-          const key = s.sad_no != null ? String(s.sad_no).trim() : '';
-          normalized[i] = {
-            ...s,
-            ticket_count: countsMap[key] || 0,
-            total_recorded_weight: toNumber(s.total_recorded_weight),
-          };
-        }
+      // NEW: compute total recorded weight per SAD by summing tickets (ensures discharged weight equals sum of transactions)
+      let totalsMap = {};
+      if (sadNos.length) {
+        const totalsResults = await runInBatches(sadNos, 25, async (sadKey) => {
+          try {
+            // fetch net/weight fields for tickets of this SAD and sum them
+            const { data: ticketsData, error: tErr } = await supabase
+              .from('tickets')
+              .select('net, weight')
+              .eq('sad_no', sadKey);
+            if (tErr) {
+              console.warn('ticket sum fetch failed for', sadKey, tErr);
+              return { sadKey, total: 0 };
+            }
+            const total = (ticketsData || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
+            return { sadKey, total };
+          } catch (e) {
+            console.warn('ticket sum exception for', sadKey, e);
+            return { sadKey, total: 0 };
+          }
+        });
+
+        totalsMap = {};
+        for (const r of totalsResults) totalsMap[String(r.sadKey)] = Number(r.total || 0);
+      }
+
+      // apply counts and totals to normalized SADs
+      for (let i = 0; i < normalized.length; i++) {
+        const s = normalized[i];
+        const key = s.sad_no != null ? String(s.sad_no).trim() : '';
+        normalized[i] = {
+          ...s,
+          ticket_count: countsMap[key] || 0,
+          // crucial: take the computed sum from tickets; fallback to stored DB value if no tickets
+          total_recorded_weight: typeof totalsMap[key] === 'number' ? totalsMap[key] : toNumber(s.total_recorded_weight),
+        };
       }
 
       // resolve created_by usernames (mostly will be currentUser)
@@ -546,7 +575,8 @@ export default function SADDeclaration() {
         }
 
         const computedTotal = (tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
-        const sd = { ...decl, total_recorded_weight: toNumber(decl.total_recorded_weight) || computedTotal, ticket_count: (tickets || []).length };
+        // ensure the details modal uses computedTotal as authoritative discharged weight
+        const sd = { ...decl, total_recorded_weight: computedTotal, ticket_count: (tickets || []).length };
 
         setDetailsData({ sad: sd, tickets: tickets || [], created_by_username: createdByUsername, completed_by_username: completedByUsername, loading: false });
       }
@@ -574,7 +604,7 @@ export default function SADDeclaration() {
           const computedTotal = (tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
           setDetailsData((prev) => ({
             ...prev,
-            sad: prev.sad ? { ...prev.sad, total_recorded_weight: toNumber(prev.sad.total_recorded_weight) || computedTotal, ticket_count: (tickets || []).length } : prev.sad,
+            sad: prev.sad ? { ...prev.sad, total_recorded_weight: computedTotal, ticket_count: (tickets || []).length } : prev.sad,
             tickets: tickets || [],
           }));
         }
@@ -728,7 +758,9 @@ export default function SADDeclaration() {
       const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
       if (error) throw error;
       const total = (tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
-      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+      // update DB persisted total (optional), keep UI consistent by re-fetching
+      const { error: updateErr } = await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+      if (updateErr) console.warn('could not persist recalc total', updateErr);
       await pushActivity(`Recalculated total for ${trimmed}: ${total}`, { sad_no: trimmed, by: currentUser?.id || null });
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
@@ -818,7 +850,7 @@ export default function SADDeclaration() {
       return;
     }
     const diff = recorded - declared;
-    const pct = ((diff / declared) * 100).toFixed(2);
+    const pct = ((diff / (declared || 1)) * 100).toFixed(2);
     let msg = '';
     if (Math.abs(diff) / Math.max(1, declared) < 0.01) {
       msg = `Recorded matches declared within 1% (${recorded} kg vs ${declared} kg).`;
@@ -920,7 +952,7 @@ export default function SADDeclaration() {
         iframe.contentWindow.document.close();
         iframe.onload = () => {
           try { iframe.contentWindow.focus(); iframe.contentWindow.print(); setTimeout(() => { document.body.removeChild(iframe); }, 1000); }
-          catch (err) { document.body.removeChild(iframe); toast({ title: 'Print failed', description: 'Could not print report.', status: 'error' }); }
+          catch (err) { document.body.removeChild(iframe); toast({ title: 'Print failed', description: 'Could not generate report.', status: 'error' }); }
         };
       }
     } catch (err) {
@@ -1400,7 +1432,7 @@ export default function SADDeclaration() {
 
                     const declared = declaredNum.toLocaleString();
                     const recorded = recordedNum.toLocaleString();
-                    const discrepancyText = discrepancy === 0 ? '0' : discrepancy.toLocaleString();
+                    const discrepancyText = Number.isFinite(discrepancy) ? (discrepancy === 0 ? '0' : discrepancy.toLocaleString()) : '0';
                     const creator = s.created_by_username || (s.created_by ? (createdByMap[s.created_by] || s.created_by) : '—');
 
                     const tooltipNode = (
@@ -1462,7 +1494,7 @@ export default function SADDeclaration() {
                         </Td>
                         <Td data-label="Discrepancy">
                           <Text color={discColor}>
-                            {Number.isFinite(discrepancy) ? (discrepancy === 0 ? '0' : discrepancy.toLocaleString()) : '0'}
+                            {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
                           </Text>
                         </Td>
                         <Td data-label="Actions">
