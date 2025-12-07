@@ -169,6 +169,20 @@ async function sendSmsViaTwilioRest(
   }
 }
 
+/** Attempt to read header key in several common names */
+function readApiKeyFromRequest(req: Request) {
+  const h = req.headers;
+  // prefer explicit apikey or x-api-key
+  const direct = h.get("apikey") || h.get("x-api-key") || h.get("x-api_key") || h.get("x-apikey");
+  if (direct) return direct.trim();
+  // Authorization: Bearer <token>
+  const auth = h.get("authorization") || h.get("Authorization");
+  if (auth && auth.toLowerCase().startsWith("bearer ")) {
+    return auth.slice(7).trim();
+  }
+  return null;
+}
+
 export const handler = async (req: Request): Promise<Response> => {
   try {
     // VERY IMPORTANT: handle preflight immediately before any heavy runtime work
@@ -210,7 +224,17 @@ export const handler = async (req: Request): Promise<Response> => {
     log("Runtime env (masked): SUPABASE_URL:", maskSecret(SUPABASE_URL), "SUPABASE_SERVICE_ROLE_KEY:", maskSecret(SUPABASE_SERVICE_ROLE_KEY), "TWILIO_ACCOUNT_SID:", maskSecret(TWILIO_ACCOUNT_SID));
 
     if (NOTIFY_API_KEY) {
-      log("NOTIFY_API_KEY is set (not enforced here)");
+      log("NOTIFY_API_KEY is set (will be enforced).");
+    }
+
+    // Validate API key if configured
+    const apiKeyFromReq = readApiKeyFromRequest(req) || (body && body.apiKey ? String(body.apiKey).trim() : null);
+    if (NOTIFY_API_KEY && String(NOTIFY_API_KEY).trim() !== "") {
+      // If NOTIFY_API_KEY is set, require match
+      if (!apiKeyFromReq || apiKeyFromReq !== String(NOTIFY_API_KEY).trim()) {
+        log("Auth failed: provided key", maskSecret(apiKeyFromReq || ""), "expected", maskSecret(NOTIFY_API_KEY));
+        return jsonResponse({ ok: false, error: "Unauthorized: missing or invalid api key" }, 401, req);
+      }
     }
 
     const { appointment, pdfBase64, pdfFilename, recipients } = body || {};
@@ -218,20 +242,21 @@ export const handler = async (req: Request): Promise<Response> => {
       return jsonResponse({ ok: false, error: "Missing appointment (id) in request body" }, 400, req);
     }
 
-    // derive driver phone
+    // derive driver phone - prefer explicit recipients.driverPhone, then appointment fields (various names)
     const driverPhone =
       (recipients && recipients.driverPhone) ||
-      (appointment.driverPhone || appointment.driverLicense) ||
+      (appointment.driverPhone || appointment.driverLicense || appointment.driver_phone || appointment.driver_license) ||
       null;
 
-    const apptNo = appointment.appointmentNumber || appointment.appointment_number || appointment.appointmentNo || "";
-    const wbNo = appointment.weighbridgeNumber || appointment.weighbridge_number || appointment.weighbridgeNo || "";
-    const pickup = appointment.pickupDate || appointment.pickup_date || "";
-    const truck = appointment.truckNumber || appointment.truck_number || "";
-    const drvName = appointment.driverName || appointment.driver_name || "";
+    const apptNo = (appointment.appointmentNumber || appointment.appointment_number || appointment.appointmentNo || "").toString().trim();
+    const wbNo = (appointment.weighbridgeNumber || appointment.weighbridge_number || appointment.weighbridgeNo || "").toString().trim();
+    const pickup = (appointment.pickupDate || appointment.pickup_date || "").toString().trim();
+    const truck = (appointment.truckNumber || appointment.truck_number || "").toString().trim();
+    const drvName = (appointment.driverName || appointment.driver_name || "").toString().trim();
 
     function isValidPhone(phone: string | null | undefined) {
       if (!phone || typeof phone !== "string") return false;
+      // require E.164-ish: + and at least 6 digits (some international numbers shorter), up to 20 digits
       return /^\+\d{6,20}$/.test(phone.trim());
     }
 

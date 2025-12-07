@@ -2260,7 +2260,7 @@ export default function AgentApptPage() {
             <Button colorScheme="teal" onClick={registerDriverQuick} isLoading={isRegisteringDriver}>Register Driver & Continue</Button>
           </ModalFooter>
         </ModalContent>
-      </Modal>
+      </Modal> 
 
     </Container>
   );
