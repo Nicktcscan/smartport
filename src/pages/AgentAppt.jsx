@@ -559,9 +559,9 @@ export default function AgentApptPage() {
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
       .muted { color: #6b7280; font-size: 0.9rem; }
       .sms-loading-hint { display:flex; align-items:center; gap:8px; font-size:0.95rem; color:#4a5568; }
-      .sms-loader-card { display:flex; gap:12px; align-items:center; padding:10px 12px; border-radius:8px; background: linear-gradient(90deg,#f8fafc,#ffffff); box-shadow: 0 8px 30px rgba(2,6,23,0.04); border: 1px solid rgba(2,6,23,0.04);}
-      .sms-result-success { color: #155724; background: #d4edda; padding:8px 10px; border-radius:8px; }
-      .sms-result-failure { color: #721c24; background: #f8d7da; padding:8px 10px; border-radius:8px; }
+      .sms-loader-card { display:flex; gap:12px; align-items:center; padding:12px 14px; border-radius:10px; background: linear-gradient(90deg,#f8fafc,#ffffff); box-shadow: 0 10px 40px rgba(2,6,23,0.06); border: 1px solid rgba(2,6,23,0.04); }
+      .sms-result-success { color: #0f5132; background: #d1e7dd; padding:12px 14px; border-radius:10px; }
+      .sms-result-failure { color: #842029; background: #f8d7da; padding:12px 14px; border-radius:10px; }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -1374,7 +1374,10 @@ export default function AgentApptPage() {
       // status 404/405 means the route isn't available or method not allowed
       if (!resp.ok) {
         const txt = await resp.text().catch(() => null);
-        return { ok: false, status: resp.status, error: txt || `HTTP ${resp.status}` };
+        let reason = txt || `HTTP ${resp.status}`;
+        if (resp.status === 404) reason = `API endpoint not found (404) - ensure /api/sendSMS exists on the server.`;
+        if (resp.status === 405) reason = `Method Not Allowed (405) - ensure /api/sendSMS accepts POST (and not only GET/OPTIONS).`;
+        return { ok: false, status: resp.status, error: reason };
       }
 
       let json = null;
@@ -1428,6 +1431,8 @@ export default function AgentApptPage() {
           return { ok: true, data: resp.data };
         } else {
           const err = resp?.error || resp?.data || `HTTP ${resp?.status || 'error'}`;
+          // set smsResult with last attempt info so UI shows it after all attempts
+          setSmsResult({ ok: false, error: err, status: resp?.status || null });
           toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 160), duration: 4000 });
           const wait = 800 * Math.pow(2, attempt - 1);
           await new Promise(r => setTimeout(r, wait));
@@ -1435,6 +1440,7 @@ export default function AgentApptPage() {
         }
       } catch (e) {
         console.warn('notify attempt error', e);
+        setSmsResult({ ok: false, error: e?.message || String(e) });
         toast({ status: 'warning', title: `SMS attempt ${attempt} error`, description: String(e?.message || e), duration: 4000 });
         const wait = 800 * Math.pow(2, attempt - 1);
         await new Promise(r => setTimeout(r, wait));
