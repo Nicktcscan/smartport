@@ -8,7 +8,7 @@ import {
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   IconButton, Badge, Divider, VStack, useBreakpointValue, Flex, InputGroup, InputRightElement, RadioGroup, Radio, Tooltip,
-  Image as ChakraImage, Spinner, CircularProgress, CircularProgressLabel
+  Image as ChakraImage, Spinner
 } from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -558,8 +558,21 @@ export default function AgentApptPage() {
       .highlight-flash { box-shadow: 0 0 0 6px rgba(96,165,250,0.12) !important; transition: box-shadow 0.5s ease; }
       .card-small { border-radius: 12px; padding: 14px; border: 1px solid rgba(2,6,23,0.04); background: linear-gradient(180deg,#ffffff,#f7fbff); }
       .muted { color: #6b7280; font-size: 0.9rem; }
-      .sms-loading-hint { display:flex; align-items:center; gap:12px; font-size:0.95rem; color:#1f2937; background: linear-gradient(90deg, rgba(59,130,246,0.06), rgba(167,139,250,0.04)); padding:10px 12px; border-radius:10px; border:1px solid rgba(59,130,246,0.08); }
-      .sms-loading-hint p { margin:0; font-weight:600; }
+      .sms-loading-hint {
+        display:flex; align-items:center; gap:10px; font-size:0.95rem; color:#1a365d;
+        padding:10px 12px; border-radius:8px; background: linear-gradient(90deg, rgba(14,165,233,0.06), rgba(99,102,241,0.04));
+        border: 1px solid rgba(59,130,246,0.08);
+      }
+      .sms-success {
+        display:flex; align-items:center; gap:10px; font-size:0.95rem; color:#065f46;
+        padding:10px 12px; border-radius:8px; background: linear-gradient(90deg, rgba(16,185,129,0.06), rgba(52,211,153,0.03));
+        border: 1px solid rgba(16,185,129,0.08);
+      }
+      .sms-failed {
+        display:flex; align-items:center; gap:10px; font-size:0.95rem; color:#7f1d1d;
+        padding:10px 12px; border-radius:8px; background: linear-gradient(90deg, rgba(239,68,68,0.04), rgba(240,46,77,0.02));
+        border: 1px solid rgba(239,68,68,0.08);
+      }
     `;
     let el = document.getElementById(id);
     if (!el) {
@@ -1352,38 +1365,37 @@ export default function AgentApptPage() {
     }
   }
 
-  // ---------- NEW: client -> Vercel serverless SMS API helper (replaces previous notify-edge logic) ----------
-  async function sendSmsViaServerless(body) {
-    // default path is relative to site root; override with VITE_SENDSMS_URL env if needed
-    const url = (import.meta.env.VITE_SENDSMS_URL || '/api/sendSMS');
+  // ---------- NEW: sendSmsApi - calls our Vercel/Next API route at /api/sendSMS ----------
+  async function sendSmsApi(to, message) {
     try {
-      const resp = await fetch(url, {
+      const resp = await fetch('/api/sendSMS', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ to, message }),
       });
       const txt = await resp.text().catch(() => null);
-      let parsed;
+      let parsed = null;
       try { parsed = txt ? JSON.parse(txt) : null; } catch (_) { parsed = txt; }
       if (!resp.ok) {
-        return { ok: false, status: resp.status, error: parsed || `status ${resp.status}` };
+        return { ok: false, status: resp.status, error: parsed || `Status ${resp.status}` };
       }
-      return { ok: true, data: parsed };
+      return { ok: true, status: resp.status, data: parsed };
     } catch (e) {
       return { ok: false, error: e?.message || String(e) };
     }
   }
 
-  // ---------- Notify with retry/backoff (now uses sendSmsViaServerless) ----------
-  async function notifyWithRetries(notifyBody, maxAttempts = 3) {
+  // ---------- Notify with retry/backoff (uses sendSmsApi) ----------
+  async function notifyWithRetries({ to, message }, maxAttempts = 3) {
     setSmsSending(true);
     setSmsAttempts(0);
     setSmsResult(null);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       setSmsAttempts(attempt);
+
       toast({
         status: 'info',
         title: attempt === 1 ? 'Sending SMS' : `Retrying SMS (attempt ${attempt})`,
@@ -1392,16 +1404,15 @@ export default function AgentApptPage() {
       });
 
       try {
-        const resp = await sendSmsViaServerless(notifyBody);
+        const resp = await sendSmsApi(to, message);
         if (resp && resp.ok) {
           setSmsResult({ ok: true, data: resp.data });
           toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
           setSmsSending(false);
           return { ok: true, data: resp.data };
         } else {
-          const err = resp?.error || resp?.data || 'Unknown error';
-          toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 140), duration: 4000 });
-          // exponential backoff
+          const err = resp?.error || resp?.data || `Status ${resp?.status || 'unknown'}`;
+          toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 160), duration: 4000 });
           const wait = 800 * Math.pow(2, attempt - 1);
           await new Promise(r => setTimeout(r, wait));
           continue;
@@ -1478,7 +1489,7 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // ---------- handleCreateAppointment (modified to call notify serverless with retries) ----------
+  // ---------- handleCreateAppointment (modified to call /api/sendSMS with retries) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
@@ -1619,34 +1630,29 @@ export default function AgentApptPage() {
       // Inform user DB created
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
-      // ---------- NEW: send SMS via serverless (Vercel) with retries ----------
+      // ---------- NEW: send SMS via /api/sendSMS (Vercel) with retries ----------
       try {
-        // Build notify body
-        const notifyBody = {
-          appointment: {
-            appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
-            weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
-            pickupDate: dbAppointment.pickupDate || dbAppointment.pickup_date,
-            truckNumber: dbAppointment.truckNumber || dbAppointment.truck_number,
-            driverName: dbAppointment.driverName || dbAppointment.driver_name,
-            agentName: dbAppointment.agentName || dbAppointment.agent_name,
-            agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
-            id: dbAppointment.id,
-            pdfUrl: uploadedPdfUrl || dbAppointment.pdf_url || null,
-          },
-          pdfBase64: null,
-          pdfFilename: null,
-          pdfUrl: uploadedPdfUrl || null,
-          recipients: {
-            driverPhone: normalizedDriverPhone,
-            agentName: agentName || dbAppointment.agentName || ''
-          }
-        };
+        // Build message text
+        const shortPdfLink = uploadedPdfUrl || dbAppointment.pdf_url || '';
+        const apptNum = dbAppointment.appointmentNumber || dbAppointment.appointment_number || '';
+        const wbNo = dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number || '';
+        const pickup = dbAppointment.pickupDate || dbAppointment.pickup_date || '';
+        const truck = dbAppointment.truckNumber || dbAppointment.truck_number || '';
+        const drv = dbAppointment.driverName || dbAppointment.driver_name || '';
+        const driverPhoneTo = normalizedDriverPhone;
 
-        // show a toast and loading indicator (UI also shows styled loader)
-        toast({ status: 'info', title: 'Sending SMS', description: 'Attempting to notify the driver via SMS...', duration: 2000 });
+        const message =
+          `Weighbridge Appointment confirmed: APPT ${apptNum}` +
+          (wbNo ? ` | WB ${wbNo}` : '') +
+          `\nPickup: ${pickup}` +
+          `\nTruck: ${truck}` +
+          `\nDriver: ${drv}` +
+          (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : '');
 
-        const notifyResp = await notifyWithRetries(notifyBody, 3);
+        // show a toast and loading indicator
+        toast({ status: 'info', title: 'Sending SMS', description: 'Attempting to notify the driver via SMS...', duration: 2500 });
+
+        const notifyResp = await notifyWithRetries({ to: driverPhoneTo, message }, 3);
         // notifyWithRetries already shows toasts for success/failure
 
         if (notifyResp && notifyResp.ok) {
@@ -2147,16 +2153,37 @@ export default function AgentApptPage() {
                 </Box>
               </Box>
 
-              {/* SMS sending hint (styled) */}
+              {/* SMS sending hint */}
               {smsSending && (
                 <Box className="sms-loading-hint" mt={2}>
-                  <CircularProgress value={Math.min(100, smsAttempts * (100 / 3))} size="44px" thickness="8px" capIsRound>
-                    <CircularProgressLabel>{smsAttempts}/3</CircularProgressLabel>
-                  </CircularProgress>
-                  <Box>
-                    <Text as="p">Sending SMS to driver</Text>
-                    <Text fontSize="sm" color="gray.600">Attempt {smsAttempts} — we will retry automatically on failure.</Text>
-                  </Box>
+                  <Spinner size="sm" /> <Text>Sending SMS to driver (attempt {smsAttempts})…</Text>
+                </Box>
+              )}
+
+              {!smsSending && smsResult && smsResult.ok && (
+                <Box className="sms-success" mt={2}>
+                  <Text>SMS sent successfully.</Text>
+                </Box>
+              )}
+
+              {!smsSending && smsResult && !smsResult.ok && (
+                <Box className="sms-failed" mt={2}>
+                  <Text>SMS sending failed: {smsResult.error || 'unknown'}</Text>
+                  <Button size="sm" ml="auto" onClick={async () => {
+                    // retry using the same message if available
+                    const to = normalizePhone(driverLicense);
+                    if (!to) { toast({ status: 'error', title: 'Invalid phone' }); return; }
+                    const apptNum = previewAppointmentNumber || '';
+                    const wbNo = previewWeighbridgeNumber || '';
+                    const message =
+                      `Weighbridge Appointment confirmed: APPT ${apptNum}` +
+                      (wbNo ? ` | WB ${wbNo}` : '') +
+                      `\nPickup: ${pickupDate}` +
+                      `\nTruck: ${truckNumber}` +
+                      `\nDriver: ${driverName}` +
+                      '';
+                    await notifyWithRetries({ to, message }, 3);
+                  }}>Retry SMS</Button>
                 </Box>
               )}
             </Stack>
