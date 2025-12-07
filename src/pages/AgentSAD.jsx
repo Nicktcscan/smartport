@@ -38,6 +38,7 @@ const WORD_TO_CODE = {
 // ---------- helpers ----------
 const formatNumber = (v) => {
   if (v === null || v === undefined || v === '') return '';
+  // keep commas for display
   const n = Number(String(v).replace(/,/g, ''));
   if (!Number.isFinite(n)) return v;
   return n.toLocaleString();
@@ -48,6 +49,17 @@ const parseNumberString = (s) => {
   if (cleaned === '') return '';
   return cleaned;
 };
+// Robust numeric parser: strips non-number chars and returns a finite number (fallback 0)
+const toNumber = (v) => {
+  if (v === null || v === undefined || v === '') return 0;
+  // if it's already a number and finite, return it
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const cleaned = String(v).replace(/[^\d.-]/g, '');
+  if (cleaned === '' || cleaned === '.' || cleaned === '-' || cleaned === '-.' ) return 0;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : 0;
+};
+
 function exportToCSV(rows = [], filename = 'export.csv') {
   if (!rows || rows.length === 0) return;
   const headers = Object.keys(rows[0]);
@@ -246,7 +258,7 @@ export default function SADDeclaration() {
           sad_no: trimmed,
           _raw_sad_no: r.sad_no,
           docs: Array.isArray(r.docs) ? JSON.parse(JSON.stringify(r.docs)) : [],
-          total_recorded_weight: Number(r.total_recorded_weight ?? 0),
+          total_recorded_weight: toNumber(r.total_recorded_weight),
           ticket_count: 0,
           manual_update: r.manual_update ?? false,
         };
@@ -281,7 +293,7 @@ export default function SADDeclaration() {
           normalized[i] = {
             ...s,
             ticket_count: countsMap[key] || 0,
-            total_recorded_weight: Number(s.total_recorded_weight || 0),
+            total_recorded_weight: toNumber(s.total_recorded_weight),
           };
         }
       }
@@ -304,8 +316,8 @@ export default function SADDeclaration() {
       }
 
       const enhanced = normalized.map((s) => {
-        const declared = Number(s.declared_weight || 0);
-        const recorded = Number(s.total_recorded_weight || 0);
+        const declared = toNumber(s.declared_weight);
+        const recorded = toNumber(s.total_recorded_weight);
         const dischargeCompleted = declared > 0 && recorded >= declared;
         return { ...s, dischargeCompleted, created_by_username: createdByMapRef.current[s.created_by] || null };
       });
@@ -441,7 +453,7 @@ export default function SADDeclaration() {
       const payload = {
         sad_no: trimmedSad,
         regime: regimeCode || null,
-        declared_weight: Number(parseNumberString(declaredWeight) || 0),
+        declared_weight: toNumber(parseNumberString(declaredWeight) || 0),
         docs: docRecords,
         status: 'In Progress',
         manual_update: false,
@@ -485,8 +497,8 @@ export default function SADDeclaration() {
       const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (error) throw error;
       setDetailTickets(data || []);
-      const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (Number(prev?.declared_weight || 0) > 0 && computedTotal >= Number(prev?.declared_weight || 0)), ticket_count: (data || []).length }));
+      const computedTotal = (data || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
+      setSelectedSad((prev) => ({ ...prev, total_recorded_weight: computedTotal, dischargeCompleted: (toNumber(prev?.declared_weight || 0) > 0 && computedTotal >= toNumber(prev?.declared_weight || 0)), ticket_count: (data || []).length }));
       await pushActivity(`Viewed SAD ${sad.sad_no} details`, { viewed_by: currentUser?.id || null });
     } catch (err) {
       console.error('openSadDetail', err);
@@ -535,8 +547,8 @@ export default function SADDeclaration() {
           completedByUsername = completedByMapRef.current[trimmed];
         }
 
-        const computedTotal = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-        const sd = { ...decl, total_recorded_weight: Number(decl.total_recorded_weight || computedTotal), ticket_count: (tickets || []).length };
+        const computedTotal = (tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
+        const sd = { ...decl, total_recorded_weight: toNumber(decl.total_recorded_weight) || computedTotal, ticket_count: (tickets || []).length };
 
         setDetailsData({ sad: sd, tickets: tickets || [], created_by_username: createdByUsername, completed_by_username: completedByUsername, loading: false });
       }
@@ -561,10 +573,10 @@ export default function SADDeclaration() {
         const trimmed = sadNo != null ? String(sadNo).trim() : sadNo;
         const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
         if (!error && !isUnmounted) {
-          const computedTotal = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
+          const computedTotal = (tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
           setDetailsData((prev) => ({
             ...prev,
-            sad: prev.sad ? { ...prev.sad, total_recorded_weight: Number(prev.sad.total_recorded_weight || computedTotal), ticket_count: (tickets || []).length } : prev.sad,
+            sad: prev.sad ? { ...prev.sad, total_recorded_weight: toNumber(prev.sad.total_recorded_weight) || computedTotal, ticket_count: (tickets || []).length } : prev.sad,
             tickets: tickets || [],
           }));
         }
@@ -717,7 +729,7 @@ export default function SADDeclaration() {
       const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
       const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
       if (error) throw error;
-      const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
+      const total = (tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
       await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
       await pushActivity(`Recalculated total for ${trimmed}: ${total}`, { sad_no: trimmed, by: currentUser?.id || null });
       fetchSADs();
@@ -749,8 +761,8 @@ export default function SADDeclaration() {
         sad_no: s.sad_no,
         regime: s.regime,
         regime_label: REGIME_LABEL_MAP[s.regime] || '',
-        declared_weight: s.declared_weight,
-        total_recorded_weight: s.total_recorded_weight,
+        declared_weight: toNumber(s.declared_weight),
+        total_recorded_weight: toNumber(s.total_recorded_weight),
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
@@ -800,8 +812,8 @@ export default function SADDeclaration() {
 
   // discrepancy helper
   const handleExplainDiscrepancy = async (s) => {
-    const recorded = Number(s.total_recorded_weight || 0);
-    const declared = Number(s.declared_weight || 0);
+    const recorded = toNumber(s.total_recorded_weight);
+    const declared = toNumber(s.declared_weight);
     if (!declared) {
       toast({ title: 'No declared weight', description: `SAD ${s.sad_no} has no declared weight to compare.`, status: 'warning' });
       await pushActivity(`Explain: no declared weight for ${s.sad_no}`, { by: currentUser?.id || null });
@@ -827,8 +839,8 @@ export default function SADDeclaration() {
       const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
       const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
       if (error) console.warn('Could not fetch tickets for PDF', error);
-      const declared = Number(s.declared_weight || 0);
-      const recorded = Number(s.total_recorded_weight || 0);
+      const declared = toNumber(s.declared_weight);
+      const recorded = toNumber(s.total_recorded_weight);
       const regimeLabel = REGIME_LABEL_MAP[s.regime] ? `${REGIME_LABEL_MAP[s.regime]} (${s.regime})` : (s.regime || '—');
       const html = `
       <!doctype html>
@@ -875,7 +887,7 @@ export default function SADDeclaration() {
                 ${tickets.map(t => `<tr>
                   <td>${t.ticket_no || ''}</td>
                   <td>${t.gnsw_truck_no || ''}</td>
-                  <td style="text-align:right">${Number(t.net ?? t.weight ?? 0).toLocaleString()}</td>
+                  <td style="text-align:right">${toNumber(t.net ?? t.weight ?? 0).toLocaleString()}</td>
                   <td>${t.date ? new Date(t.date).toLocaleString() : '—'}</td>
                 </tr>`).join('')}
               </tbody>
@@ -922,8 +934,8 @@ export default function SADDeclaration() {
   // UI derived values
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
-      const d = Number(s.declared_weight || 0);
-      const r = Number(s.total_recorded_weight || 0);
+      const d = toNumber(s.declared_weight);
+      const r = toNumber(s.total_recorded_weight);
       if (!d) return null;
       return r / d;
     }).filter(Boolean);
@@ -933,8 +945,8 @@ export default function SADDeclaration() {
     const std = Math.sqrt(variance);
     const flagged = [];
     for (const s of sads) {
-      const d = Number(s.declared_weight || 0);
-      const r = Number(s.total_recorded_weight || 0);
+      const d = toNumber(s.declared_weight);
+      const r = toNumber(s.total_recorded_weight);
       if (!d) continue;
       const ratio = r / d;
       const z = std > 0 ? (ratio - mean) / std : 0;
@@ -945,8 +957,8 @@ export default function SADDeclaration() {
 
   const dashboardStats = useMemo(() => {
     const totalSADs = sads.length;
-    const totalDeclared = sads.reduce((a, b) => a + Number(b.declared_weight || 0), 0);
-    const totalRecorded = sads.reduce((a, b) => a + Number(b.total_recorded_weight || 0), 0);
+    const totalDeclared = sads.reduce((a, b) => a + toNumber(b.declared_weight), 0);
+    const totalRecorded = sads.reduce((a, b) => a + toNumber(b.total_recorded_weight), 0);
     const completed = sads.filter(s => s.status === 'Completed').length;
     const pending = sads.filter(s => s.status === 'In Progress').length;
     const onHold = sads.filter(s => s.status === 'On Hold').length;
@@ -970,11 +982,11 @@ export default function SADDeclaration() {
     }
     const dir = sortDir === 'asc' ? 1 : -1;
     arr.sort((a, b) => {
-      if (sortBy === 'declared_weight') return (Number(a.declared_weight || 0) - Number(b.declared_weight || 0)) * dir;
-      if (sortBy === 'recorded') return (Number(a.total_recorded_weight || 0) - Number(b.total_recorded_weight || 0)) * dir;
+      if (sortBy === 'declared_weight') return (toNumber(a.declared_weight) - toNumber(b.declared_weight)) * dir;
+      if (sortBy === 'recorded') return (toNumber(a.total_recorded_weight) - toNumber(b.total_recorded_weight)) * dir;
       if (sortBy === 'discrepancy') {
-        const da = Number(a.total_recorded_weight || 0) - Number(a.declared_weight || 0);
-        const db = Number(b.total_recorded_weight || 0) - Number(b.declared_weight || 0);
+        const da = toNumber(a.total_recorded_weight) - toNumber(a.declared_weight);
+        const db = toNumber(b.total_recorded_weight) - toNumber(b.declared_weight);
         return (da - db) * dir;
       }
       const ta = new Date(a.created_at || a.updated_at || 0).getTime();
@@ -994,8 +1006,8 @@ export default function SADDeclaration() {
       sad_no: s.sad_no,
       regime: s.regime,
       regime_label: REGIME_LABEL_MAP[s.regime] || '',
-      declared_weight: s.declared_weight,
-      total_recorded_weight: s.total_recorded_weight,
+      declared_weight: toNumber(s.declared_weight),
+      total_recorded_weight: toNumber(s.total_recorded_weight),
       status: s.status,
       created_at: s.created_at,
       updated_at: s.updated_at,
@@ -1010,8 +1022,8 @@ export default function SADDeclaration() {
         sad_no: s.sad_no,
         regime: s.regime,
         regime_label: REGIME_LABEL_MAP[s.regime] || '',
-        declared_weight: s.declared_weight,
-        total_recorded_weight: s.total_recorded_weight,
+        declared_weight: toNumber(s.declared_weight),
+        total_recorded_weight: toNumber(s.total_recorded_weight),
         status: s.status,
         created_at: s.created_at,
         updated_at: s.updated_at,
@@ -1093,8 +1105,8 @@ export default function SADDeclaration() {
       const subject = encodeURIComponent(`SAD ${s.sad_no} Report`);
       const bodyLines = [
         `SAD: ${s.sad_no}`,
-        `Declared weight: ${Number(s.declared_weight || 0).toLocaleString()} kg`,
-        `Discharged weight: ${Number(s.total_recorded_weight || 0).toLocaleString()} kg`,
+        `Declared weight: ${toNumber(s.declared_weight).toLocaleString()} kg`,
+        `Discharged weight: ${toNumber(s.total_recorded_weight).toLocaleString()} kg`,
         `Status: ${s.status || '—'}`,
         '',
         'Tickets attached in exported report (if generated).'
@@ -1199,7 +1211,7 @@ export default function SADDeclaration() {
   // derived stats inside details modal based on filteredDetailTickets
   const detailDerived = useMemo(() => {
     const t = filteredDetailTickets || [];
-    const cumulativeNet = t.reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
+    const cumulativeNet = t.reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0);
     const total = t.length;
     const manual = t.filter(r => /^M-/i.test(String(r.ticket_no || ''))).length;
     const uploaded = t.filter(r => /^\d+/.test(String(r.ticket_no || ''))).length;
@@ -1215,7 +1227,7 @@ export default function SADDeclaration() {
     const rows = filteredDetailTickets.map(t => ({
       'Ticket No': t.ticket_no,
       'Truck': t.gnsw_truck_no || t.truck_no || '',
-      'Net (kg)': Number(t.net ?? t.weight ?? 0),
+      'Net (kg)': toNumber(t.net ?? t.weight ?? 0),
       'Date': t.date ? new Date(t.date).toLocaleString() : '',
       'Type': /^M-/i.test(String(t.ticket_no || '')) ? 'Manual' : (/^\d+/.test(String(t.ticket_no || '')) ? 'Uploaded' : 'Other'),
     }));
@@ -1375,7 +1387,9 @@ export default function SADDeclaration() {
               <Tbody>
                 <AnimatePresence>
                   {pagedSads.map((s) => {
-                    const discrepancy = Number(s.total_recorded_weight || 0) - Number(s.declared_weight || 0);
+                    const declaredNum = toNumber(s.declared_weight);
+                    const recordedNum = toNumber(s.total_recorded_weight);
+                    const discrepancy = recordedNum - declaredNum;
 
                     // discrepancy color rules required:
                     // red when discharged > declared (discrepancy > 0)
@@ -1387,12 +1401,12 @@ export default function SADDeclaration() {
                     else discColor = 'green.600';
 
                     const statusDotColor = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
-                    const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
+                    const readyToComplete = recordedNum >= declaredNum && s.status !== 'Completed';
                     const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
 
                     // tooltip content (multi-line)
-                    const declared = Number(s.declared_weight || 0).toLocaleString();
-                    const recorded = Number(s.total_recorded_weight || 0).toLocaleString();
+                    const declared = declaredNum.toLocaleString();
+                    const recorded = recordedNum.toLocaleString();
                     const discrepancyText = discrepancy === 0 ? '0' : discrepancy.toLocaleString();
                     const creator = s.created_by_username || (s.created_by ? (createdByMap[s.created_by] || s.created_by) : '—');
 
@@ -1424,8 +1438,8 @@ export default function SADDeclaration() {
                           </Tooltip>
                         </Td>
                         <Td data-label="Regime"><Text>{regimeDisplay}</Text></Td>
-                        <Td data-label="Declared" isNumeric><Text>{Number(s.declared_weight || 0).toLocaleString()}</Text></Td>
-                        <Td data-label="Discharged" isNumeric><Text>{Number(s.total_recorded_weight || 0).toLocaleString()}</Text></Td>
+                        <Td data-label="Declared" isNumeric><Text>{declaredNum.toLocaleString()}</Text></Td>
+                        <Td data-label="Discharged" isNumeric><Text>{recordedNum.toLocaleString()}</Text></Td>
 
                         {/* Transactions: styled badge + tooltip + clickable to open mini modal */}
                         <Td data-label="No. of Transactions" isNumeric>
@@ -1455,7 +1469,7 @@ export default function SADDeclaration() {
                         </Td>
                         <Td data-label="Discrepancy">
                           <Text color={discColor}>
-                            {discrepancy === 0 ? '0' : discrepancy.toLocaleString()}
+                            {Number.isFinite(discrepancy) ? (discrepancy === 0 ? '0' : discrepancy.toLocaleString()) : '0'}
                           </Text>
                         </Td>
                         <Td data-label="Actions">
@@ -1529,7 +1543,7 @@ export default function SADDeclaration() {
                             <Tr key={t.ticket_id || t.ticket_no}>
                               <Td style={{ maxWidth: 160, overflowWrap: 'break-word' }}>{t.ticket_no}</Td>
                               <Td>{t.gnsw_truck_no || t.truck_no || '—'}</Td>
-                              <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
+                              <Td isNumeric>{toNumber(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
                             </Tr>
                           ))}
                         </Tbody>
@@ -1570,7 +1584,7 @@ export default function SADDeclaration() {
                       <Box>
                         <Stat bg="blue.50" px={4} py={3} borderRadius="md" boxShadow="sm">
                           <StatLabel>Declared Weight</StatLabel>
-                          <StatNumber>{Number(detailsData.sad.declared_weight || 0).toLocaleString()}</StatNumber>
+                          <StatNumber>{toNumber(detailsData.sad.declared_weight).toLocaleString()}</StatNumber>
                           <StatHelpText>From SAD Declaration</StatHelpText>
                         </Stat>
                       </Box>
@@ -1578,7 +1592,7 @@ export default function SADDeclaration() {
                       <Box>
                         <Stat bg="green.50" px={4} py={3} borderRadius="md" boxShadow="sm">
                           <StatLabel>Discharged Weight</StatLabel>
-                          <StatNumber>{Number(detailsData.sad.total_recorded_weight != null ? detailsData.sad.total_recorded_weight : (detailsData.tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0)).toLocaleString()}</StatNumber>
+                          <StatNumber>{toNumber(detailsData.sad.total_recorded_weight != null ? detailsData.sad.total_recorded_weight : (detailsData.tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0)).toLocaleString()}</StatNumber>
                           <StatHelpText>Sum of tickets</StatHelpText>
                         </Stat>
                       </Box>
@@ -1593,9 +1607,9 @@ export default function SADDeclaration() {
 
                       <Box>
                         {(() => {
-                          const recorded = Number(detailsData.sad.total_recorded_weight || 0);
-                          const declared = Number(detailsData.sad.declared_weight || 0);
-                          if (declared != null && declared > 0 && recorded > declared) {
+                          const recorded = toNumber(detailsData.sad.total_recorded_weight || (detailsData.tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0));
+                          const declared = toNumber(detailsData.sad.declared_weight);
+                          if (declared > 0 && recorded > declared) {
                             const diff = recorded - declared;
                             const pct = declared > 0 ? (diff / declared) * 100 : null;
                             return (
@@ -1609,8 +1623,8 @@ export default function SADDeclaration() {
                           return (
                             <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
                               <StatLabel>Discrepancy</StatLabel>
-                              <StatNumber>{detailsData.sad.declared_weight != null ? `${Math.max(0, (detailsData.sad.total_recorded_weight || 0) - (detailsData.sad.declared_weight || 0)).toLocaleString()} kg` : '—'}</StatNumber>
-                              <StatHelpText>{detailsData.sad.declared_weight != null ? 'Within declared limits' : 'No declared weight'}</StatHelpText>
+                              <StatNumber>{declared > 0 ? `${Math.max(0, (toNumber(detailsData.sad.total_recorded_weight || 0) - declared)).toLocaleString()} kg` : '—'}</StatNumber>
+                              <StatHelpText>{declared > 0 ? 'Within declared limits' : 'No declared weight'}</StatHelpText>
                             </Stat>
                           );
                         })()}
@@ -1689,7 +1703,7 @@ export default function SADDeclaration() {
                               <Tr key={t.ticket_id || t.ticket_no}>
                                 <Td style={{ maxWidth: 200, overflowWrap: 'break-word' }}>{t.ticket_no}</Td>
                                 <Td>{t.gnsw_truck_no || t.truck_no || '—'}</Td>
-                                <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
+                                <Td isNumeric>{toNumber(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
                                 <Td>{t.date ? new Date(t.date).toLocaleString() : '—'}</Td>
                               </Tr>
                             ))}
@@ -1744,13 +1758,13 @@ export default function SADDeclaration() {
           <ModalBody>
             {selectedSad && (
               <>
-                <Text mb={2}>Declared weight: <strong>{Number(selectedSad.declared_weight || 0).toLocaleString()} kg</strong></Text>
-                <Text mb={2}>Discharged weight: <strong>{Number(selectedSad.total_recorded_weight || 0).toLocaleString()}</strong></Text>
+                <Text mb={2}>Declared weight: <strong>{toNumber(selectedSad.declared_weight).toLocaleString()} kg</strong></Text>
+                <Text mb={2}>Discharged weight: <strong>{toNumber(selectedSad.total_recorded_weight).toLocaleString()}</strong></Text>
 
                 {/* discrepancy colored */}
                 {(() => {
-                  const recorded = Number(selectedSad.total_recorded_weight || 0);
-                  const declared = Number(selectedSad.declared_weight || 0);
+                  const recorded = toNumber(selectedSad.total_recorded_weight);
+                  const declared = toNumber(selectedSad.declared_weight);
                   const diff = recorded - declared;
                   let color = 'green.600';
                   if (diff > 0) color = 'red.600';
@@ -1758,7 +1772,7 @@ export default function SADDeclaration() {
                   else color = 'green.600';
                   return (
                     <Text mb={3} color={color}>
-                      Discrepancy: {diff === 0 ? '0' : diff.toLocaleString()} kg
+                      Discrepancy: {Number.isFinite(diff) ? (diff === 0 ? '0' : diff.toLocaleString()) : '0'} kg
                     </Text>
                   );
                 })()}
@@ -1778,7 +1792,7 @@ export default function SADDeclaration() {
                           <Tr key={t.ticket_id || t.ticket_no}>
                             <Td>{t.ticket_no}</Td>
                             <Td>{t.gnsw_truck_no}</Td>
-                            <Td isNumeric>{Number(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
+                            <Td isNumeric>{toNumber(t.net ?? t.weight ?? 0).toLocaleString()}</Td>
                             <Td>{t.date ? new Date(t.date).toLocaleDateString() : '—'}</Td>
                           </Tr>
                         ))}
