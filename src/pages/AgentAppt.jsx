@@ -288,6 +288,16 @@ function formatPhoneForDisplay(raw) {
   return normalized;
 }
 
+// ---------- Truck normalization helper ----------
+function normalizeTruckNumber(raw) {
+  if (!raw && raw !== '') return '';
+  try {
+    return String(raw || '').replace(/\s+/g, '').toUpperCase();
+  } catch (e) {
+    return String(raw || '');
+  }
+}
+
 // ---------- PDF component ----------
 function AppointmentPdf({ ticket }) {
   const t = ticket || {};
@@ -610,7 +620,11 @@ export default function AgentApptPage() {
     if (!agentName.trim()) { toast({ status: 'error', title: 'Agent Name required' }); return false; }
     if (!warehouse) { toast({ status: 'error', title: 'Warehouse required' }); return false; }
     if (!pickupDate) { toast({ status: 'error', title: 'Pick-up Date required' }); return false; }
-    if (!truckNumber.trim()) { toast({ status: 'error', title: 'Truck Number required' }); return false; }
+
+    // use normalized truck value for validation (auto-remove spaces)
+    const normalizedTruckForValidation = normalizeTruckNumber(truckNumber).trim();
+    if (!normalizedTruckForValidation) { toast({ status: 'error', title: 'Truck Number required' }); return false; }
+
     if (!driverName.trim()) { toast({ status: 'error', title: 'Driver Name required' }); return false; }
     if (!driverLicense.trim()) { toast({ status: 'error', title: 'Driver Phone required' }); return false; }
     if (t1s.length === 0) { toast({ status: 'error', title: 'Please add at least one T1 record' }); return false; }
@@ -1435,6 +1449,15 @@ export default function AgentApptPage() {
       return;
     }
 
+    // Normalize truck number before validation to avoid user entering spaces only
+    const normalizedTruckAhead = normalizeTruckNumber(truckNumber);
+    if (!normalizedTruckAhead) {
+      toast({ status: 'error', title: 'Truck Number required' });
+      return;
+    }
+    // update visible field (UX) so preview shows normalized
+    setTruckNumber(normalizedTruckAhead);
+
     if (!validateMainForm()) return;
 
     // final check: ensure none of the selected SADs are Completed
@@ -1536,7 +1559,15 @@ export default function AgentApptPage() {
 
     setLoadingCreate(true);
 
+    // Normalize driver phone
     const normalizedDriverPhone = normalizePhone(String(driverLicense || '').trim());
+
+    // Normalize truck number (remove all spaces and uppercase) and update UI
+    const normalizedTruckNumber = normalizeTruckNumber(truckNumber);
+    if (normalizedTruckNumber) {
+      setTruckNumber(normalizedTruckNumber);
+    }
+
     const payload = {
       warehouse,
       warehouseLabel: (WAREHOUSES.find(w => w.value === warehouse) || {}).label || warehouse,
@@ -1544,7 +1575,7 @@ export default function AgentApptPage() {
       agentName: agentName.trim(),
       agentTin: agentTin.trim(),
       consolidated,
-      truckNumber: truckNumber.trim(),
+      truckNumber: normalizedTruckNumber, // store normalized truck number
       driverName: driverName.trim(),
       driverLicense: normalizedDriverPhone, // store normalized +220...
       regime: '',
@@ -1910,7 +1941,16 @@ export default function AgentApptPage() {
 
           <FormControl isRequired>
             <FormLabel>Truck Number</FormLabel>
-            <ChakraInput value={truckNumber} onChange={(e) => setTruckNumber(e.target.value)} placeholder="Truck Plate / No." />
+            <ChakraInput
+              value={truckNumber}
+              onChange={(e) => setTruckNumber(e.target.value)}
+              onBlur={() => {
+                // normalize UI display (remove whitespace, uppercase)
+                const norm = normalizeTruckNumber(truckNumber);
+                if (norm) setTruckNumber(norm);
+              }}
+              placeholder="Truck Plate / No. e.g. BJL8392H"
+            />
           </FormControl>
 
            <FormControl isRequired>
