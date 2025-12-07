@@ -143,6 +143,19 @@ function dedupeByTicket(arr = []) {
   return [...out, ...noKeyRows];
 }
 
+/** Helper: compute discrepancy & percent given declared and discharged */
+function computeDiscrepancyValues(declared, discharged) {
+  // declared: null | number
+  // discharged: number (0 if none)
+  if (declared === null || declared === undefined) {
+    return { discrepancy: null, discrepancyPercent: null };
+  }
+  const d = Number(declared || 0);
+  const dis = Number(discharged || 0) - d; // signed difference (positive => over, negative => under)
+  const pct = d > 0 ? (dis / d) * 100 : null;
+  return { discrepancy: dis, discrepancyPercent: pct };
+}
+
 export default function OutgateReports() {
   const toast = useToast();
 
@@ -361,8 +374,8 @@ export default function OutgateReports() {
 
       const declared = sadRow ? Number(sadRow.declared_weight ?? 0) : null;
       const discharged = Number(totalNet || 0);
-      const discrepancy = (declared !== null && declared >= 0) ? Math.max(0, discharged - declared) : 0;
-      const discrepancyPercent = (declared && declared > 0) ? (discrepancy / declared) * 100 : null;
+
+      const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
 
       setSadMeta({
         sad: sadQuery.trim(),
@@ -394,7 +407,12 @@ export default function OutgateReports() {
   const applySadRange = () => {
     const newFiltered = computeFilteredFromOriginal(sadOriginal);
     setSadTickets(newFiltered);
-    setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(newFiltered) }));
+    const discharged = computeTotalNetFromArray(newFiltered);
+    setSadMeta((m) => {
+      const declared = m.declaredWeight ?? null;
+      const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
+      return { ...m, dischargedWeight: discharged, discrepancy, discrepancyPercent };
+    });
   };
 
   const resetSadRange = () => {
@@ -405,10 +423,17 @@ export default function OutgateReports() {
     setTruckFilter('');
     setTruckQuery('');
     const newFiltered = computeFilteredFromOriginal(sadOriginal);
+    const discharged = computeTotalNetFromArray(newFiltered);
     setSadTickets(newFiltered);
-    setSadMeta((m) => ({ ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '', dischargedWeight: computeTotalNetFromArray(newFiltered), discrepancy: 0, discrepancyPercent: null }));
+    setSadMeta((m) => {
+      const declared = m.declaredWeight ?? null;
+      const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
+      return { ...m, startTimeLabel: '', endTimeLabel: '', dateRangeText: '', dischargedWeight: discharged, discrepancy, discrepancyPercent };
+    });
   };
 
+  // -----------------------------
+  // The rest of the UI derived values
   const filteredSadTickets = useMemo(() => {
     return Array.isArray(sadTickets) ? sadTickets.slice() : [];
   }, [sadTickets]);
@@ -557,8 +582,19 @@ export default function OutgateReports() {
         });
         const deduped = dedupeByTicket(next);
 
-        // update discharged weight from the full original list
-        setSadMeta((m) => ({ ...m, dischargedWeight: computeTotalNetFromArray(deduped) }));
+        // update discharged weight and discrepancy using current sadMeta.declaredWeight
+        const discharged = computeTotalNetFromArray(deduped);
+        setSadMeta((m) => {
+          const declared = m.declaredWeight ?? null;
+          const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
+          return {
+            ...m,
+            dateRangeText: m.dateRangeText || (mapped.data.weighed_at ? new Date(mapped.data.weighed_at).toLocaleDateString() : m.dateRangeText),
+            dischargedWeight: discharged,
+            discrepancy,
+            discrepancyPercent,
+          };
+        });
 
         // recompute filtered tickets using the centralized filter function (which includes truck filters)
         const filtered = computeFilteredFromOriginal(deduped);
@@ -567,12 +603,7 @@ export default function OutgateReports() {
         return deduped;
       });
 
-      // update some meta fields
-      setSadMeta((m) => ({
-        ...m,
-        dateRangeText: m.dateRangeText || (mapped.data.weighed_at ? new Date(mapped.data.weighed_at).toLocaleDateString() : m.dateRangeText),
-        dischargedWeight: computeTotalNetFromArray([mapped, ...sadOriginal]),
-      }));
+      // push activity or toast if you like (kept out for brevity)
     };
 
     if (supabase.channel) {
@@ -770,8 +801,12 @@ export default function OutgateReports() {
                 ) : (
                   <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
                     <StatLabel>Discrepancy</StatLabel>
-                    <StatNumber>{sadMeta.declaredWeight != null ? `${formatWeight(Math.max(0, (sadMeta.dischargedWeight || 0) - (sadMeta.declaredWeight || 0)))} KG` : '—'}</StatNumber>
-                    <StatHelpText>{sadMeta.declaredWeight != null ? 'Within declared limits' : 'No declared weight'}</StatHelpText>
+                    <StatNumber>
+                      {sadMeta.declaredWeight != null
+                        ? `${formatWeight(Math.abs((sadMeta.dischargedWeight || 0) - (sadMeta.declaredWeight || 0)))} KG`
+                        : '—'}
+                    </StatNumber>
+                    <StatHelpText>{sadMeta.declaredWeight != null ? ((sadMeta.dischargedWeight < sadMeta.declaredWeight) ? 'Under declared' : 'Within declared limits') : 'No declared weight'}</StatHelpText>
                   </Stat>
                 )}
               </SimpleGrid>

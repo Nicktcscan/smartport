@@ -7,7 +7,7 @@ import {
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
-  Tooltip, Box as ChakraBox, SimpleGrid as ChakraSimpleGrid,
+  Tooltip, Box as ChakraBox, SimpleGrid as ChakraSimpleGrid, Spacer
 } from '@chakra-ui/react';
 import {
   FaPlus, FaFileExport, FaEllipsisV, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
@@ -89,6 +89,14 @@ async function runInBatches(items = [], batchSize = 20, fn) {
   return results;
 }
 
+// parse "HH:MM" to minutes-from-midnight
+function parseTimeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const [hh, mm] = String(timeStr).split(':').map((n) => Number(n));
+  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
+  return hh * 60 + mm;
+}
+
 export default function SADDeclaration() {
   const toast = useToast();
 
@@ -143,6 +151,7 @@ export default function SADDeclaration() {
   // realtime
   const subRef = useRef(null);
   const ticketsSubRef = useRef(null);
+  const detailTicketsSubRef = useRef(null); // subscription for details modal specific sad
 
   // orb CTA
   const { isOpen: orbOpen, onOpen: openOrb, onClose: closeOrb } = useDisclosure();
@@ -161,6 +170,17 @@ export default function SADDeclaration() {
 
   // current logged-in user (agent)
   const [currentUser, setCurrentUser] = useState(null);
+
+  // details modal filters (search + date/time + type)
+  const [detailFilters, setDetailFilters] = useState({
+    q: '',
+    truck: '',
+    type: '', // '', 'manual', 'uploaded', 'other'
+    dateFrom: '',
+    dateTo: '',
+    timeFrom: '',
+    timeTo: ''
+  });
 
   // ensure created_at sorting keeps newest first if sortBy is created_at
   useEffect(() => {
@@ -526,6 +546,65 @@ export default function SADDeclaration() {
       toast({ title: 'Failed', description: 'Could not load details', status: 'error' });
     }
   };
+
+  // subscribe to ticket changes for the currently open details modal (auto-refresh)
+  useEffect(() => {
+    // set up subscription if modal is open and we have a sad_no
+    if (!detailsOpen) return undefined;
+    const sadNo = detailsData?.sad?.sad_no;
+    if (!sadNo) return undefined;
+
+    let isUnmounted = false;
+
+    const fetchTicketsForSad = async () => {
+      try {
+        const trimmed = sadNo != null ? String(sadNo).trim() : sadNo;
+        const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
+        if (!error && !isUnmounted) {
+          const computedTotal = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
+          setDetailsData((prev) => ({
+            ...prev,
+            sad: prev.sad ? { ...prev.sad, total_recorded_weight: Number(prev.sad.total_recorded_weight || computedTotal), ticket_count: (tickets || []).length } : prev.sad,
+            tickets: tickets || [],
+          }));
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+
+    fetchTicketsForSad();
+
+    // subscribe to tickets table changes for this sad
+    let sub = null;
+    try {
+      if (supabase.channel) {
+        sub = supabase.channel(`public:tickets:sad:${sadNo}`)
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets', filter: `sad_no=eq.${sadNo}` }, (payload) => {
+            // whenever tickets for this sad are inserted/updated/deleted, refetch for fresh totals
+            fetchTicketsForSad();
+          })
+          .subscribe();
+        detailTicketsSubRef.current = sub;
+      } else {
+        // legacy subscribe
+        sub = supabase.from(`tickets:sad_no=eq.${sadNo}`).on('*', () => fetchTicketsForSad()).subscribe();
+        detailTicketsSubRef.current = sub;
+      }
+    } catch (e) {
+      // fallback - ignore
+      console.warn('detail subscription failed', e);
+      sub = null;
+    }
+
+    return () => {
+      isUnmounted = true;
+      try {
+        if (sub && supabase.removeChannel) supabase.removeChannel(sub).catch(() => {});
+        else if (sub && sub.unsubscribe) sub.unsubscribe();
+      } catch (e) { /* ignore */ }
+    };
+  }, [detailsOpen, detailsData?.sad?.sad_no]);
 
   // TRANSACTIONS MINI-MODAL (NEW): open and fetch breakdown
   const openTransactionsModal = async (sad) => {
@@ -1041,6 +1120,110 @@ export default function SADDeclaration() {
     await updateSadStatusWithCompletion(sad_no, statusEditValue);
   };
 
+  // ---------- DETAILS MODAL: filtering logic ----------
+  const applyDetailFilterChange = (k, v) => {
+    setDetailFilters((d) => ({ ...d, [k]: v }));
+  };
+
+  // compute filtered tickets inside details modal
+  const filteredDetailTickets = useMemo(() => {
+    const tickets = Array.isArray(detailsData.tickets) ? detailsData.tickets.slice() : [];
+    if (!tickets.length) return [];
+    const q = (detailFilters.q || '').trim().toLowerCase();
+    const truckQ = (detailFilters.truck || '').trim().toLowerCase();
+    const type = detailFilters.type || '';
+    const hasDateRange = !!(detailFilters.dateFrom || detailFilters.dateTo);
+    const startDate = detailFilters.dateFrom ? new Date(detailFilters.dateFrom + 'T00:00:00') : null;
+    const endDate = detailFilters.dateTo ? new Date(detailFilters.dateTo + 'T23:59:59.999') : null;
+    const tfMinutes = parseTimeToMinutes(detailFilters.timeFrom);
+    const ttMinutes = parseTimeToMinutes(detailFilters.timeTo);
+
+    const out = tickets.filter((t) => {
+      // basic q against ticket_no or driver or material or file_name
+      if (q) {
+        const combined = `${t.ticket_no || ''} ${t.gnsw_truck_no || t.truck_no || ''} ${t.driver || ''} ${t.material || ''} ${t.file_name || ''}`.toLowerCase();
+        if (!combined.includes(q)) return false;
+      }
+      if (truckQ) {
+        const truckVal = (t.gnsw_truck_no || t.truck_no || '').toString().toLowerCase();
+        if (!truckVal.includes(truckQ)) return false;
+      }
+
+      // type
+      if (type) {
+        const tno = String(t.ticket_no || '');
+        const isManual = /^M-/i.test(tno);
+        const isUploaded = /^\d+/.test(tno);
+        if (type === 'manual' && !isManual) return false;
+        if (type === 'uploaded' && !isUploaded) return false;
+        if (type === 'other' && (isManual || isUploaded)) return false;
+      }
+
+      // date/time filtering (use t.date)
+      const dRaw = t.date || t.submitted_at || t.created_at || null;
+      const d = dRaw ? new Date(dRaw) : null;
+      if (hasDateRange) {
+        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+        if (detailFilters.timeFrom) {
+          const mins = parseTimeToMinutes(detailFilters.timeFrom);
+          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+        }
+        if (detailFilters.timeTo) {
+          const mins = parseTimeToMinutes(detailFilters.timeTo);
+          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+        }
+        if (!d) return false;
+        if (d < start || d > end) return false;
+      } else if (detailFilters.timeFrom || detailFilters.timeTo) {
+        if (!d) return false;
+        const minutes = d.getHours() * 60 + d.getMinutes();
+        const from = tfMinutes != null ? tfMinutes : 0;
+        const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
+        if (minutes < from || minutes > to) return false;
+      }
+
+      return true;
+    });
+
+    // newest first
+    out.sort((a, b) => {
+      const da = new Date(a.date || a.submitted_at || 0).getTime();
+      const db = new Date(b.date || b.submitted_at || 0).getTime();
+      return db - da;
+    });
+
+    return out;
+  }, [detailsData.tickets, detailFilters]);
+
+  // derived stats inside details modal based on filteredDetailTickets
+  const detailDerived = useMemo(() => {
+    const t = filteredDetailTickets || [];
+    const cumulativeNet = t.reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
+    const total = t.length;
+    const manual = t.filter(r => /^M-/i.test(String(r.ticket_no || ''))).length;
+    const uploaded = t.filter(r => /^\d+/.test(String(r.ticket_no || ''))).length;
+    return { cumulativeNet, total, manual, uploaded };
+  }, [filteredDetailTickets]);
+
+  // export filtered tickets from details modal
+  const exportFilteredTicketsCsv = () => {
+    if (!filteredDetailTickets.length) {
+      toast({ title: 'No tickets', status: 'info' });
+      return;
+    }
+    const rows = filteredDetailTickets.map(t => ({
+      'Ticket No': t.ticket_no,
+      'Truck': t.gnsw_truck_no || t.truck_no || '',
+      'Net (kg)': Number(t.net ?? t.weight ?? 0),
+      'Date': t.date ? new Date(t.date).toLocaleString() : '',
+      'Type': /^M-/i.test(String(t.ticket_no || '')) ? 'Manual' : (/^\d+/.test(String(t.ticket_no || '')) ? 'Uploaded' : 'Other'),
+    }));
+    exportToCSV(rows, `sad_${detailsData.sad?.sad_no || 'report'}_tickets_${new Date().toISOString().slice(0,10)}.csv`);
+    toast({ title: 'Export started', description: `${rows.length} rows exported`, status: 'success' });
+  };
+
+  // styles and main render happen below (kept your UI, added filter controls within details modal)
   return (
     <Container maxW="8xl" py={6} className="sad-container">
       <style>{pageCss}</style>
@@ -1443,21 +1626,66 @@ export default function SADDeclaration() {
                       <Button size="sm" leftIcon={<FaEnvelope />} onClick={() => emailSad(detailsData.sad)}>Email</Button>
                     </Flex>
 
-                    <Text mb={1}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
+                    <Text mb={1}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleDateString() : '—'}</strong></Text>
                     <Text mb={1}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
 
                     {/* Completed fields */}
-                    <Text mb={3}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleString() : '—'}</strong></Text>
+                    <Text mb={3}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleDateString() : '—'}</strong></Text>
                     <Text mb={4}>Completed By: <strong>{detailsData.completed_by_username || (detailsData.sad && detailsData.sad.completed_by ? (createdByMap[detailsData.sad.completed_by] || detailsData.sad.completed_by) : (completedByMapRef.current[detailsData.sad?.sad_no] || '—'))}</strong></Text>
+
+                    {/* --- NEW: search & filter controls for tickets inside modal --- */}
+                    <Box mb={3} p={3} borderRadius="md" bg="gray.50">
+                      <Flex gap={3} wrap="wrap" align="center">
+                        <Input placeholder="Search ticket no, driver, material..." size="sm" value={detailFilters.q} onChange={(e) => applyDetailFilterChange('q', e.target.value)} maxW="360px" />
+                        <Input placeholder="Truck number" size="sm" value={detailFilters.truck} onChange={(e) => applyDetailFilterChange('truck', e.target.value)} maxW="220px" />
+                        <Select size="sm" value={detailFilters.type} onChange={(e) => applyDetailFilterChange('type', e.target.value)} maxW="160px">
+                          <option value="">All types</option>
+                          <option value="manual">Manual (M-)</option>
+                          <option value="uploaded">Uploaded (numeric)</option>
+                          <option value="other">Other</option>
+                        </Select>
+
+                        <Box>
+                          <Text fontSize="xs" mb={1}>Date from</Text>
+                          <Input type="date" size="sm" value={detailFilters.dateFrom} onChange={(e) => applyDetailFilterChange('dateFrom', e.target.value)} />
+                        </Box>
+                        <Box>
+                          <Text fontSize="xs" mb={1}>Date to</Text>
+                          <Input type="date" size="sm" value={detailFilters.dateTo} onChange={(e) => applyDetailFilterChange('dateTo', e.target.value)} />
+                        </Box>
+
+                        <Box>
+                          <Text fontSize="xs" mb={1}>Time from</Text>
+                          <Input type="time" size="sm" value={detailFilters.timeFrom} onChange={(e) => applyDetailFilterChange('timeFrom', e.target.value)} />
+                        </Box>
+                        <Box>
+                          <Text fontSize="xs" mb={1}>Time to</Text>
+                          <Input type="time" size="sm" value={detailFilters.timeTo} onChange={(e) => applyDetailFilterChange('timeTo', e.target.value)} />
+                        </Box>
+
+                        <Spacer />
+
+                        <HStack>
+                          <Button size="sm" onClick={() => setDetailFilters({ q: '', truck: '', type: '', dateFrom: '', dateTo: '', timeFrom: '', timeTo: '' })}>Reset</Button>
+                          <Button size="sm" colorScheme="teal" onClick={exportFilteredTicketsCsv}>Export filtered CSV</Button>
+                        </HStack>
+                      </Flex>
+
+                      {/* small inline derived stats */}
+                      <Flex mt={3} gap={4} align="center" wrap="wrap">
+                        <Text fontSize="sm">Showing <strong>{detailDerived.total}</strong> tickets • Net <strong>{detailDerived.cumulativeNet.toLocaleString()}</strong> kg</Text>
+                        <Text fontSize="sm">Manual <strong>{detailDerived.manual}</strong> • Uploaded <strong>{detailDerived.uploaded}</strong></Text>
+                      </Flex>
+                    </Box>
 
                     <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
 
                     <Box overflowX="auto" mb={4}>
-                      {detailsData.tickets && detailsData.tickets.length ? (
+                      {filteredDetailTickets && filteredDetailTickets.length ? (
                         <Table size="sm">
                           <Thead><Tr><Th>Ticket</Th><Th>Truck</Th><Th isNumeric>Net (kg)</Th><Th>Date</Th></Tr></Thead>
                           <Tbody>
-                            {detailsData.tickets.map(t => (
+                            {filteredDetailTickets.map(t => (
                               <Tr key={t.ticket_id || t.ticket_no}>
                                 <Td style={{ maxWidth: 200, overflowWrap: 'break-word' }}>{t.ticket_no}</Td>
                                 <Td>{t.gnsw_truck_no || t.truck_no || '—'}</Td>
