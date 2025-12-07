@@ -38,7 +38,6 @@ const WORD_TO_CODE = {
 // ---------- helpers ----------
 const formatNumber = (v) => {
   if (v === null || v === undefined || v === '') return '';
-  // keep commas for display
   const n = Number(String(v).replace(/,/g, ''));
   if (!Number.isFinite(n)) return v;
   return n.toLocaleString();
@@ -52,7 +51,6 @@ const parseNumberString = (s) => {
 // Robust numeric parser: strips non-number chars and returns a finite number (fallback 0)
 const toNumber = (v) => {
   if (v === null || v === undefined || v === '') return 0;
-  // if it's already a number and finite, return it
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   const cleaned = String(v).replace(/[^\d.-]/g, '');
   if (cleaned === '' || cleaned === '.' || cleaned === '-' || cleaned === '-.' ) return 0;
@@ -1391,10 +1389,6 @@ export default function SADDeclaration() {
                     const recordedNum = toNumber(s.total_recorded_weight);
                     const discrepancy = recordedNum - declaredNum;
 
-                    // discrepancy color rules required:
-                    // red when discharged > declared (discrepancy > 0)
-                    // blue when discharged < declared (discrepancy < 0)
-                    // green when equal (discrepancy === 0)
                     let discColor = 'green.600';
                     if (discrepancy > 0) discColor = 'red.600';
                     else if (discrepancy < 0) discColor = 'blue.600';
@@ -1402,9 +1396,8 @@ export default function SADDeclaration() {
 
                     const statusDotColor = (s.status === 'Completed' ? 'green.400' : s.status === 'In Progress' ? 'red.400' : s.status === 'On Hold' ? 'yellow.400' : 'gray.400');
                     const readyToComplete = recordedNum >= declaredNum && s.status !== 'Completed';
-                    const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code (IM4/EX1/IM7)
+                    const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—');
 
-                    // tooltip content (multi-line)
                     const declared = declaredNum.toLocaleString();
                     const recorded = recordedNum.toLocaleString();
                     const discrepancyText = discrepancy === 0 ? '0' : discrepancy.toLocaleString();
@@ -1607,26 +1600,48 @@ export default function SADDeclaration() {
 
                       <Box>
                         {(() => {
+                          // NEW: always show the real difference (signed), with helpful label and color
                           const recorded = toNumber(detailsData.sad.total_recorded_weight || (detailsData.tickets || []).reduce((s, r) => s + toNumber(r.net ?? r.weight ?? 0), 0));
                           const declared = toNumber(detailsData.sad.declared_weight);
-                          if (declared > 0 && recorded > declared) {
-                            const diff = recorded - declared;
-                            const pct = declared > 0 ? (diff / declared) * 100 : null;
+                          if (!declared) {
                             return (
-                              <Stat bg="red.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                              <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
                                 <StatLabel>Discrepancy</StatLabel>
-                                <StatNumber>{diff.toLocaleString()} kg</StatNumber>
-                                <StatHelpText>{pct != null ? `${pct.toFixed(1)}% over declared` : 'Over declared weight'}</StatHelpText>
+                                <StatNumber>—</StatNumber>
+                                <StatHelpText>No declared weight</StatHelpText>
                               </Stat>
                             );
                           }
-                          return (
-                            <Stat bg="gray.25" px={4} py={3} borderRadius="md" boxShadow="sm">
-                              <StatLabel>Discrepancy</StatLabel>
-                              <StatNumber>{declared > 0 ? `${Math.max(0, (toNumber(detailsData.sad.total_recorded_weight || 0) - declared)).toLocaleString()} kg` : '—'}</StatNumber>
-                              <StatHelpText>{declared > 0 ? 'Within declared limits' : 'No declared weight'}</StatHelpText>
-                            </Stat>
-                          );
+
+                          const diff = recorded - declared;
+                          const abs = Math.abs(diff);
+                          const pct = declared > 0 ? ((abs / declared) * 100).toFixed(1) : null;
+
+                          if (diff > 0) {
+                            return (
+                              <Stat bg="red.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                                <StatLabel>Discrepancy</StatLabel>
+                                <StatNumber>{abs.toLocaleString()} kg</StatNumber>
+                                <StatHelpText>{pct != null ? `${pct}% over declared` : 'Over declared weight'}</StatHelpText>
+                              </Stat>
+                            );
+                          } else if (diff < 0) {
+                            return (
+                              <Stat bg="blue.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                                <StatLabel>Discrepancy</StatLabel>
+                                <StatNumber>{abs.toLocaleString()} kg</StatNumber>
+                                <StatHelpText>{pct != null ? `${pct}% under declared` : 'Below declared weight'}</StatHelpText>
+                              </Stat>
+                            );
+                          } else {
+                            return (
+                              <Stat bg="green.50" px={4} py={3} borderRadius="md" boxShadow="sm">
+                                <StatLabel>Discrepancy</StatLabel>
+                                <StatNumber>0 kg</StatNumber>
+                                <StatHelpText>Matches declared</StatHelpText>
+                              </Stat>
+                            );
+                          }
                         })()}
                       </Box>
                     </ChakraSimpleGrid>
@@ -1770,9 +1785,10 @@ export default function SADDeclaration() {
                   if (diff > 0) color = 'red.600';
                   else if (diff < 0) color = 'blue.600';
                   else color = 'green.600';
+                  const abs = Math.abs(diff);
                   return (
                     <Text mb={3} color={color}>
-                      Discrepancy: {Number.isFinite(diff) ? (diff === 0 ? '0' : diff.toLocaleString()) : '0'} kg
+                      Discrepancy: {Number.isFinite(diff) ? (diff === 0 ? '0' : abs.toLocaleString()) : '0'} kg {diff > 0 ? '(over declared)' : diff < 0 ? '(under declared)' : '(matches)'}
                     </Text>
                   );
                 })()}
