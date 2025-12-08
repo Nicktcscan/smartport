@@ -1179,7 +1179,6 @@ export default function AgentApptPage() {
           // even if fetch failed, return data based on inserted values (including barcode_payload)
           return {
             appointment: {
-              id: appointmentId,
               appointmentNumber,
               weighbridgeNumber,
               warehouse: appointmentInsert.warehouse_location,
@@ -1219,7 +1218,6 @@ export default function AgentApptPage() {
             totalDocumentedWeight: fullAppointment.total_documented_weight,
             t1s: (fullAppointment.t1_records || []).map((r) => ({ sadNo: r.sad_no, packingType: r.packing_type, containerNo: r.container_no })),
             createdAt: fullAppointment.created_at,
-            id: fullAppointment.id,
             barcode_payload: fullAppointment.barcode_payload || appointmentInsert.barcode_payload || '',
           }
         };
@@ -1357,22 +1355,30 @@ export default function AgentApptPage() {
   // ---------- NEW: send SMS via your Vercel/Server API ----------
   // Change this if your API is at a different base path or domain.
   const API_SENDSMS_PATH = (typeof window !== 'undefined' && window.location && window.location.origin)
-    ? '/api/sendSMS'
+    ? `${window.location.origin}/api/sendSMS`
     : '/api/sendSMS';
 
-  async function sendSmsViaApi({ to, message, meta }) {
-    // meta is optional extra debug context passed to server
+  /**
+   * sendSmsViaApi(payload)
+   * - Accepts either:
+   *   - { to, message }  (simple)
+   *   - full notify object: { appointment: {...}, recipients: { driverPhone, agentName }, pdfUrl, ... }
+   * - Sends a POST JSON to the server endpoint and returns { ok: true, data } or { ok:false, error, status }.
+   */
+  async function sendSmsViaApi(payload = {}) {
     try {
       const resp = await fetch(API_SENDSMS_PATH, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
         },
-        body: JSON.stringify({ to, message, meta })
+        credentials: 'same-origin',
+        body: JSON.stringify(payload),
       });
 
-      // status 404/405 means the route isn't available or method not allowed
       if (!resp.ok) {
+        // read text (may be HTML or JSON)
         const txt = await resp.text().catch(() => null);
         let reason = txt || `HTTP ${resp.status}`;
         if (resp.status === 404) reason = `API endpoint not found (404) - ensure /api/sendSMS exists on the server.`;
@@ -1394,7 +1400,7 @@ export default function AgentApptPage() {
     setSmsAttempts(0);
     setSmsResult(null);
 
-    // Build phone and text
+    // Build phone and text for UI display (server will construct message if given full notifyBody)
     const to = (notifyBody.recipients && notifyBody.recipients.driverPhone) || '';
     const appt = notifyBody.appointment || {};
     const apptNo = appt.appointmentNumber || appt.appointment_number || '';
@@ -1412,6 +1418,9 @@ export default function AgentApptPage() {
       `\nDriver: ${drvName}` +
       (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : "");
 
+    // For clarity, attach a message copy in the payload so server can use it or ignore it
+    const payloadToSend = Object.assign({}, notifyBody, { message: smsText });
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       setSmsAttempts(attempt);
       // update toast and small UI indicator
@@ -1423,7 +1432,9 @@ export default function AgentApptPage() {
       });
 
       try {
-        const resp = await sendSmsViaApi({ to, message: smsText, meta: { appointment: appt } });
+        // Send the full notify body (server builds final message if appointment object present)
+        const resp = await sendSmsViaApi(payloadToSend);
+
         if (resp && resp.ok) {
           setSmsResult({ ok: true, data: resp.data });
           toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
@@ -1434,6 +1445,8 @@ export default function AgentApptPage() {
           // set smsResult with last attempt info so UI shows it after all attempts
           setSmsResult({ ok: false, error: err, status: resp?.status || null });
           toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 160), duration: 4000 });
+
+          // exponential backoff before retry
           const wait = 800 * Math.pow(2, attempt - 1);
           await new Promise(r => setTimeout(r, wait));
           continue;
@@ -2119,7 +2132,7 @@ export default function AgentApptPage() {
       </Modal>
 
       {/* Confirm Modal */}
-      <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered>
+      <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered> 
         <ModalOverlay />
         <ModalContent maxW="lg" borderRadius="lg" className="appt-glass">
           <ModalHeader>Confirm Appointment</ModalHeader>
