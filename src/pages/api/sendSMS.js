@@ -7,13 +7,16 @@
 // - TWILIO_AUTH_TOKEN
 // - TWILIO_PHONE_NUMBER  (the Twilio sender number, e.g. +1xxx)
 // Optional:
-// - SENDSMS_ALLOWED_ORIGIN (defaults to '*', set to your frontend origin for safety)
+// - SENDSMS_ALLOWED_ORIGIN (defaults to 'https://smartport-test.vercel.app')
 
 export default async function handler(req, res) {
-  const ALLOWED_ORIGIN = process.env.SENDSMS_ALLOWED_ORIGIN || '*';
+  // safer default: use your frontend origin if env not set
+  const DEFAULT_ORIGIN = 'https://smartport-test.vercel.app';
+  const ALLOWED_ORIGIN = process.env.SENDSMS_ALLOWED_ORIGIN || DEFAULT_ORIGIN;
 
   // Always include CORS headers
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
+  // allow GET so manual browser visits return a helpful message
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   // If you want credentials (cookies), set Access-Control-Allow-Credentials and handle accordingly.
@@ -23,22 +26,60 @@ export default async function handler(req, res) {
     return res.status(204).end();
   }
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method Not Allowed' });
+  // Helpful GET handler — useful when someone accidentally loads the .js file in browser
+  if (req.method === 'GET') {
+    return res.status(200).json({
+      ok: true,
+      info: 'sendSMS endpoint (POST) — This route expects a POST with JSON. Example: POST /api/sendSMS with { to, message } OR { appointment, recipients: { driverPhone } }.',
+      note: 'Do NOT call /api/sendSMS.js in browser for POST — use /api/sendSMS (no .js) as the request path. If you see a 405 it likely means you requested a static file or used a method the endpoint does not accept.',
+      examplePayloads: {
+        simple: { to: '+220770123456', message: 'Appointment APPT1234 — Pickup tomorrow 08:00' },
+        notify: {
+          appointment: { appointmentNumber: '2512010001', pickupDate: '2025-12-08', truckNumber: 'BJL1234' },
+          recipients: { driverPhone: '+220770123456', agentName: 'Agent Ltd' }
+        }
+      }
+    });
   }
 
+  if (req.method !== 'POST') {
+    // Return a descriptive 405 for unsupported methods
+    return res.status(405).json({ error: 'Method Not Allowed. Use POST for sending SMS.' });
+  }
+
+  // POST handling
   try {
-    const body = req.body || {};
+    // Some runtimes (Edge) may not auto-parse JSON into req.body.
+    // Try to use req.body if available, otherwise attempt to parse raw body.
+    let body = req.body;
+    if (!body || Object.keys(body).length === 0) {
+      // attempt to parse raw body as fallback
+      try {
+        // When using Next.js node runtime, req is a stream; reading raw body:
+        body = await new Promise((resolve, reject) => {
+          let raw = '';
+          req.on && req.on('data', (chunk) => { raw += chunk; });
+          req.on && req.on('end', () => {
+            if (!raw) return resolve({});
+            try { return resolve(JSON.parse(raw)); } catch (e) { return resolve({ _raw: raw }); }
+          });
+          req.on && req.on('error', (err) => reject(err));
+        });
+      } catch (e) {
+        // ignore parse error; keep body as {}
+        body = body || {};
+      }
+    }
 
     // Accept either:
     // - { to, message }  OR
     // - notify body: { appointment: {...}, recipients: { driverPhone, agentName }, pdfUrl }
-    const toRaw = body.to || (body.recipients && (body.recipients.driverPhone || body.recipients.to)) || null;
-    const messageRaw = body.message || null;
+    const toRaw = (body && (body.to || (body.recipients && (body.recipients.driverPhone || body.recipients.to)))) || null;
+    const messageRaw = (body && body.message) || null;
 
     // Build a reasonable SMS message if full notify object supplied & message not provided
     let finalMessage = messageRaw;
-    if (!finalMessage && body.appointment) {
+    if (!finalMessage && body && body.appointment) {
       const a = body.appointment;
       const appt = a.appointmentNumber || a.appointment_number || a.appointmentNo || '';
       const wb = a.weighbridgeNumber || a.weighbridge_number || a.weighbridge || '';
@@ -71,7 +112,7 @@ export default async function handler(req, res) {
 
     // Build Basic auth header (works both in Node and Edge runtimes)
     const basicAuthRaw = `${accountSid}:${authToken}`;
-    let basicAuth;
+    let basicAuth = null;
     try {
       if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
         basicAuth = Buffer.from(basicAuthRaw).toString('base64');
@@ -79,29 +120,12 @@ export default async function handler(req, res) {
         basicAuth = btoa(basicAuthRaw);
       } else if (typeof globalThis !== 'undefined' && typeof globalThis.btoa === 'function') {
         basicAuth = globalThis.btoa(basicAuthRaw);
-      } else {
-        // fallback: very small base64 encoder for ASCII subset
-        basicAuth = Buffer ? Buffer.from(basicAuthRaw).toString('base64') : (function(str){
-          // crude fallback for ASCII only (shouldn't be needed in Node / Vercel)
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-          let output = '';
-          let i = 0;
-          while (i < str.length) {
-            const [c1, c2, c3] = [str.charCodeAt(i++), str.charCodeAt(i++), str.charCodeAt(i++)];
-            const enc1 = c1 >> 2;
-            const enc2 = ((c1 & 3) << 4) | (c2 >> 4);
-            const enc3 = ((c2 & 15) << 2) | (c3 >> 6);
-            const enc4 = c3 & 63;
-            if (isNaN(c2)) { output += chars.charAt(enc1) + chars.charAt(enc2) + '=='; }
-            else if (isNaN(c3)) { output += chars.charAt(enc1) + chars.charAt(enc2) + chars.charAt(enc3) + '='; }
-            else { output += chars.charAt(enc1) + chars.charAt(enc2) + chars.charAt(enc3) + chars.charAt(enc4); }
-          }
-          return output;
-        })(basicAuthRaw);
       }
     } catch (e) {
-      // Best effort - if this fails we'll attempt to use Buffer and let runtime throw meaningful error
-      basicAuth = (typeof Buffer !== 'undefined') ? Buffer.from(basicAuthRaw).toString('base64') : null;
+      // ignore - we'll fallback below
+    }
+    if (!basicAuth) {
+      try { basicAuth = Buffer.from(basicAuthRaw).toString('base64'); } catch (e) { /* final fallback */ }
     }
 
     if (!basicAuth) {
@@ -130,6 +154,7 @@ export default async function handler(req, res) {
 
     if (!twRes.ok) {
       // Twilio returned an error (bad number, auth problem, etc)
+      // Mirror Twilio's status and response to help debugging in client logs.
       return res.status(twRes.status || 500).json({
         ok: false,
         error: 'Twilio API error',
