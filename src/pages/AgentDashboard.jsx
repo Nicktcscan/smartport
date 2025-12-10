@@ -161,14 +161,14 @@ export default function OutgateReports() {
 
   // SAD search workflow
   const [sadQuery, setSadQuery] = useState('');
-  const [sadOriginal, setSadOriginal] = useState([]); // raw results mapped from outgate
+  const [sadOriginal, setSadOriginal] = useState([]); // raw results mapped from outgate + tickets
   const [sadTickets, setSadTickets] = useState([]); // filtered after range/status
   const [sadDateFrom, setSadDateFrom] = useState('');
   const [sadDateTo, setSadDateTo] = useState('');
   const [sadTimeFrom, setSadTimeFrom] = useState('');
   const [sadTimeTo, setSadTimeTo] = useState('');
   const [sadLoading, setSadLoading] = useState(false);
-  const [sadMeta, setSadMeta] = useState({});
+  const [sadMeta, setSadMeta] = useState({}); // includes sadExists etc.
 
   // truck filter (new)
   const [truckFilter, setTruckFilter] = useState(''); // exact pick from list
@@ -203,12 +203,12 @@ export default function OutgateReports() {
         ticketNo: row.ticket_no ?? '',
         weighed_at: weighedAt ?? null,
         exitTime: row.created_at ?? null, // outgate created_at (exit time)
-        gnswTruckNo: row.vehicle_number ?? '',
+        gnswTruckNo: row.vehicle_number ?? row.gnsw_truck_no ?? '',
         gross: row.gross ?? null,
         tare: row.tare ?? null,
         net: row.net ?? null,
         driver: row.driver ?? 'N/A',
-        containerNo: row.container_id ?? '',
+        containerNo: row.container_id ?? row.container_no ?? '',
         fileUrl: row.file_url ?? null,
         status: 'Exited',
         // keep created_at for sorting/filtering if needed
@@ -293,60 +293,118 @@ export default function OutgateReports() {
 
   // Generate SAD results by querying the outgate table (new behavior)
   const handleGenerateSad = async () => {
-    if (!sadQuery.trim()) {
+    const rawQuery = String(sadQuery || '').trim();
+    if (!rawQuery) {
       toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
       return;
     }
+
     try {
       setSadLoading(true);
 
-      // Query outgate table (confirmed exits). Sort newest first by created_at.
-      const { data, error } = await supabase
-        .from('outgate')
-        .select('*')
-        .ilike('sad_no', `%${sadQuery.trim()}%`)
-        .order('created_at', { ascending: false });
+      // 1) Fetch declaration (exact-ish) so we know if SAD exists in declarations table
+      let sadDeclaration = null;
+      try {
+        // Try exact case-insensitive match first
+        const { data: declExact, error: declErr } = await supabase
+          .from('sad_declarations')
+          .select('sad_no, declared_weight, total_recorded_weight, status')
+          .ilike('sad_no', `${rawQuery}`)
+          .maybeSingle();
 
-      if (error) throw error;
+        if (!declErr && declExact) {
+          sadDeclaration = declExact;
+        } else {
+          // fallback to partial match if exact didn't find (useful for partial queries)
+          const { data: declPartial, error: declPartialErr } = await supabase
+            .from('sad_declarations')
+            .select('sad_no, declared_weight, total_recorded_weight, status')
+            .ilike('sad_no', `%${rawQuery}%`)
+            .limit(1);
 
-      // Build ticket lookup map: fetch tickets by ticket_no found in outgate rows and map -> submitted_at
-      const ticketNumbers = Array.from(new Set((data || []).map((r) => r.ticket_no).filter(Boolean)));
-      let ticketMap = {};
-      if (ticketNumbers.length > 0) {
-        try {
-          const { data: ticketsData, error: ticketsErr } = await supabase
-            .from('tickets')
-            .select('ticket_no, submitted_at')
-            .in('ticket_no', ticketNumbers);
-          if (!ticketsErr && Array.isArray(ticketsData)) {
-            ticketsData.forEach((t) => {
-              if (t && t.ticket_no) ticketMap[String(t.ticket_no)] = t.submitted_at || null;
-            });
+          if (!declPartialErr && Array.isArray(declPartial) && declPartial.length > 0) {
+            sadDeclaration = declPartial[0];
           }
-        } catch (e) {
-          console.warn('ticket lookup failed', e);
         }
+      } catch (e) {
+        console.warn('sad declaration lookup failed', e);
       }
 
-      // Map using ticketMap preference for weighed_at
-      const mapped = (data || []).map((r) => {
+      // 2) Query outgate (exited) rows for the SAD (partial, case-insensitive)
+      const { data: outgateRows, error: outgateErr } = await supabase
+        .from('outgate')
+        .select('*')
+        .ilike('sad_no', `%${rawQuery}%`)
+        .order('created_at', { ascending: false });
+
+      if (outgateErr) {
+        console.warn('outgate query error', outgateErr);
+      }
+
+      // 3) Query tickets (pending) for the SAD (partial, case-insensitive)
+      const { data: ticketRows, error: ticketErr } = await supabase
+        .from('tickets')
+        .select('*')
+        .ilike('sad_no', `%${rawQuery}%`)
+        .order('submitted_at', { ascending: false });
+
+      if (ticketErr) {
+        console.warn('tickets query error', ticketErr);
+      }
+
+      // Build ticket lookup map from tickets query for mapping outgate rows' submitted_at preference
+      const ticketMap = {};
+      if (Array.isArray(ticketRows) && ticketRows.length > 0) {
+        ticketRows.forEach((t) => {
+          if (t && t.ticket_no) ticketMap[String(t.ticket_no)] = t.submitted_at || null;
+        });
+      }
+
+      // Map outgate rows (Exited)
+      const outMapped = Array.isArray(outgateRows) ? outgateRows.map((r) => {
         const submittedAt = r.ticket_no ? ticketMap[String(r.ticket_no)] : null;
         return mapOutgateRow(r, submittedAt || null);
-      });
+      }) : [];
 
-      // ensure newest first (by exitTime / created_at)
-      mapped.sort((a, b) => {
+      // Map ticket rows (Pending)
+      const ticketMapped = Array.isArray(ticketRows) ? ticketRows.map((t) => {
+        // We map to same shape as mapOutgateRow but status 'Pending' and exitTime null
+        return {
+          ticketId: `ticket-${t.ticket_no || (t.id ? String(t.id) : Math.random())}`,
+          data: {
+            sadNo: t.sad_no ?? '',
+            ticketNo: t.ticket_no ?? '',
+            weighed_at: t.submitted_at ?? t.created_at ?? null,
+            exitTime: null,
+            gnswTruckNo: t.vehicle_number ?? t.truck_number ?? '',
+            gross: t.gross ?? null,
+            tare: t.tare ?? null,
+            net: t.net ?? null,
+            driver: t.driver ?? t.operator ?? 'N/A',
+            containerNo: t.container_id ?? t.container_no ?? '',
+            fileUrl: t.file_url ?? null,
+            status: 'Pending',
+            created_at: t.submitted_at ?? t.created_at ?? null,
+            date: t.submitted_at ?? t.created_at ?? null,
+          },
+        };
+      }) : [];
+
+      // Combine: prefer outgate (Exited) first, then pending tickets
+      const combined = [...outMapped, ...ticketMapped];
+
+      // sort newest first by exitTime / weighed_at
+      combined.sort((a, b) => {
         const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
         const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
         return db - da;
       });
 
-      // dedupe by ticket number (keeps first occurrence which is newest-first)
-      const uniqueMapped = dedupeByTicket(mapped);
+      // dedupe by ticketNo (keeps first occurrence - outgate preferred because it's first)
+      const uniqueMapped = dedupeByTicket(combined);
 
+      // set original & filtered arrays
       setSadOriginal(uniqueMapped);
-
-      // compute filtered view (filters apply to weighed_at, also applies truck filters if set)
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
@@ -359,26 +417,12 @@ export default function OutgateReports() {
       // compute discharged weight from the mapped result (all rows found)
       const totalNet = computeTotalNetFromArray(uniqueMapped);
 
-      // attempt to fetch the SAD declaration row for more accurate declared weight/status (optional)
-      let sadRow = null;
-      try {
-        const { data: sadData, error: sadError } = await supabase
-          .from('sad_declarations')
-          .select('sad_no, declared_weight, total_recorded_weight, status')
-          .ilike('sad_no', `${sadQuery.trim()}`)
-          .maybeSingle();
-        if (!sadError) sadRow = sadData || null;
-      } catch (e) {
-        console.debug('sad fetch failed', e);
-      }
-
-      const declared = sadRow ? Number(sadRow.declared_weight ?? 0) : null;
+      const declared = sadDeclaration ? Number(sadDeclaration.declared_weight ?? 0) : null;
       const discharged = Number(totalNet || 0);
-
       const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
 
       setSadMeta({
-        sad: sadQuery.trim(),
+        sad: rawQuery,
         dateRangeText:
           uniqueMapped.length > 0 && uniqueMapped[0].data.weighed_at
             ? new Date(uniqueMapped[0].data.weighed_at).toLocaleDateString()
@@ -387,18 +431,29 @@ export default function OutgateReports() {
         endTimeLabel: '',
         declaredWeight: declared,
         dischargedWeight: discharged,
-        sadStatus: sadRow ? (sadRow.status ?? 'In Progress') : 'Unknown',
-        sadExists: !!sadRow,
+        sadStatus: sadDeclaration ? (sadDeclaration.status ?? 'In Progress') : 'Unknown',
+        sadExists: !!sadDeclaration,
         discrepancy,
         discrepancyPercent,
       });
 
+      // user feedback
       if ((uniqueMapped || []).length === 0) {
-        toast({ title: 'No records found for that SAD', status: 'info', duration: 2500 });
+        if (sadDeclaration) {
+          // declaration exists but no transaction rows
+          toast({
+            title: `SAD ${rawQuery} registered`,
+            description: `SAD ${rawQuery} is registered in the declarations table. No matching weighbridge exits or pending tickets were found.`,
+            status: 'info',
+            duration: 6000,
+          });
+        } else {
+          toast({ title: 'No records found for that SAD', status: 'info', duration: 3000 });
+        }
       }
     } catch (err) {
       console.error(err);
-      toast({ title: 'Search failed', description: err?.message || 'Could not fetch outgate rows', status: 'error', duration: 4000 });
+      toast({ title: 'Search failed', description: err?.message || 'Could not fetch data', status: 'error', duration: 4000 });
     } finally {
       setSadLoading(false);
     }
@@ -696,7 +751,7 @@ export default function OutgateReports() {
       <Flex justify="space-between" align="center" mb={6} gap={4} flexWrap="wrap">
         <Box>
           <Text fontSize="2xl" fontWeight="bold">SAD Report - Agent Dashboard</Text>
-          <Text color="gray.500">Search outgate (confirmed exits) by SAD → filter by date/time/truck → export or print.</Text>
+          <Text color="gray.500">Search outgate (confirmed exits) by SAD → filter by date/time/truck → export or print. Pending tickets are included too.</Text>
         </Box>
 
         <HStack spacing={4}>
@@ -733,7 +788,8 @@ export default function OutgateReports() {
           </Box>
         </Flex>
 
-        {sadOriginal.length > 0 && (
+        {/* Show filters + stats if either we have returned rows OR the SAD declaration exists */}
+        {(sadOriginal.length > 0 || sadMeta?.sadExists) && (
           <Box mt={2}>
             {/* Truck filter - appears after SAD search */}
             <SimpleGrid columns={{ base: 1, md: 2 }} spacing={3} mb={3}>
@@ -770,7 +826,7 @@ export default function OutgateReports() {
             </SimpleGrid>
 
             {/* SAD detail stats cards - different bg colors for attractiveness */}
-            {sadMeta?.sad && (
+            { (sadMeta?.sad) && (
               <SimpleGrid columns={{ base: 1, md: 4 }} spacing={3} mt={3} mb={3}>
                 <Stat bg="blue.50" px={4} py={3} borderRadius="md" boxShadow="sm">
                   <StatLabel>Declared Weight</StatLabel>
@@ -903,6 +959,17 @@ export default function OutgateReports() {
               </Tr>
             </Tbody>
           </Table>
+        </Box>
+      )}
+
+      {/* If there are no transactions but SAD exists, show a friendly message and the declaration info */}
+      {(filteredSadTickets.length === 0 && sadMeta?.sadExists) && (
+        <Box mb={6} bg="white" p={4} borderRadius="md" boxShadow="sm">
+          <Text fontWeight="semibold">SAD {sadMeta.sad} — no transactions found</Text>
+          <Text mt={2} color="gray.600">
+            This SAD is registered in the declarations table but no weighbridge exits or pending tickets matched your search.
+            Declared weight: {formatWeight(sadMeta.declaredWeight)} • Status: {sadMeta.sadStatus || 'Unknown'}
+          </Text>
         </Box>
       )}
     </Box>
