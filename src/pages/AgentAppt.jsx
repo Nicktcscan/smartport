@@ -1167,7 +1167,6 @@ export default function AgentApptPage() {
             throw t1Err;
           }
         }
-
         // fetch full appointment with t1s
         const { data: fullAppointment, error: fetchErr } = await supabase
           .from('appointments')
@@ -1410,13 +1409,20 @@ export default function AgentApptPage() {
     const drvName = appt.driverName || appt.driver_name || '';
     const shortPdfLink = notifyBody.pdfUrl || appt.pdfUrl || appt.pdf_url || '';
 
+    // Build SAD numbers list if present in appointment.t1s
+    const sadNums = Array.isArray(appt.t1s) ? appt.t1s.map(t => (t.sadNo || t.sad_no || '').toString().trim()).filter(Boolean) : [];
+    const sadLine = sadNums.length ? `SAD Number: ${sadNums.join(', ')}` : 'SAD Number:';
+
+    // Updated SMS formatting per your request:
     const smsText =
-      `Weighbridge Appointment confirmed: APPT ${apptNo}` +
-      (wbNo ? ` | WB ${wbNo}` : "") +
-      `\nPickup: ${pickup}` +
-      `\nTruck: ${truck}` +
-      `\nDriver: ${drvName}` +
-      (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : "");
+      `NICK TC-SCAN (GAMBIA) LTD. WB:\n` +
+      `APPT ${apptNo}\n` +
+      (wbNo ? `WB ${wbNo}\n` : '') +
+      `${sadLine}\n` +
+      `Pickup: ${pickup}\n` +
+      `Truck: ${truck}\n` +
+      `Driver: ${drvName}` +
+      (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : '');
 
     // For clarity, attach a message copy in the payload so server can use it or ignore it
     const payloadToSend = Object.assign({}, notifyBody, { message: smsText });
