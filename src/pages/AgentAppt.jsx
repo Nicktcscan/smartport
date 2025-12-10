@@ -447,7 +447,6 @@ export default function AgentApptPage() {
   const [smsSending, setSmsSending] = useState(false);
   const [smsAttempts, setSmsAttempts] = useState(0);
   const [smsResult, setSmsResult] = useState(null);
-  const [isSmsModalOpen, setSmsModalOpen] = useState(false); // new modal for sending hint
 
   // preview states for generated numbers (shown in confirm modal)
   const [previewAppointmentNumber, setPreviewAppointmentNumber] = useState('');
@@ -1397,7 +1396,6 @@ export default function AgentApptPage() {
     setSmsSending(true);
     setSmsAttempts(0);
     setSmsResult(null);
-    setSmsModalOpen(true); // open the "We're sending..." modal
 
     // Build phone and text for UI display (server will construct message if given full notifyBody)
     const to = (notifyBody.recipients && notifyBody.recipients.driverPhone) || '';
@@ -1411,21 +1409,19 @@ export default function AgentApptPage() {
 
     // derive SAD number(s) from appointment t1s (or top-level notifyBody.t1s)
     const t1list = (appt.t1s || notifyBody.t1s || appt.t1_records || []).map((r) => {
+      // normalize different field names
       if (!r) return null;
       return r.sadNo || r.sad_no || r.sad || null;
     }).filter(Boolean);
     const uniqueSadList = Array.from(new Set(t1list));
+    const sadLine = uniqueSadList.length ? uniqueSadList.join(', ') : '—';
 
-    // Build SAD section: label + each SAD on its own line (or a placeholder)
-    const sadSection = uniqueSadList.length ? uniqueSadList.map(s => `${s}`).join('\n') : '—';
-
-    // new SMS format requested, SADs each on own line
-    // Keep the header & layout compact for SMS clients
+    // new SMS format requested
     const smsText =
-      `NICK TC-SCAN (GAMBIA) LTD. WB:\n` +
-      `APPT ${apptNo}\n` +
-      (wbNo ? `WB ${wbNo}\n` : '') +
-      `SAD Number:\n${sadSection}\n` +
+      `NICK TC-SCAN (GAMBIA) LTD.:\n` +
+      `APPT: ${apptNo}\n` +
+      (wbNo ? `WB Number: ${wbNo}\n` : '') +
+      `SAD Number: ${sadLine}\n` +
       `Pickup: ${pickup}\n` +
       `Truck: ${truck}\n` +
       `Driver: ${drvName}` +
@@ -1452,7 +1448,6 @@ export default function AgentApptPage() {
           setSmsResult({ ok: true, data: resp.data });
           toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
           setSmsSending(false);
-          setSmsModalOpen(false);
           return { ok: true, data: resp.data };
         } else {
           const err = resp?.error || resp?.data || `HTTP ${resp?.status || 'error'}`;
@@ -1476,7 +1471,6 @@ export default function AgentApptPage() {
     }
 
     setSmsSending(false);
-    setSmsModalOpen(false);
     setSmsResult({ ok: false, error: 'All attempts failed' });
     toast({ status: 'error', title: 'SMS sending failed', description: 'All retry attempts failed. You can retry from the appointment details page.' });
     return { ok: false, error: 'exhausted' };
@@ -1705,7 +1699,7 @@ export default function AgentApptPage() {
           }
         };
 
-        // show styling via local state; notifyWithRetries shows toasts and opens modal
+        // show styling via local state; notifyWithRetries shows toasts
         const notifyResp = await notifyWithRetries(notifyBody, 3);
 
         if (notifyResp && notifyResp.ok) {
@@ -1752,7 +1746,6 @@ export default function AgentApptPage() {
       setLoadingCreate(false);
       setSmsSending(false);
       setSmsAttempts(0);
-      setSmsModalOpen(false);
     }
   };
 
@@ -2048,39 +2041,6 @@ export default function AgentApptPage() {
         </HStack>
       </Box>
 
-      {/* SMS Sending Modal (new) */}
-      <Modal isOpen={isSmsModalOpen} onClose={() => { if (!smsSending) setSmsModalOpen(false); }} isCentered>
-        <ModalOverlay />
-        <ModalContent maxW="md">
-          <ModalHeader>Sending Appointment</ModalHeader>
-          <ModalCloseButton disabled={smsSending} />
-          <ModalBody>
-            <Stack spacing={3}>
-              <Text>
-                We're sending appointment details to <b>{driverName || 'Driver'}</b>,
-                on his <b>{formatPhoneForDisplay(smsResult?.to || driverLicense || '') || driverLicense}</b>.
-              </Text>
-              <Text fontSize="sm" color="gray.600">Let him show this received message at the Weighbridge.</Text>
-              <Box pt={2}>
-                {smsSending ? (
-                  <HStack>
-                    <Spinner size="sm" />
-                    <Text fontSize="sm">Sending SMS (attempt {smsAttempts}) …</Text>
-                  </HStack>
-                ) : (
-                  <Text fontSize="sm" color={smsResult && smsResult.ok ? 'green.600' : 'red.600'}>
-                    {smsResult ? (smsResult.ok ? 'SMS sent' : `SMS failed: ${String(smsResult.error || smsResult.data || '')}`) : 'Preparing SMS…'}
-                  </Text>
-                )}
-              </Box>
-            </Stack>
-          </ModalBody>
-          <ModalFooter>
-            <Button onClick={() => setSmsModalOpen(false)} isDisabled={smsSending}>Close</Button>
-          </ModalFooter>
-        </ModalContent>
-      </Modal>
-
       {/* Floating crystal orb CTA (opens T1 modal) */}
       <Box className="floating-orb" onClick={() => { setOrbOpen(true); setT1ModalOpen(true); }} role="button" aria-label="Add T1">
         <MotionBox
@@ -2182,7 +2142,7 @@ export default function AgentApptPage() {
       </Modal>
 
       {/* Confirm Modal */}
-      <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered>
+      <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered> 
         <ModalOverlay />
         <ModalContent maxW="lg" borderRadius="lg" className="appt-glass">
           <ModalHeader>Confirm Appointment</ModalHeader>
