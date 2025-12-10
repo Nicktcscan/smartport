@@ -161,7 +161,7 @@ export default function OutgateReports() {
 
   // SAD search workflow
   const [sadQuery, setSadQuery] = useState('');
-  const [sadOriginal, setSadOriginal] = useState([]); // raw results mapped from outgate/tickets
+  const [sadOriginal, setSadOriginal] = useState([]); // raw results mapped from outgate
   const [sadTickets, setSadTickets] = useState([]); // filtered after range/status
   const [sadDateFrom, setSadDateFrom] = useState('');
   const [sadDateTo, setSadDateTo] = useState('');
@@ -203,7 +203,7 @@ export default function OutgateReports() {
         ticketNo: row.ticket_no ?? '',
         weighed_at: weighedAt ?? null,
         exitTime: row.created_at ?? null, // outgate created_at (exit time)
-        gnswTruckNo: row.vehicle_number ?? row.vehicle_no ?? '',
+        gnswTruckNo: row.vehicle_number ?? '',
         gross: row.gross ?? null,
         tare: row.tare ?? null,
         net: row.net ?? null,
@@ -211,32 +211,9 @@ export default function OutgateReports() {
         containerNo: row.container_id ?? '',
         fileUrl: row.file_url ?? null,
         status: 'Exited',
+        // keep created_at for sorting/filtering if needed
         created_at: row.created_at ?? null,
         date: row.date ?? null,
-      },
-    };
-  };
-
-  // Map a ticket-only row (no outgate exit yet) into the same shape, marked Pending
-  const mapTicketRow = (ticket) => {
-    const ticketId = ticket.ticket_no ? `ticket:${String(ticket.ticket_no)}` : (ticket.id ? String(ticket.id) : `${Math.random()}`);
-    return {
-      ticketId,
-      data: {
-        sadNo: ticket.sad_no ?? '',
-        ticketNo: ticket.ticket_no ?? '',
-        weighed_at: ticket.submitted_at ?? ticket.created_at ?? null,
-        exitTime: null,
-        gnswTruckNo: ticket.vehicle_number ?? ticket.vehicle_no ?? '',
-        gross: ticket.gross ?? null,
-        tare: ticket.tare ?? null,
-        net: ticket.net ?? null,
-        driver: ticket.driver ?? ticket.driver_name ?? 'N/A',
-        containerNo: ticket.container_id ?? ticket.container_no ?? '',
-        fileUrl: ticket.file_url ?? null,
-        status: 'Pending',
-        created_at: ticket.created_at ?? ticket.submitted_at ?? null,
-        date: ticket.submitted_at ?? ticket.date ?? null,
       },
     };
   };
@@ -258,28 +235,24 @@ export default function OutgateReports() {
     const filtered = originalArr.filter((t) => {
       const dRaw = t.data.weighed_at; // filter by weighed_at (now ticket.submitted_at when available)
       const d = dRaw ? new Date(dRaw) : null;
-      if (!d) {
-        // If no weighed_at (rare), still allow if user hasn't applied date/time filters
-        if (hasDateRange || sadTimeFrom || sadTimeTo) return false;
-      } else {
-        if (hasDateRange) {
-          let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
-          let end = endDate ? new Date(endDate) : new Date(8640000000000000);
-          if (sadTimeFrom) {
-            const mins = parseTimeToMinutes(sadTimeFrom);
-            if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-          }
-          if (sadTimeTo) {
-            const mins = parseTimeToMinutes(sadTimeTo);
-            if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
-          }
-          if (d < start || d > end) return false;
-        } else if (sadTimeFrom || sadTimeTo) {
-          const minutes = d.getHours() * 60 + d.getMinutes();
-          const from = tfMinutes != null ? tfMinutes : 0;
-          const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
-          if (minutes < from || minutes > to) return false;
+      if (!d) return false;
+      if (hasDateRange) {
+        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+        if (sadTimeFrom) {
+          const mins = parseTimeToMinutes(sadTimeFrom);
+          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
         }
+        if (sadTimeTo) {
+          const mins = parseTimeToMinutes(sadTimeTo);
+          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+        }
+        if (d < start || d > end) return false;
+      } else if (sadTimeFrom || sadTimeTo) {
+        const minutes = d.getHours() * 60 + d.getMinutes();
+        const from = tfMinutes != null ? tfMinutes : 0;
+        const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
+        if (minutes < from || minutes > to) return false;
       }
 
       if (sadSortStatus) {
@@ -318,115 +291,58 @@ export default function OutgateReports() {
     }, 0);
   };
 
-  // Generate SAD results by querying the sad_declarations -> tickets -> outgate (new behavior)
+  // Generate SAD results by querying the outgate table (new behavior)
   const handleGenerateSad = async () => {
-    const rawQuery = (sadQuery || '').trim();
-    if (!rawQuery) {
+    if (!sadQuery.trim()) {
       toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
       return;
     }
-
     try {
       setSadLoading(true);
 
-      const searchKey = rawQuery; // use exact-ish match but case-insensitive via ILIKE
+      // Query outgate table (confirmed exits). Sort newest first by created_at.
+      const { data, error } = await supabase
+        .from('outgate')
+        .select('*')
+        .ilike('sad_no', `%${sadQuery.trim()}%`)
+        .order('created_at', { ascending: false });
 
-      // 1) fetch SAD declaration row (case-insensitive exact match)
-      let sadRow = null;
-      try {
-        const { data: sadData, error: sadError } = await supabase
-          .from('sad_declarations')
-          .select('sad_no, declared_weight, total_recorded_weight, status, created_at, consignee, goods_name')
-          .ilike('sad_no', `${searchKey}`) // ilike without % -> case-insensitive exact match
-          .maybeSingle();
+      if (error) throw error;
 
-        if (!sadError) sadRow = sadData || null;
-      } catch (e) {
-        console.debug('sad fetch failed', e);
-      }
-
-      // 2) fetch tickets that belong to this SAD (case-insensitive exact match)
-      let ticketsData = [];
-      try {
-        const { data: tdata, error: terr } = await supabase
-          .from('tickets')
-          .select('*')
-          .ilike('sad_no', `${searchKey}`); // case-insensitive exact match
-
-        if (terr) throw terr;
-        ticketsData = Array.isArray(tdata) ? tdata : [];
-      } catch (e) {
-        console.warn('ticket lookup failed', e);
-        ticketsData = [];
-      }
-
-      // 3) fetch outgate rows which either belong to these ticket numbers OR directly match the SAD (so we pick any orphaned outgate rows)
-      const ticketNumbers = Array.from(new Set(ticketsData.map(t => t.ticket_no).filter(Boolean)));
-      let outgateRows = [];
-      try {
-        let q = supabase.from('outgate').select('*');
-        // If we have ticketNumbers query by ticket_no IN (...) OR sad_no ILIKE searchKey
-        if (ticketNumbers.length > 0) {
-          const { data: ogByTickets, error: ogErr } = await supabase
-            .from('outgate')
-            .select('*')
-            .in('ticket_no', ticketNumbers)
-            .order('created_at', { ascending: false });
-
-          if (!ogErr && Array.isArray(ogByTickets)) {
-            outgateRows = outgateRows.concat(ogByTickets);
+      // Build ticket lookup map: fetch tickets by ticket_no found in outgate rows and map -> submitted_at
+      const ticketNumbers = Array.from(new Set((data || []).map((r) => r.ticket_no).filter(Boolean)));
+      let ticketMap = {};
+      if (ticketNumbers.length > 0) {
+        try {
+          const { data: ticketsData, error: ticketsErr } = await supabase
+            .from('tickets')
+            .select('ticket_no, submitted_at')
+            .in('ticket_no', ticketNumbers);
+          if (!ticketsErr && Array.isArray(ticketsData)) {
+            ticketsData.forEach((t) => {
+              if (t && t.ticket_no) ticketMap[String(t.ticket_no)] = t.submitted_at || null;
+            });
           }
+        } catch (e) {
+          console.warn('ticket lookup failed', e);
         }
-
-        // Also fetch any outgate rows directly matching the SAD (some rows may have no ticket_no)
-        const { data: ogBySad, error: ogSadErr } = await supabase
-          .from('outgate')
-          .select('*')
-          .ilike('sad_no', `${searchKey}`)
-          .order('created_at', { ascending: false });
-
-        if (!ogSadErr && Array.isArray(ogBySad)) {
-          // merge while avoiding duplicates
-          const existingIds = new Set(outgateRows.map(r => r.id));
-          ogBySad.forEach(r => { if (!existingIds.has(r.id)) outgateRows.push(r); });
-        }
-      } catch (e) {
-        console.warn('outgate lookup failed', e);
-        outgateRows = outgateRows || [];
       }
 
-      // 4) Build mapped rows:
-      // - Map all outgate rows (prefer submitted_at from linked ticket when available)
-      const ticketMapSubmitted = {};
-      (ticketsData || []).forEach(t => {
-        if (t && t.ticket_no) ticketMapSubmitted[String(t.ticket_no)] = t.submitted_at || null;
+      // Map using ticketMap preference for weighed_at
+      const mapped = (data || []).map((r) => {
+        const submittedAt = r.ticket_no ? ticketMap[String(r.ticket_no)] : null;
+        return mapOutgateRow(r, submittedAt || null);
       });
 
-      const mappedOutgate = (outgateRows || []).map(r => mapOutgateRow(r, r.ticket_no ? (ticketMapSubmitted[String(r.ticket_no)] || null) : null));
-
-      // - Map tickets that do NOT have corresponding outgate rows -> these are "Pending/no exit" rows
-      const outgateTicketNos = new Set((outgateRows || []).map(r => String(r.ticket_no || '').trim()).filter(Boolean));
-      const ticketOnlyList = (ticketsData || []).filter(t => !outgateTicketNos.has(String(t.ticket_no || '').trim())).map(t => mapTicketRow(t));
-
-      // - Also if there were no tickets but there are outgate rows that matched SAD (we already included them above)
-      // - If no tickets and no outgate rows, we still want to show zero results but show SAD details if sadRow exists
-
-      // Combine mapped arrays (we want ticket-only rows plus outgate rows)
-      const combined = [...mappedOutgate, ...ticketOnlyList];
-
-      // If there are still zero rows but there exists no tickets and no outgate rows,
-      // we might still want to inform the user that SAD is registered but no weighbridge exits found.
-      // We will set sadOriginal to empty array and set meta accordingly.
-
-      // Sort newest-first (by exitTime/weighed_at)
-      combined.sort((a, b) => {
+      // ensure newest first (by exitTime / created_at)
+      mapped.sort((a, b) => {
         const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
         const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
         return db - da;
       });
 
-      // Deduplicate by ticket (keeps first occurrence)
-      const uniqueMapped = dedupeByTicket(combined);
+      // dedupe by ticket number (keeps first occurrence which is newest-first)
+      const uniqueMapped = dedupeByTicket(mapped);
 
       setSadOriginal(uniqueMapped);
 
@@ -443,12 +359,26 @@ export default function OutgateReports() {
       // compute discharged weight from the mapped result (all rows found)
       const totalNet = computeTotalNetFromArray(uniqueMapped);
 
-      const declared = sadRow ? Number(sadRow.declared_weight ?? sadRow.declaredWeight ?? 0) : null;
+      // attempt to fetch the SAD declaration row for more accurate declared weight/status (optional)
+      let sadRow = null;
+      try {
+        const { data: sadData, error: sadError } = await supabase
+          .from('sad_declarations')
+          .select('sad_no, declared_weight, total_recorded_weight, status')
+          .ilike('sad_no', `${sadQuery.trim()}`)
+          .maybeSingle();
+        if (!sadError) sadRow = sadData || null;
+      } catch (e) {
+        console.debug('sad fetch failed', e);
+      }
+
+      const declared = sadRow ? Number(sadRow.declared_weight ?? 0) : null;
       const discharged = Number(totalNet || 0);
+
       const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
 
       setSadMeta({
-        sad: rawQuery,
+        sad: sadQuery.trim(),
         dateRangeText:
           uniqueMapped.length > 0 && uniqueMapped[0].data.weighed_at
             ? new Date(uniqueMapped[0].data.weighed_at).toLocaleDateString()
@@ -463,23 +393,12 @@ export default function OutgateReports() {
         discrepancyPercent,
       });
 
-      // user feedback:
       if ((uniqueMapped || []).length === 0) {
-        if (sadRow) {
-          // SAD registered but no outgate / ticket rows found
-          toast({
-            title: `SAD ${rawQuery} is registered in the declarations table.`,
-            description: `No tickets or weighbridge (outgate) exits were found for this SAD.`,
-            status: 'info',
-            duration: 6000,
-          });
-        } else {
-          toast({ title: 'No records found for that SAD', status: 'info', duration: 2500 });
-        }
+        toast({ title: 'No records found for that SAD', status: 'info', duration: 2500 });
       }
     } catch (err) {
       console.error(err);
-      toast({ title: 'Search failed', description: err?.message || 'Could not fetch SAD data', status: 'error', duration: 4000 });
+      toast({ title: 'Search failed', description: err?.message || 'Could not fetch outgate rows', status: 'error', duration: 4000 });
     } finally {
       setSadLoading(false);
     }
