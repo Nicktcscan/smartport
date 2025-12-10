@@ -190,11 +190,11 @@ export default function OutgateReports() {
    * - row: outgate row
    * - ticketSubmittedAt: optional Date/string from tickets.submitted_at (preferred)
    *
-   * Behavior: prefer ticketSubmittedAt for weighed_at. fallback to outgate.submitted_at -> outgate.weighed_at -> outgate.date -> outgate.created_at
+   * Behavior: prefer ticketSubmittedAt for weighed_at. fallback to outgate.date or row.submitted_at.
    */
   const mapOutgateRow = (row, ticketSubmittedAt = null) => {
-    // pick weighed_at: prefer ticketSubmittedAt -> row.submitted_at -> row.weighed_at -> row.date -> row.created_at -> null
-    const weighedAt = ticketSubmittedAt || row.submitted_at || row.weighed_at || row.date || row.created_at || null;
+    // pick weighed_at: prefer ticketSubmittedAt -> row.submitted_at -> row.date -> null
+    const weighedAt = ticketSubmittedAt || row.submitted_at || row.date || null;
 
     return {
       ticketId: row.ticket_id || (row.id ? String(row.id) : `${Math.random()}`),
@@ -219,7 +219,7 @@ export default function OutgateReports() {
   };
 
   // Utility that returns the filtered tickets from an original array given current date/time filters
-  // Filters are applied against the WEIGHED_AT (row.weighed_at) as requested, but we fall back to exitTime/created_at when weighed_at missing.
+  // Filters are applied against the WEIGHED_AT (row.weighed_at) as requested.
   const computeFilteredFromOriginal = (originalArr) => {
     if (!originalArr) return [];
 
@@ -233,37 +233,26 @@ export default function OutgateReports() {
     const truckFilterLower = (truckFilter || '').trim().toLowerCase();
 
     const filtered = originalArr.filter((t) => {
-      // Prefer weighed_at, else fallback to exitTime or created_at for filtering purposes
-      const dRaw = t.data.weighed_at || t.data.exitTime || t.data.created_at || null;
+      const dRaw = t.data.weighed_at; // filter by weighed_at (now ticket.submitted_at when available)
       const d = dRaw ? new Date(dRaw) : null;
-
-      // If no date/time filters are set, include rows even when d is null.
-      if (!d) {
-        if (hasDateRange || sadTimeFrom || sadTimeTo) {
-          // We need a date/time to apply the user's filters; omit this row if it's missing
-          return false;
+      if (!d) return false;
+      if (hasDateRange) {
+        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+        if (sadTimeFrom) {
+          const mins = parseTimeToMinutes(sadTimeFrom);
+          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
         }
-        // else include (no filters were set)
-      } else {
-        if (hasDateRange) {
-          let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
-          let end = endDate ? new Date(endDate) : new Date(8640000000000000);
-          if (sadTimeFrom) {
-            const mins = parseTimeToMinutes(sadTimeFrom);
-            if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-          }
-          if (sadTimeTo) {
-            const mins = parseTimeToMinutes(sadTimeTo);
-            if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
-          }
-          if (d < start || d > end) return false;
-        } else if (sadTimeFrom || sadTimeTo) {
-          // Time-only filter: convert weighed_at (or fallback) to minutes of day
-          const minutes = d.getHours() * 60 + d.getMinutes();
-          const from = tfMinutes != null ? tfMinutes : 0;
-          const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
-          if (minutes < from || minutes > to) return false;
+        if (sadTimeTo) {
+          const mins = parseTimeToMinutes(sadTimeTo);
+          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
         }
+        if (d < start || d > end) return false;
+      } else if (sadTimeFrom || sadTimeTo) {
+        const minutes = d.getHours() * 60 + d.getMinutes();
+        const from = tfMinutes != null ? tfMinutes : 0;
+        const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
+        if (minutes < from || minutes > to) return false;
       }
 
       if (sadSortStatus) {
@@ -285,8 +274,8 @@ export default function OutgateReports() {
 
     // Sort newest first by exitTime (created_at) if present, else weighed_at
     filtered.sort((a, b) => {
-      const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? a.data.created_at ?? 0).getTime();
-      const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? b.data.created_at ?? 0).getTime();
+      const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+      const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
       return db - da; // newest first
     });
 
@@ -308,20 +297,60 @@ export default function OutgateReports() {
       toast({ title: 'SAD No Required', description: 'Type a SAD number to search', status: 'warning', duration: 2500 });
       return;
     }
-    try {
-      setSadLoading(true);
+    setSadLoading(true);
 
-      // Query outgate table (confirmed exits). Sort newest first by created_at.
-      const { data, error } = await supabase
+    const rawQuery = sadQuery.trim();
+    let canonicalSad = rawQuery; // fallback
+    let sadRow = null;
+
+    try {
+      // 1) Try to find SAD in sad_declarations first (case-insensitive exact)
+      try {
+        const { data: sd, error: sdErr } = await supabase
+          .from('sad_declarations')
+          .select('sad_no, declared_weight, total_recorded_weight, status')
+          .ilike('sad_no', rawQuery)
+          .maybeSingle();
+
+        if (!sdErr && sd) {
+          sadRow = sd;
+          canonicalSad = String(sd.sad_no || rawQuery).trim();
+        } else {
+          // if exact ilike didn't find it, try wildcard search (for agent-registered variants)
+          const { data: sd2, error: sd2Err } = await supabase
+            .from('sad_declarations')
+            .select('sad_no, declared_weight, total_recorded_weight, status')
+            .ilike('sad_no', `%${rawQuery}%`)
+            .limit(1)
+            .maybeSingle();
+
+          if (!sd2Err && sd2) {
+            sadRow = sd2;
+            canonicalSad = String(sd2.sad_no || rawQuery).trim();
+          } else {
+            sadRow = null;
+            canonicalSad = rawQuery;
+          }
+        }
+      } catch (e) {
+        console.warn('sad_declarations lookup failed', e);
+        // still proceed to outgate query with rawQuery
+        sadRow = null;
+        canonicalSad = rawQuery;
+      }
+
+      // 2) Query outgate rows using canonicalSad (case-insensitive, wildcard)
+      const outgateFilter = `%${canonicalSad}%`;
+      const { data: outData, error: outErr } = await supabase
         .from('outgate')
         .select('*')
-        .ilike('sad_no', `%${sadQuery.trim()}%`)
+        .ilike('sad_no', outgateFilter)
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
+      if (outErr) throw outErr;
 
       // Build ticket lookup map: fetch tickets by ticket_no found in outgate rows and map -> submitted_at
-      const ticketNumbers = Array.from(new Set((data || []).map((r) => r.ticket_no).filter(Boolean)));
+      const ticketNumbers = Array.from(new Set((outData || []).map((r) => r.ticket_no).filter(Boolean)));
       let ticketMap = {};
       if (ticketNumbers.length > 0) {
         try {
@@ -340,15 +369,15 @@ export default function OutgateReports() {
       }
 
       // Map using ticketMap preference for weighed_at
-      const mapped = (data || []).map((r) => {
+      const mapped = (outData || []).map((r) => {
         const submittedAt = r.ticket_no ? ticketMap[String(r.ticket_no)] : null;
         return mapOutgateRow(r, submittedAt || null);
       });
 
-      // ensure newest first (by exitTime / created_at / weighed_at)
+      // ensure newest first (by exitTime / created_at)
       mapped.sort((a, b) => {
-        const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? a.data.created_at ?? 0).getTime();
-        const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? b.data.created_at ?? 0).getTime();
+        const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+        const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
         return db - da;
       });
 
@@ -357,7 +386,7 @@ export default function OutgateReports() {
 
       setSadOriginal(uniqueMapped);
 
-      // compute filtered view (filters apply to weighed_at or fallback fields, also applies truck filters if set)
+      // compute filtered view (filters apply to weighed_at, also applies truck filters if set)
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
@@ -370,17 +399,22 @@ export default function OutgateReports() {
       // compute discharged weight from the mapped result (all rows found)
       const totalNet = computeTotalNetFromArray(uniqueMapped);
 
-      // attempt to fetch the SAD declaration row for more accurate declared weight/status (optional)
-      let sadRow = null;
-      try {
-        const { data: sadData, error: sadError } = await supabase
-          .from('sad_declarations')
-          .select('sad_no, declared_weight, total_recorded_weight, status')
-          .ilike('sad_no', `${sadQuery.trim()}`)
-          .maybeSingle();
-        if (!sadError) sadRow = sadData || null;
-      } catch (e) {
-        console.debug('sad fetch failed', e);
+      // if we didn't find sadRow earlier, attempt an exact-case-insensitive lookup now (already tried above but safe)
+      if (!sadRow) {
+        try {
+          const { data: sadData2, error: sadError2 } = await supabase
+            .from('sad_declarations')
+            .select('sad_no, declared_weight, total_recorded_weight, status')
+            .ilike('sad_no', rawQuery)
+            .maybeSingle();
+
+          if (!sadError2 && sadData2) {
+            sadRow = sadData2;
+            canonicalSad = String(sadData2.sad_no || rawQuery).trim();
+          }
+        } catch (e) {
+          // ignore
+        }
       }
 
       const declared = sadRow ? Number(sadRow.declared_weight ?? 0) : null;
@@ -389,10 +423,10 @@ export default function OutgateReports() {
       const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
 
       setSadMeta({
-        sad: sadQuery.trim(),
+        sad: canonicalSad,
         dateRangeText:
-          uniqueMapped.length > 0 && (uniqueMapped[0].data.weighed_at || uniqueMapped[0].data.exitTime)
-            ? new Date(uniqueMapped[0].data.weighed_at || uniqueMapped[0].data.exitTime).toLocaleDateString()
+          uniqueMapped.length > 0 && uniqueMapped[0].data.weighed_at
+            ? new Date(uniqueMapped[0].data.weighed_at).toLocaleDateString()
             : 'All',
         startTimeLabel: '',
         endTimeLabel: '',
@@ -405,7 +439,11 @@ export default function OutgateReports() {
       });
 
       if ((uniqueMapped || []).length === 0) {
-        toast({ title: 'No records found for that SAD', status: 'info', duration: 2500 });
+        if (sadRow) {
+          toast({ title: `SAD ${canonicalSad} exists but no outgate records found`, status: 'info', duration: 3500 });
+        } else {
+          toast({ title: 'No records found for that SAD', status: 'info', duration: 2500 });
+        }
       }
     } catch (err) {
       console.error(err);
@@ -587,8 +625,8 @@ export default function OutgateReports() {
       setSadOriginal((prev) => {
         const next = [mapped, ...prev];
         next.sort((a, b) => {
-          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? a.data.created_at ?? 0).getTime();
-          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? b.data.created_at ?? 0).getTime();
+          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
+          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
           return db - da;
         });
         const deduped = dedupeByTicket(next);
@@ -600,7 +638,7 @@ export default function OutgateReports() {
           const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
           return {
             ...m,
-            dateRangeText: m.dateRangeText || (mapped.data.weighed_at || mapped.data.exitTime ? new Date(mapped.data.weighed_at || mapped.data.exitTime).toLocaleDateString() : m.dateRangeText),
+            dateRangeText: m.dateRangeText || (mapped.data.weighed_at ? new Date(mapped.data.weighed_at).toLocaleDateString() : m.dateRangeText),
             dischargedWeight: discharged,
             discrepancy,
             discrepancyPercent,
@@ -858,6 +896,15 @@ export default function OutgateReports() {
             <Text mt={2} fontSize="sm" color="gray.600">Tip: Use date/time and truck filters to narrow results before exporting. New outgate rows for the current SAD appear automatically below.</Text>
           </Box>
         )}
+
+        {/* If SAD exists but no outgate rows and we still want to show SAD info, present a small notice */}
+        {sadMeta?.sad && sadOriginal.length === 0 && (
+          <Box mt={3} p={3} borderRadius="md" bg="yellow.50" border="1px solid" borderColor="yellow.100">
+            <Text fontSize="sm">
+              SAD <b>{sadMeta.sad}</b> {sadMeta.sadExists ? 'is registered in the declarations table' : 'was not found in declarations'}. No weighbridge (outgate) exits were found for this SAD.
+            </Text>
+          </Box>
+        )}
       </Box>
 
       {filteredSadTickets.length > 0 && (
@@ -890,7 +937,7 @@ export default function OutgateReports() {
                   <Tr key={t.ticketId}>
                     <Td>{t.data.sadNo}</Td>
                     <Td>{t.data.ticketNo}</Td>
-                    <Td>{t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : (t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : 'N/A')}</Td>
+                    <Td>{t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : 'N/A'}</Td>
                     <Td>{t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : 'N/A'}</Td>
                     <Td>{t.data.gnswTruckNo}</Td>
                     <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'} KG</Td>
