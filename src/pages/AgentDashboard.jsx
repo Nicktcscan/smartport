@@ -190,11 +190,11 @@ export default function OutgateReports() {
    * - row: outgate row
    * - ticketSubmittedAt: optional Date/string from tickets.submitted_at (preferred)
    *
-   * Behavior: prefer ticketSubmittedAt for weighed_at. fallback to outgate.date or row.submitted_at.
+   * Behavior: prefer ticketSubmittedAt for weighed_at. fallback to outgate.submitted_at -> outgate.weighed_at -> outgate.date -> outgate.created_at
    */
   const mapOutgateRow = (row, ticketSubmittedAt = null) => {
-    // pick weighed_at: prefer ticketSubmittedAt -> row.submitted_at -> row.date -> null
-    const weighedAt = ticketSubmittedAt || row.submitted_at || row.date || null;
+    // pick weighed_at: prefer ticketSubmittedAt -> row.submitted_at -> row.weighed_at -> row.date -> row.created_at -> null
+    const weighedAt = ticketSubmittedAt || row.submitted_at || row.weighed_at || row.date || row.created_at || null;
 
     return {
       ticketId: row.ticket_id || (row.id ? String(row.id) : `${Math.random()}`),
@@ -219,7 +219,7 @@ export default function OutgateReports() {
   };
 
   // Utility that returns the filtered tickets from an original array given current date/time filters
-  // Filters are applied against the WEIGHED_AT (row.weighed_at) as requested.
+  // Filters are applied against the WEIGHED_AT (row.weighed_at) as requested, but we fall back to exitTime/created_at when weighed_at missing.
   const computeFilteredFromOriginal = (originalArr) => {
     if (!originalArr) return [];
 
@@ -233,26 +233,37 @@ export default function OutgateReports() {
     const truckFilterLower = (truckFilter || '').trim().toLowerCase();
 
     const filtered = originalArr.filter((t) => {
-      const dRaw = t.data.weighed_at; // filter by weighed_at (now ticket.submitted_at when available)
+      // Prefer weighed_at, else fallback to exitTime or created_at for filtering purposes
+      const dRaw = t.data.weighed_at || t.data.exitTime || t.data.created_at || null;
       const d = dRaw ? new Date(dRaw) : null;
-      if (!d) return false;
-      if (hasDateRange) {
-        let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
-        let end = endDate ? new Date(endDate) : new Date(8640000000000000);
-        if (sadTimeFrom) {
-          const mins = parseTimeToMinutes(sadTimeFrom);
-          if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+
+      // If no date/time filters are set, include rows even when d is null.
+      if (!d) {
+        if (hasDateRange || sadTimeFrom || sadTimeTo) {
+          // We need a date/time to apply the user's filters; omit this row if it's missing
+          return false;
         }
-        if (sadTimeTo) {
-          const mins = parseTimeToMinutes(sadTimeTo);
-          if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+        // else include (no filters were set)
+      } else {
+        if (hasDateRange) {
+          let start = startDate ? new Date(startDate) : new Date(-8640000000000000);
+          let end = endDate ? new Date(endDate) : new Date(8640000000000000);
+          if (sadTimeFrom) {
+            const mins = parseTimeToMinutes(sadTimeFrom);
+            if (mins != null) start.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+          }
+          if (sadTimeTo) {
+            const mins = parseTimeToMinutes(sadTimeTo);
+            if (mins != null) end.setHours(Math.floor(mins / 60), mins % 60, 59, 999);
+          }
+          if (d < start || d > end) return false;
+        } else if (sadTimeFrom || sadTimeTo) {
+          // Time-only filter: convert weighed_at (or fallback) to minutes of day
+          const minutes = d.getHours() * 60 + d.getMinutes();
+          const from = tfMinutes != null ? tfMinutes : 0;
+          const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
+          if (minutes < from || minutes > to) return false;
         }
-        if (d < start || d > end) return false;
-      } else if (sadTimeFrom || sadTimeTo) {
-        const minutes = d.getHours() * 60 + d.getMinutes();
-        const from = tfMinutes != null ? tfMinutes : 0;
-        const to = ttMinutes != null ? ttMinutes : 24 * 60 - 1;
-        if (minutes < from || minutes > to) return false;
       }
 
       if (sadSortStatus) {
@@ -274,8 +285,8 @@ export default function OutgateReports() {
 
     // Sort newest first by exitTime (created_at) if present, else weighed_at
     filtered.sort((a, b) => {
-      const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
-      const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
+      const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? a.data.created_at ?? 0).getTime();
+      const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? b.data.created_at ?? 0).getTime();
       return db - da; // newest first
     });
 
@@ -334,10 +345,10 @@ export default function OutgateReports() {
         return mapOutgateRow(r, submittedAt || null);
       });
 
-      // ensure newest first (by exitTime / created_at)
+      // ensure newest first (by exitTime / created_at / weighed_at)
       mapped.sort((a, b) => {
-        const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
-        const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
+        const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? a.data.created_at ?? 0).getTime();
+        const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? b.data.created_at ?? 0).getTime();
         return db - da;
       });
 
@@ -346,7 +357,7 @@ export default function OutgateReports() {
 
       setSadOriginal(uniqueMapped);
 
-      // compute filtered view (filters apply to weighed_at, also applies truck filters if set)
+      // compute filtered view (filters apply to weighed_at or fallback fields, also applies truck filters if set)
       const filtered = computeFilteredFromOriginal(uniqueMapped);
       setSadTickets(filtered);
 
@@ -380,8 +391,8 @@ export default function OutgateReports() {
       setSadMeta({
         sad: sadQuery.trim(),
         dateRangeText:
-          uniqueMapped.length > 0 && uniqueMapped[0].data.weighed_at
-            ? new Date(uniqueMapped[0].data.weighed_at).toLocaleDateString()
+          uniqueMapped.length > 0 && (uniqueMapped[0].data.weighed_at || uniqueMapped[0].data.exitTime)
+            ? new Date(uniqueMapped[0].data.weighed_at || uniqueMapped[0].data.exitTime).toLocaleDateString()
             : 'All',
         startTimeLabel: '',
         endTimeLabel: '',
@@ -576,8 +587,8 @@ export default function OutgateReports() {
       setSadOriginal((prev) => {
         const next = [mapped, ...prev];
         next.sort((a, b) => {
-          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? 0).getTime();
-          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? 0).getTime();
+          const da = new Date(a.data.exitTime ?? a.data.weighed_at ?? a.data.created_at ?? 0).getTime();
+          const db = new Date(b.data.exitTime ?? b.data.weighed_at ?? b.data.created_at ?? 0).getTime();
           return db - da;
         });
         const deduped = dedupeByTicket(next);
@@ -589,7 +600,7 @@ export default function OutgateReports() {
           const { discrepancy, discrepancyPercent } = computeDiscrepancyValues(declared, discharged);
           return {
             ...m,
-            dateRangeText: m.dateRangeText || (mapped.data.weighed_at ? new Date(mapped.data.weighed_at).toLocaleDateString() : m.dateRangeText),
+            dateRangeText: m.dateRangeText || (mapped.data.weighed_at || mapped.data.exitTime ? new Date(mapped.data.weighed_at || mapped.data.exitTime).toLocaleDateString() : m.dateRangeText),
             dischargedWeight: discharged,
             discrepancy,
             discrepancyPercent,
@@ -879,7 +890,7 @@ export default function OutgateReports() {
                   <Tr key={t.ticketId}>
                     <Td>{t.data.sadNo}</Td>
                     <Td>{t.data.ticketNo}</Td>
-                    <Td>{t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : 'N/A'}</Td>
+                    <Td>{t.data.weighed_at ? new Date(t.data.weighed_at).toLocaleString() : (t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : 'N/A')}</Td>
                     <Td>{t.data.exitTime ? new Date(t.data.exitTime).toLocaleString() : 'N/A'}</Td>
                     <Td>{t.data.gnswTruckNo}</Td>
                     <Td isNumeric>{gross != null ? Number(gross).toLocaleString() : '—'} KG</Td>
