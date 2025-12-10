@@ -1071,7 +1071,7 @@ export default function AgentApptPage() {
     const ts2 = Date.now();
     return {
       appointmentNumber: `${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
-      weighbridgeNumber: `WB${YY}${MM}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
+      weighbridgeNumber: `WB${YY}${MM}${DD}${ts2}${String(Math.floor(Math.random() * 900) + 100)}`,
     };
   }
 
@@ -1167,6 +1167,7 @@ export default function AgentApptPage() {
             throw t1Err;
           }
         }
+
         // fetch full appointment with t1s
         const { data: fullAppointment, error: fetchErr } = await supabase
           .from('appointments')
@@ -1409,16 +1410,21 @@ export default function AgentApptPage() {
     const drvName = appt.driverName || appt.driver_name || '';
     const shortPdfLink = notifyBody.pdfUrl || appt.pdfUrl || appt.pdf_url || '';
 
-    // Build SAD numbers list if present in appointment.t1s
-    const sadNums = Array.isArray(appt.t1s) ? appt.t1s.map(t => (t.sadNo || t.sad_no || '').toString().trim()).filter(Boolean) : [];
-    const sadLine = sadNums.length ? `SAD Number: ${sadNums.join(', ')}` : 'SAD Number:';
+    // derive SAD number(s) from appointment t1s (or top-level notifyBody.t1s)
+    const t1list = (appt.t1s || notifyBody.t1s || appt.t1_records || []).map((r) => {
+      // normalize different field names
+      if (!r) return null;
+      return r.sadNo || r.sad_no || r.sad || null;
+    }).filter(Boolean);
+    const uniqueSadList = Array.from(new Set(t1list));
+    const sadLine = uniqueSadList.length ? uniqueSadList.join(', ') : '—';
 
-    // Updated SMS formatting per your request:
+    // new SMS format requested
     const smsText =
-      `NICK TC-SCAN (GAMBIA) LTD. WB:\n` +
-      `APPT ${apptNo}\n` +
-      (wbNo ? `WB ${wbNo}\n` : '') +
-      `${sadLine}\n` +
+      `NICK TC-SCAN (GAMBIA) LTD.:\n` +
+      `APPT: ${apptNo}\n` +
+      (wbNo ? `WB Number: ${wbNo}\n` : '') +
+      `SAD Number: ${sadLine}\n` +
       `Pickup: ${pickup}\n` +
       `Truck: ${truck}\n` +
       `Driver: ${drvName}` +
@@ -1673,7 +1679,7 @@ export default function AgentApptPage() {
 
       // ---------- NEW: send SMS via server API with retries ----------
       try {
-        // Build notify body
+        // Build notify body with t1s included so SMS builder can use SAD numbers
         const notifyBody = {
           appointment: {
             appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
@@ -1685,6 +1691,7 @@ export default function AgentApptPage() {
             agentTin: dbAppointment.agentTin || dbAppointment.agent_tin,
             id: dbAppointment.id,
             pdfUrl: uploadedPdfUrl || dbAppointment.pdf_url || null,
+            t1s: dbAppointment.t1s || dbAppointment.t1_records || []
           },
           pdfBase64: null,
           pdfFilename: null,
