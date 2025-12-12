@@ -44,7 +44,7 @@ import {
   StatHelpText,
   Tooltip,
 } from '@chakra-ui/react';
-import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon } from '@chakra-ui/icons';
+import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon, DeleteIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
 import { supabase } from '../supabaseClient';
 
@@ -373,6 +373,8 @@ export default function ManualEntry() {
 
   // authoritative totals for manual tickets (server-wide)
   const [manualTotals, setManualTotals] = useState({ count: 0, totalGross: 0, totalNet: 0 });
+
+  const [deletingTicketId, setDeletingTicketId] = useState(null);
 
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
@@ -1362,7 +1364,7 @@ export default function ManualEntry() {
         try {
           const auditEntry = {
             action: 'update',
-            ticket_id: ticketIdValue,
+            ticket_id: ticket.ticketId ?? ticket.data?.ticketNo ?? null,
             ticket_no: ticket.data?.ticketNo ?? null,
             user_id: operatorId || null,
             username: operatorName || null,
@@ -1467,6 +1469,97 @@ export default function ManualEntry() {
     setViewIsEditing(false);
     setViewEditData({});
     toast({ title: 'Saved', status: 'success', duration: 2500 });
+  };
+
+  // ---------- NEW: Delete ticket (admin-only) ----------
+  const handleDelete = async (ticket) => {
+    if (!isAdmin) {
+      toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 2500 });
+      return;
+    }
+
+    const ticketObj = ticket && ticket.ticketId ? ticket : null;
+    if (!ticketObj) {
+      toast({ title: 'Invalid ticket', description: 'Could not determine ticket to delete', status: 'error', duration: 3000 });
+      return;
+    }
+
+    const confirmMsg = `Delete ticket ${ticketObj.data?.ticketNo || ticketObj.ticketId || ''} ? This will remove the ticket from the tickets table and attempt to remove matching outgate rows. This action is irreversible. Continue?`;
+    // simple confirmation — replace with a nicer modal if you'd like
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeletingTicketId(ticketObj.ticketId);
+    try {
+      // If it's an optimistic temp row, just remove client-side
+      if (String(ticketObj.ticketId || '').startsWith('tmp-')) {
+        setHistory((prev) => prev.filter((r) => r.ticketId !== ticketObj.ticketId));
+        toast({ title: 'Ticket removed', description: 'Local (unsaved) ticket removed.', status: 'success' });
+        setDeletingTicketId(null);
+        return;
+      }
+
+      const ticketIdentifier = ticketObj.ticketId ?? ticketObj.data.ticketNo ?? null;
+      if (!ticketIdentifier) throw new Error('Missing ticket identifier');
+
+      // best-effort delete outgate rows first (to keep DB consistent)
+      try {
+        if (isUUID(ticketIdentifier)) {
+          const del1 = await supabase.from('outgate').delete().eq('ticket_id', ticketIdentifier);
+          if (del1.error) console.warn('Failed to delete outgate by ticket_id', del1.error);
+          if (ticketObj.data?.ticketNo) {
+            const del2 = await supabase.from('outgate').delete().eq('ticket_no', ticketObj.data.ticketNo);
+            if (del2.error) console.warn('Failed to delete outgate by ticket_no', del2.error);
+          }
+        } else {
+          const del1 = await supabase.from('outgate').delete().eq('ticket_no', ticketIdentifier);
+          if (del1.error) console.warn('Failed to delete outgate by ticket_no', del1.error);
+          if (ticketObj.data?.ticketNo && isUUID(ticketObj.data.ticketNo)) {
+            const del2 = await supabase.from('outgate').delete().eq('ticket_id', ticketObj.data.ticketNo);
+            if (del2.error) console.warn('Failed to delete outgate by ticket_id for data.ticketNo', del2.error);
+          }
+        }
+      } catch (oute) {
+        console.warn('Outgate deletion attempt failed', oute);
+      }
+
+      // delete tickets row
+      let delRes;
+      if (isUUID(ticketIdentifier)) {
+        delRes = await supabase.from('tickets').delete().eq('ticket_id', ticketIdentifier);
+      } else {
+        delRes = await supabase.from('tickets').delete().eq('ticket_no', ticketIdentifier);
+      }
+      if (delRes && delRes.error) {
+        throw delRes.error;
+      }
+
+      // write audit log
+      try {
+        const auditEntry = {
+          action: 'delete',
+          ticket_id: ticketIdentifier,
+          ticket_no: ticketObj.data?.ticketNo ?? null,
+          user_id: operatorId || null,
+          username: operatorName || null,
+          details: JSON.stringify(ticketObj.data || null),
+          created_at: new Date().toISOString(),
+        };
+        await supabase.from('audit_logs').insert([auditEntry]);
+      } catch (auditErr) {
+        console.debug('Audit log insertion failed', auditErr);
+      }
+
+      // refresh UI
+      await fetchHistory();
+      computeManualTotalsFromDB().catch((e) => console.warn('computeManualTotalsFromDB error', e));
+
+      toast({ title: 'Deleted', description: `Ticket ${ticketObj.data?.ticketNo || ticketObj.ticketId} deleted.`, status: 'success', duration: 4000 });
+    } catch (err) {
+      console.error('Delete failed', err);
+      toast({ title: 'Delete failed', description: err?.message || String(err), status: 'error', duration: 6000 });
+    } finally {
+      setDeletingTicketId(null);
+    }
   };
 
   const renderOutOfRangeBadge = (val) => {
@@ -1639,6 +1732,18 @@ export default function ManualEntry() {
           )}
           <Button size="sm" colorScheme="teal" onClick={() => handleView(item)}>View</Button>
           {isAdmin && <Button size="sm" variant="ghost" leftIcon={<EditIcon />} onClick={() => startRowEdit(item)}>Edit</Button>}
+          {isAdmin && (
+            <Button
+              size="sm"
+              variant="ghost"
+              leftIcon={<DeleteIcon />}
+              colorScheme="red"
+              onClick={() => handleDelete(item)}
+              isLoading={deletingTicketId === item.ticketId}
+            >
+              Delete
+            </Button>
+          )}
         </Flex>
       </MotionBox>
     );
@@ -1752,7 +1857,7 @@ export default function ManualEntry() {
                     <Th>Gross (KG)</Th>
                     <Th>Tare (KG)</Th>
                     <Th>Net (KG)</Th>
-                    <Th>View</Th>
+                    <Th>Actions</Th>
                   </Tr>
                 </Thead>
                 <Tbody>
@@ -1860,6 +1965,16 @@ export default function ManualEntry() {
                               <>
                                 <IconButton icon={<ViewIcon />} aria-label="View" size="sm" colorScheme="teal" onClick={() => handleView({ ticketId, data, submittedAt })} />
                                 {isAdmin && <IconButton icon={<EditIcon />} aria-label="Edit" size="sm" onClick={() => startRowEdit({ ticketId, data })} />}
+                                {isAdmin && (
+                                  <IconButton
+                                    icon={<DeleteIcon />}
+                                    aria-label="Delete"
+                                    size="sm"
+                                    colorScheme="red"
+                                    onClick={() => handleDelete({ ticketId, data })}
+                                    isLoading={deletingTicketId === ticketId}
+                                  />
+                                )}
                               </>
                             )}
                           </HStack>
