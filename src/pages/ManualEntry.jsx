@@ -43,6 +43,12 @@ import {
   StatNumber,
   StatHelpText,
   Tooltip,
+  AlertDialog,
+  AlertDialogBody,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogContent,
+  AlertDialogOverlay,
 } from '@chakra-ui/react';
 import { ViewIcon, ExternalLinkIcon, EditIcon, CheckIcon, CloseIcon, DeleteIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -318,8 +324,16 @@ export default function ManualEntry() {
     onClose: onViewClose,
   } = useDisclosure();
 
+  // Delete confirmation dialog
+  const {
+    isOpen: isDeleteOpen,
+    onOpen: onDeleteOpen,
+    onClose: onDeleteClose,
+  } = useDisclosure();
+
   const toast = useToast();
   const firstInputRef = useRef(null);
+  const cancelRef = useRef(); // for AlertDialog
 
   const [formData, setFormData] = useState({
     truckOnWb: '',
@@ -374,7 +388,9 @@ export default function ManualEntry() {
   // authoritative totals for manual tickets (server-wide)
   const [manualTotals, setManualTotals] = useState({ count: 0, totalGross: 0, totalNet: 0 });
 
+  // deletion state
   const [deletingTicketId, setDeletingTicketId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null); // object { ticketId, data }
 
   const validateAll = useCallback((nextForm = null) => {
     const fd = nextForm || formDataRef.current;
@@ -1471,55 +1487,63 @@ export default function ManualEntry() {
     toast({ title: 'Saved', status: 'success', duration: 2500 });
   };
 
-  // ---------- NEW: Delete ticket (admin-only) ----------
-  const handleDelete = async (ticket) => {
+  // ---------- NEW: Delete logic with confirmation modal ----------
+  // Open delete dialog (admin-only)
+  const openDeleteDialogFor = (ticket) => {
     if (!isAdmin) {
       toast({ title: 'Permission denied', description: 'Only admins can delete tickets', status: 'warning', duration: 2500 });
       return;
     }
+    setDeleteTarget(ticket);
+    onDeleteOpen();
+  };
 
-    const ticketObj = ticket && ticket.ticketId ? ticket : null;
+  // Confirmed delete handler
+  const handleConfirmDelete = async () => {
+    const ticketObj = deleteTarget;
     if (!ticketObj) {
-      toast({ title: 'Invalid ticket', description: 'Could not determine ticket to delete', status: 'error', duration: 3000 });
+      toast({ title: 'Nothing to delete', status: 'warning' });
+      onDeleteClose();
       return;
     }
 
-    const confirmMsg = `Delete ticket ${ticketObj.data?.ticketNo || ticketObj.ticketId || ''} ? This will remove the ticket from the tickets table and attempt to remove matching outgate rows. This action is irreversible. Continue?`;
-    // simple confirmation — replace with a nicer modal if you'd like
-    if (!window.confirm(confirmMsg)) return;
-
     setDeletingTicketId(ticketObj.ticketId);
+    onDeleteClose();
+
+    // optimistic remove from UI
+    const prevHistory = history;
+    setHistory((prev) => prev.filter((r) => r.ticketId !== ticketObj.ticketId));
+
     try {
-      // If it's an optimistic temp row, just remove client-side
+      // If it's a temp optimistic ticket, just remove locally
       if (String(ticketObj.ticketId || '').startsWith('tmp-')) {
-        setHistory((prev) => prev.filter((r) => r.ticketId !== ticketObj.ticketId));
-        toast({ title: 'Ticket removed', description: 'Local (unsaved) ticket removed.', status: 'success' });
+        toast({ title: 'Removed', description: 'Local ticket removed', status: 'success' });
         setDeletingTicketId(null);
         return;
       }
 
-      const ticketIdentifier = ticketObj.ticketId ?? ticketObj.data.ticketNo ?? null;
+      const ticketIdentifier = ticketObj.ticketId ?? ticketObj.data?.ticketNo ?? null;
       if (!ticketIdentifier) throw new Error('Missing ticket identifier');
 
-      // best-effort delete outgate rows first (to keep DB consistent)
+      // best-effort delete outgate rows first
       try {
         if (isUUID(ticketIdentifier)) {
-          const del1 = await supabase.from('outgate').delete().eq('ticket_id', ticketIdentifier);
-          if (del1.error) console.warn('Failed to delete outgate by ticket_id', del1.error);
+          const delById = await supabase.from('outgate').delete().eq('ticket_id', ticketIdentifier);
+          if (delById.error) console.warn('Failed deleting outgate by ticket_id', delById.error);
           if (ticketObj.data?.ticketNo) {
-            const del2 = await supabase.from('outgate').delete().eq('ticket_no', ticketObj.data.ticketNo);
-            if (del2.error) console.warn('Failed to delete outgate by ticket_no', del2.error);
+            const delByNo = await supabase.from('outgate').delete().eq('ticket_no', ticketObj.data.ticketNo);
+            if (delByNo.error) console.warn('Failed deleting outgate by ticket_no', delByNo.error);
           }
         } else {
-          const del1 = await supabase.from('outgate').delete().eq('ticket_no', ticketIdentifier);
-          if (del1.error) console.warn('Failed to delete outgate by ticket_no', del1.error);
+          const delByNo = await supabase.from('outgate').delete().eq('ticket_no', ticketIdentifier);
+          if (delByNo.error) console.warn('Failed deleting outgate by ticket_no', delByNo.error);
           if (ticketObj.data?.ticketNo && isUUID(ticketObj.data.ticketNo)) {
-            const del2 = await supabase.from('outgate').delete().eq('ticket_id', ticketObj.data.ticketNo);
-            if (del2.error) console.warn('Failed to delete outgate by ticket_id for data.ticketNo', del2.error);
+            const delById2 = await supabase.from('outgate').delete().eq('ticket_id', ticketObj.data.ticketNo);
+            if (delById2.error) console.warn('Failed deleting outgate by ticket_id (data.ticketNo)', delById2.error);
           }
         }
       } catch (oute) {
-        console.warn('Outgate deletion attempt failed', oute);
+        console.warn('Outgate deletion attempt threw', oute);
       }
 
       // delete tickets row
@@ -1529,11 +1553,12 @@ export default function ManualEntry() {
       } else {
         delRes = await supabase.from('tickets').delete().eq('ticket_no', ticketIdentifier);
       }
+
       if (delRes && delRes.error) {
         throw delRes.error;
       }
 
-      // write audit log
+      // audit log
       try {
         const auditEntry = {
           action: 'delete',
@@ -1545,20 +1570,23 @@ export default function ManualEntry() {
           created_at: new Date().toISOString(),
         };
         await supabase.from('audit_logs').insert([auditEntry]);
-      } catch (auditErr) {
-        console.debug('Audit log insertion failed', auditErr);
+      } catch (ae) {
+        console.debug('Audit log failed', ae);
       }
 
-      // refresh UI
+      // refresh authoritative data
       await fetchHistory();
       computeManualTotalsFromDB().catch((e) => console.warn('computeManualTotalsFromDB error', e));
 
       toast({ title: 'Deleted', description: `Ticket ${ticketObj.data?.ticketNo || ticketObj.ticketId} deleted.`, status: 'success', duration: 4000 });
     } catch (err) {
+      // restore previous history on failure
+      setHistory(prevHistory);
       console.error('Delete failed', err);
       toast({ title: 'Delete failed', description: err?.message || String(err), status: 'error', duration: 6000 });
     } finally {
       setDeletingTicketId(null);
+      setDeleteTarget(null);
     }
   };
 
@@ -1738,7 +1766,7 @@ export default function ManualEntry() {
               variant="ghost"
               leftIcon={<DeleteIcon />}
               colorScheme="red"
-              onClick={() => handleDelete(item)}
+              onClick={() => openDeleteDialogFor(item)}
               isLoading={deletingTicketId === item.ticketId}
             >
               Delete
@@ -1971,7 +1999,7 @@ export default function ManualEntry() {
                                     aria-label="Delete"
                                     size="sm"
                                     colorScheme="red"
-                                    onClick={() => handleDelete({ ticketId, data })}
+                                    onClick={() => openDeleteDialogFor({ ticketId, data })}
                                     isLoading={deletingTicketId === ticketId}
                                   />
                                 )}
@@ -2282,6 +2310,39 @@ export default function ManualEntry() {
           )}
         </AnimatePresence>
       </Modal>
+
+      {/* Delete confirmation AlertDialog */}
+      <AlertDialog
+        isOpen={isDeleteOpen}
+        leastDestructiveRef={cancelRef}
+        onClose={() => {
+          setDeleteTarget(null);
+          onDeleteClose();
+        }}
+        isCentered
+      >
+        <AlertDialogOverlay>
+          <AlertDialogContent>
+            <AlertDialogHeader fontSize="lg" fontWeight="bold">Delete ticket</AlertDialogHeader>
+            <AlertDialogBody>
+              {deleteTarget ? (
+                <>
+                  Are you sure you want to permanently delete ticket <b>{deleteTarget.data?.ticketNo ?? deleteTarget.ticketId}</b>? This will remove the ticket from the system and attempt to remove any related outgate rows. This action cannot be undone.
+                </>
+              ) : 'No ticket selected.'}
+            </AlertDialogBody>
+
+            <AlertDialogFooter>
+              <Button ref={cancelRef} onClick={() => { setDeleteTarget(null); onDeleteClose(); }}>
+                Cancel
+              </Button>
+              <Button colorScheme="red" onClick={handleConfirmDelete} ml={3} isLoading={!!deletingTicketId}>
+                Delete
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialogOverlay>
+      </AlertDialog>
 
       {/* View modal */}
       <Modal isOpen={isViewOpen} onClose={() => { onViewClose(); setViewIsEditing(false); setViewEditData({}); }} size="xl" scrollBehavior="inside" isCentered>
