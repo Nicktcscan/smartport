@@ -7,7 +7,7 @@ import {
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
-  Tooltip, Badge, Grid,
+  Tooltip, Badge, Grid, Spacer,
 } from '@chakra-ui/react';
 import {
   FaPlus, FaFileExport, FaEllipsisV, FaEdit, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
@@ -323,7 +323,7 @@ export default function SADDeclaration() {
     setDocsModal({ open: true, docs: Array.isArray(sad.docs) ? sad.docs : [], sad_no: sad.sad_no });
   };
 
-  // upload docs
+  // upload docs (reused by edit modal)
   const uploadDocs = async (sad_no, files = []) => {
     if (!files || files.length === 0) return [];
     const uploaded = [];
@@ -514,7 +514,7 @@ export default function SADDeclaration() {
     }
   };
 
-  // edit modal open
+  // edit modal open - include docs + newFiles slot
   const openEditModal = (sad) => {
     setEditModalData({
       original_sad_no: sad.sad_no,
@@ -522,10 +522,39 @@ export default function SADDeclaration() {
       regime: sad.regime ?? '',
       declared_weight: String(sad.declared_weight ?? ''),
       status: sad.status ?? 'In Progress',
+      docs: Array.isArray(sad.docs) ? JSON.parse(JSON.stringify(sad.docs)) : [],
+      newFiles: [], // File[] selected in modal but not yet uploaded
     });
     setEditModalOpen(true);
   };
   const closeEditModal = () => { setEditModalOpen(false); setEditModalData(null); };
+
+  // remove a doc entry from edit modal (does NOT delete from storage)
+  const removeDocFromEdit = (idx) => {
+    if (!editModalData) return;
+    const newDocs = (editModalData.docs || []).slice();
+    newDocs.splice(idx, 1);
+    setEditModalData((d) => ({ ...d, docs: newDocs }));
+    toast({ title: 'Document removed', description: 'Document removed from SAD record (file not deleted from storage).', status: 'info' });
+    // If you want to delete the file from storage entirely, you would call supabase.storage.from(SAD_DOCS_BUCKET).remove([path]) here.
+    // Intentionally not doing that to avoid accidental permanent deletions.
+  };
+
+  // handle new file selection in edit modal
+  const handleEditNewFiles = (fileList) => {
+    if (!editModalData) return;
+    const arr = Array.from(fileList || []);
+    setEditModalData((d) => ({ ...d, newFiles: [...(d.newFiles || []), ...arr] }));
+    toast({ title: 'Files attached', description: `${arr.length} new file(s) ready to upload`, status: 'info' });
+  };
+
+  // remove newly attached file (not yet uploaded)
+  const removeNewFileFromEdit = (idx) => {
+    if (!editModalData) return;
+    const arr = (editModalData.newFiles || []).slice();
+    arr.splice(idx, 1);
+    setEditModalData((d) => ({ ...d, newFiles: arr }));
+  };
 
   // save edit modal (handles renaming and regime/code changes) - ensure completed_at is set/cleared appropriately
   const saveEditModal = async () => {
@@ -535,9 +564,7 @@ export default function SADDeclaration() {
     const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
     const declaredParsed = Number(parseNumberString(editModalData.declared_weight) || 0);
 
-    // optimistic UI update
-    const optimisticCompletedAt = editModalData.status === 'Completed' ? (before.completed_at || new Date().toISOString()) : null;
-    setSads(prev => prev.map(s => (s.sad_no === originalSad ? { ...s, sad_no: newSad, regime: editModalData.regime, declared_weight: declaredParsed, status: editModalData.status, updated_at: new Date().toISOString(), completed_at: optimisticCompletedAt } : s)));
+    // optimistic UI update will be done after we upload new files (if any)
     setConfirmSaveOpen(false);
     closeEditModal();
 
@@ -554,7 +581,37 @@ export default function SADDeclaration() {
       // prepare completed_at logic
       const completedAtValue = editModalData.status === 'Completed' ? new Date().toISOString() : null;
 
+      // prepare docs: start with docs array user kept in modal
+      let finalDocs = Array.isArray(editModalData.docs) ? JSON.parse(JSON.stringify(editModalData.docs)) : [];
+
+      // If user added new files, upload them to the (new) SAD folder before updating DB
+      try {
+        const filesToUpload = Array.isArray(editModalData.newFiles) ? editModalData.newFiles : [];
+        if (filesToUpload.length) {
+          const uploadedRecords = await uploadDocs(newSad, filesToUpload);
+          finalDocs = [...finalDocs, ...uploadedRecords];
+        }
+      } catch (uErr) {
+        console.error('upload new files failed', uErr);
+        // fail the save flow if uploads fail
+        throw new Error(`Failed to upload new files: ${uErr?.message || String(uErr)}`);
+      }
+
+      // optimistic UI update (include docs)
+      setSads(prev => prev.map(s => (s.sad_no === originalSad ? {
+        ...s,
+        sad_no: newSad,
+        regime: regimeToSave,
+        declared_weight: declaredParsed,
+        status: editModalData.status,
+        updated_at: new Date().toISOString(),
+        completed_at: completedAtValue,
+        docs: finalDocs,
+      } : s)));
+
+      // now persist changes to DB
       if (newSad !== originalSad) {
+        // check conflict
         const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
         if (conflict) {
           throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
@@ -567,7 +624,7 @@ export default function SADDeclaration() {
         const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
-        // now update the parent SAD row
+        // now update the parent SAD row (include docs)
         const { error: parentErr } = await supabase.from('sad_declarations').update({
           sad_no: newSad,
           regime: regimeToSave ?? null,
@@ -576,6 +633,7 @@ export default function SADDeclaration() {
           updated_at: new Date().toISOString(),
           manual_update: true,
           completed_at: completedAtValue,
+          docs: finalDocs,
         }).eq('sad_no', originalSad);
         if (parentErr) {
           // attempt rollback children updates to originalSad (best-effort)
@@ -584,7 +642,7 @@ export default function SADDeclaration() {
           throw parentErr;
         }
       } else {
-        // same sad_no -> simple update
+        // same sad_no -> simple update (include docs)
         const { error } = await supabase.from('sad_declarations').update({
           regime: regimeToSave ?? null,
           declared_weight: declaredParsed,
@@ -592,6 +650,7 @@ export default function SADDeclaration() {
           updated_at: new Date().toISOString(),
           manual_update: true,
           completed_at: completedAtValue,
+          docs: finalDocs,
         }).eq('sad_no', originalSad);
         if (error) throw error;
       }
@@ -606,6 +665,7 @@ export default function SADDeclaration() {
           status: editModalData.status,
           updated_at: new Date().toISOString(),
           completed_at: editModalData.status === 'Completed' ? new Date().toISOString() : null,
+          docs: finalDocs,
         };
         await supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]);
       } catch (e) { /* ignore */ }
@@ -1120,21 +1180,24 @@ export default function SADDeclaration() {
 }
 .tx-sub { font-size: 11px; opacity: 0.95; display:block; margin-top:2px; color: rgba(255,255,255,0.95); font-weight:600; }
 
-/* fallback txn-pill (kept for any places still referencing it) */
-.txn-pill {
-  display:inline-flex;
+/* dropzone & thumbnails for edit modal */
+.dropzone {
+  border: 2px dashed rgba(7,17,25,0.08);
+  border-radius: 10px;
+  padding: 12px;
+  display:flex;
+  gap:12px;
   align-items:center;
-  gap:8px;
-  padding:6px 10px;
-  border-radius:999px;
-  background: linear-gradient(90deg,#0ea5a0, #06b6d4);
-  color: #fff;
-  font-weight: 700;
-  box-shadow: 0 8px 24px rgba(6,182,212,0.12);
-  cursor: pointer;
-  transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+  justify-content:space-between;
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,250,252,0.98));
 }
-.txn-pill:hover { transform: translateY(-2px); box-shadow: 0 16px 40px rgba(6,182,212,0.18); opacity: 0.98; }
+.dropzone:hover { border-color: rgba(7,17,25,0.12); box-shadow: 0 6px 20px rgba(2,6,23,0.04); }
+.thumb-list { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.thumb {
+  width:72px; height:72px; border-radius:8px; overflow:hidden; display:flex; align-items:center; justify-content:center; background:#f7fafc; border:1px solid rgba(2,6,23,0.04); padding:6px; position:relative;
+}
+.thumb .fname { font-size:10px; text-align:center; max-width:72px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.thumb .remove { position:absolute; right:4px; top:4px; background:rgba(255,255,255,0.9); border-radius:999px; padding:2px; }
 
 /* luxury modal style override (kept mostly for other modals) */
 .lux-modal .chakra-modal__content {
@@ -1157,7 +1220,6 @@ export default function SADDeclaration() {
 }
 .lux-modal .modal-footer { padding: 12px 18px; }
 
-/* pill badges inside modal */
 .txn-badge {
   border-radius: 10px;
   padding: 8px 12px;
@@ -1641,6 +1703,65 @@ export default function SADDeclaration() {
                     {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
                   </Select>
                 </FormControl>
+
+                {/* --- Document attachments (existing + upload new) --- */}
+                <Box mt={2}>
+                  <Text fontWeight="semibold" mb={2}>Attached Documents</Text>
+
+                  {/* existing docs list with remove */}
+                  <Box mb={3}>
+                    {Array.isArray(editModalData.docs) && editModalData.docs.length ? (
+                      <Box className="thumb-list">
+                        {editModalData.docs.map((d, i) => (
+                          <Box key={i} className="thumb">
+                            {d.url && /\.(jpe?g|png|gif|bmp|webp)$/i.test(d.name || d.path || d.url) ? (
+                              <img src={d.url} alt={d.name || 'file'} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            ) : (
+                              <Box style={{ padding: 6 }}>
+                                <Text className="fname">{d.name || d.path || 'file'}</Text>
+                              </Box>
+                            )}
+                            <IconButton size="xs" aria-label="Remove" icon={<FaTrashAlt />} className="remove" onClick={() => removeDocFromEdit(i)} />
+                          </Box>
+                        ))}
+                      </Box>
+                    ) : <Text color="gray.500">No attached documents.</Text>}
+                  </Box>
+
+                  <Text fontSize="sm" mb={2}>Add files (these will be uploaded and appended to the SAD)</Text>
+                  <Box className="dropzone">
+                    <Input type="file" multiple onChange={(e) => handleEditNewFiles(e.target.files)} />
+                    <Button size="sm" variant="ghost" onClick={() => {
+                      // clear selected new files
+                      setEditModalData(d => ({ ...d, newFiles: [] }));
+                    }}>Clear selected</Button>
+                  </Box>
+
+                  {/* previews of new files */}
+                  {Array.isArray(editModalData.newFiles) && editModalData.newFiles.length ? (
+                    <Box className="thumb-list">
+                      {editModalData.newFiles.map((f, i) => {
+                        const isImg = /\.(jpe?g|png|gif|bmp|webp)$/i.test(f.name || '');
+                        const previewUrl = (typeof URL !== 'undefined' && isImg) ? URL.createObjectURL(f) : null;
+                        return (
+                          <Box key={`${f.name}-${i}`} className="thumb">
+                            {isImg && previewUrl ? (
+                              // eslint-disable-next-line jsx-a11y/img-redundant-alt
+                              <img src={previewUrl} alt={f.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            ) : (
+                              <Box style={{ padding: 6 }}>
+                                <Text className="fname">{f.name}</Text>
+                              </Box>
+                            )}
+                            <IconButton size="xs" aria-label="Remove" icon={<FaTrashAlt />} className="remove" onClick={() => removeNewFileFromEdit(i)} />
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                  ) : null}
+
+                  <Text fontSize="xs" color="gray.500" mt={2}>Removing a document from the list only removes it from the SAD record. It does not delete the file from storage. Add storage deletion where indicated in code if you need full deletion (use carefully).</Text>
+                </Box>
               </Box>
             ) : <Text>Loading...</Text>}
           </ModalBody>
