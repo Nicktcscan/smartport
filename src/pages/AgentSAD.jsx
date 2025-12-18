@@ -7,7 +7,7 @@ import {
   Spinner, Tag, TagLabel, Stat, StatLabel, StatNumber, StatHelpText,
   Menu, MenuButton, MenuList, MenuItem, MenuDivider, AlertDialog, AlertDialogOverlay,
   AlertDialogContent, AlertDialogHeader, AlertDialogBody, AlertDialogFooter, useDisclosure,
-  Tooltip, Box as ChakraBox, SimpleGrid as ChakraSimpleGrid, Spacer
+  Tooltip, Box as ChakraBox, SimpleGrid as ChakraSimpleGrid, Spacer, Image as ChakraImage, Badge
 } from '@chakra-ui/react';
 import {
   FaPlus, FaFileExport, FaEllipsisV, FaRedoAlt, FaTrashAlt, FaDownload, FaFilePdf, FaCheck, FaEye, FaFileAlt,
@@ -191,6 +191,18 @@ export default function SADDeclaration() {
     timeFrom: '',
     timeTo: ''
   });
+
+  // ---------- NEW: Edit SAD modal state ----------
+  const [isEditModalOpen, setEditModalOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState(null);
+  const [editRegime, setEditRegime] = useState('');
+  const [editDeclaredWeight, setEditDeclaredWeight] = useState('');
+  const [editExistingDocs, setEditExistingDocs] = useState([]); // objects that already exist in DB
+  const [editNewFiles, setEditNewFiles] = useState([]); // File objects still to be uploaded
+  const [editUploading, setEditUploading] = useState(false);
+  const fileInputRef = useRef(null);
+
+  // promise-resolving helpers, etc (existing)...
 
   // ensure created_at sorting keeps newest first if sortBy is created_at
   useEffect(() => {
@@ -961,6 +973,111 @@ export default function SADDeclaration() {
     }
   };
 
+  // ---------- NEW: Edit SAD modal helpers ----------
+  const openEditModalFor = (s) => {
+    const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
+    setEditTarget(trimmed);
+    setEditRegime(s.regime || '');
+    setEditDeclaredWeight(s.declared_weight != null ? String(s.declared_weight) : '');
+    setEditExistingDocs(Array.isArray(s.docs) ? JSON.parse(JSON.stringify(s.docs)) : []);
+    setEditNewFiles([]);
+    setEditModalOpen(true);
+  };
+
+  const closeEditModal = () => {
+    setEditModalOpen(false);
+    setEditTarget(null);
+    setEditRegime('');
+    setEditDeclaredWeight('');
+    setEditExistingDocs([]);
+    setEditNewFiles([]);
+    setEditUploading(false);
+  };
+
+  // handle file input / drop
+  const handleEditFileInput = (files) => {
+    const arr = Array.from(files || []);
+    if (!arr.length) return;
+    setEditNewFiles((p) => [...p, ...arr]);
+    toast({ title: 'Files added', description: `${arr.length} file(s) queued for upload`, status: 'info' });
+  };
+
+  const handleEditFileInputChange = (e) => {
+    handleEditFileInput(e.target.files);
+  };
+
+  const handleDrop = (ev) => {
+    ev.preventDefault();
+    const dt = ev.dataTransfer;
+    if (!dt) return;
+    const files = Array.from(dt.files || []);
+    handleEditFileInput(files);
+  };
+  const handleDragOver = (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; };
+
+  const removeExistingDocAt = (index) => {
+    setEditExistingDocs((p) => {
+      const cp = [...p];
+      cp.splice(index, 1);
+      return cp;
+    });
+  };
+
+  const removeNewFileAt = (index) => {
+    setEditNewFiles((p) => {
+      const cp = [...p];
+      cp.splice(index, 1);
+      return cp;
+    });
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editTarget) { toast({ title: 'No SAD selected', status: 'error' }); return; }
+    // basic validation
+    if (!editRegime) { toast({ title: 'Regime required', status: 'error' }); return; }
+    const declaredNum = toNumber(parseNumberString(editDeclaredWeight) || 0);
+    if (!declaredNum) { toast({ title: 'Declared weight required', status: 'error' }); return; }
+
+    setEditUploading(true);
+    try {
+      // Upload new files (if any)
+      let uploadedDocs = [];
+      if (editNewFiles && editNewFiles.length) {
+        try {
+          uploadedDocs = await uploadDocs(editTarget, editNewFiles);
+        } catch (e) {
+          console.error('upload new files failed', e);
+          throw new Error('Uploading new documents failed: ' + (e?.message || String(e)));
+        }
+      }
+
+      // Merge final docs: existing kept + newly uploaded
+      const finalDocs = [...(Array.isArray(editExistingDocs) ? editExistingDocs : []), ...(uploadedDocs || [])];
+
+      // Update DB row
+      const payload = {
+        regime: editRegime || null,
+        declared_weight: declaredNum,
+        docs: finalDocs,
+        updated_at: new Date().toISOString(),
+        manual_update: true,
+      };
+
+      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', editTarget);
+      if (error) throw error;
+
+      toast({ title: 'SAD updated', description: `SAD ${editTarget} saved`, status: 'success' });
+      await pushActivity(`Edited SAD ${editTarget}`, { by: currentUser?.id || null, changes: { regime: editRegime, declared_weight: declaredNum, new_docs: (uploadedDocs || []).map(d => d.name) } });
+      fetchSADs();
+      closeEditModal();
+    } catch (err) {
+      console.error('save edit failed', err);
+      toast({ title: 'Failed to save', description: err?.message || 'Unexpected', status: 'error' });
+    } finally {
+      setEditUploading(false);
+    }
+  };
+
   // UI derived values
   const anomalyResults = useMemo(() => {
     const ratios = sads.map(s => {
@@ -1122,6 +1239,17 @@ export default function SADDeclaration() {
   display:flex;align-items:center;justify-content:center;font-size:20px; box-shadow: 0 12px 30px rgba(63,94,251,0.18);
 }
 .orb-cta:hover { transform: translateY(-4px) scale(1.03); transition: transform .18s ease; }
+
+/* Edit modal dropzone */
+.sad-edit-drop {
+  border: 1px dashed rgba(7,17,25,0.12);
+  border-radius: 12px;
+  padding: 12px;
+  text-align: center;
+  background: linear-gradient(180deg, rgba(255,255,255,0.98), rgba(248,250,255,0.98));
+}
+.sad-edit-thumb { width:72px; height:72px; object-fit:cover; border-radius:8px; border:1px solid rgba(2,6,23,0.04); }
+.sad-edit-file-row { display:flex; gap:10px; align-items:center; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(2,6,23,0.04); }
 `;
 
   const RowMotion = motion(Tr);
@@ -1503,6 +1631,7 @@ export default function SADDeclaration() {
                               <MenuButton as={IconButton} aria-label="Actions" icon={<FaEllipsisV />} size="sm" />
                               <MenuList>
                                 <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
+                                <MenuItem icon={<FaEdit />} onClick={() => openEditModalFor(s)}>Edit SAD</MenuItem>
                                 <MenuItem icon={<FaEdit />} onClick={() => openStatusEditorFor(s)}>Edit SAD status</MenuItem>
                                 <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
                                 <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
@@ -1792,6 +1921,121 @@ export default function SADDeclaration() {
           <ModalFooter>
             <Button variant="ghost" onClick={closeStatusEdit}>Cancel</Button>
             <Button colorScheme="teal" ml={3} onClick={confirmStatusEdit}>Save</Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+
+      {/* Edit SAD modal (NEW) */}
+      <Modal isOpen={isEditModalOpen} onClose={closeEditModal} size="lg" isCentered>
+        <ModalOverlay />
+        <ModalContent borderRadius="12px" maxW="900px" overflow="hidden">
+          <ModalHeader>Edit SAD — {editTarget}</ModalHeader>
+          <ModalCloseButton />
+          <ModalBody>
+            <SimpleGrid columns={{ base: 1, md: 2 }} spacing={4}>
+              <Box>
+                <FormControl>
+                  <FormLabel>Regime</FormLabel>
+                  <Select value={editRegime} onChange={(e) => setEditRegime(e.target.value)}>
+                    <option value="">Select regime</option>
+                    {REGIME_OPTIONS.map(c => <option key={c} value={c}>{REGIME_LABEL_MAP[c] ? `${REGIME_LABEL_MAP[c]} (${c})` : c}</option>)}
+                  </Select>
+                </FormControl>
+
+                <FormControl mt={3}>
+                  <FormLabel>Declared weight (kg)</FormLabel>
+                  <Input
+                    value={formatNumber(editDeclaredWeight)}
+                    onChange={(e) => setEditDeclaredWeight(parseNumberString(e.target.value))}
+                    placeholder="e.g. 100000"
+                  />
+                </FormControl>
+
+                <Box mt={4}>
+                  <Text fontSize="sm" color="gray.600">Existing documents</Text>
+                  {(!editExistingDocs || !editExistingDocs.length) ? (
+                    <Text color="gray.500" mt={2}>No documents yet.</Text>
+                  ) : (
+                    <Box mt={2} borderRadius="md" p={2} border="1px solid" borderColor="gray.100">
+                      {editExistingDocs.map((d, i) => (
+                        <Box key={i} className="sad-edit-file-row">
+                          <HStack spacing={3}>
+                            {d.url && (/\.(jpg|jpeg|png|gif|webp)$/i).test(d.name || d.path || '') ? (
+                              <ChakraImage src={d.url} alt={d.name} className="sad-edit-thumb" />
+                            ) : (
+                              <Box className="sad-edit-thumb" display="flex" alignItems="center" justifyContent="center" bg="gray.50">
+                                <Text fontSize="xs" px={2} color="gray.600" noOfLines={2}>{(d.name || d.path || 'file').slice(0,18)}</Text>
+                              </Box>
+                            )}
+                            <Box>
+                              <Text fontSize="sm" fontWeight="600" noOfLines={1}>{d.name || d.path}</Text>
+                              <Text fontSize="xs" color="gray.500">{d.path || ''}</Text>
+                            </Box>
+                          </HStack>
+                          <HStack>
+                            <Button size="xs" onClick={() => { if (d.url) window.open(d.url, '_blank'); else toast({ title: 'No URL', status: 'info' }); }}>Open</Button>
+                            <Button size="xs" colorScheme="red" variant="ghost" onClick={() => removeExistingDocAt(i)}>Remove</Button>
+                          </HStack>
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+
+              <Box>
+                <FormControl>
+                  <FormLabel>Attach / Upload documents</FormLabel>
+
+                  <Box
+                    className="sad-edit-drop"
+                    onDrop={handleDrop}
+                    onDragOver={handleDragOver}
+                    onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                    role="button"
+                  >
+                    <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={handleEditFileInputChange} />
+                    <Text fontWeight="semibold">Drag & drop files here, or click to browse</Text>
+                    <Text fontSize="sm" color="gray.500" mt={2}>PDF, JPG, PNG — each file will be uploaded to storage and attached to this SAD.</Text>
+                    <HStack mt={3} justify="center">
+                      <Badge variant="subtle" colorScheme="purple">Fast upload</Badge>
+                      <Badge variant="subtle" colorScheme="green">{editNewFiles.length} queued</Badge>
+                    </HStack>
+                  </Box>
+
+                  <Box mt={3}>
+                    {editNewFiles && editNewFiles.length ? (
+                      <Box border="1px solid" borderColor="gray.100" borderRadius="md" p={2}>
+                        {editNewFiles.map((f, i) => (
+                          <Box key={i} className="sad-edit-file-row">
+                            <HStack spacing={3}>
+                              <Box className="sad-edit-thumb" display="flex" alignItems="center" justifyContent="center" bg="gray.50">
+                                <Text fontSize="xs" px={2} color="gray.600" noOfLines={2}>{f.name.slice(0,18)}</Text>
+                              </Box>
+                              <Box>
+                                <Text fontSize="sm" fontWeight="600" noOfLines={1}>{f.name}</Text>
+                                <Text fontSize="xs" color="gray.500">{(f.size / 1024).toFixed(1)} KB • {f.type || 'file'}</Text>
+                              </Box>
+                            </HStack>
+                            <HStack>
+                              <Button size="xs" onClick={() => removeNewFileAt(i)}>Remove</Button>
+                            </HStack>
+                          </Box>
+                        ))}
+                      </Box>
+                    ) : <Text mt={2} color="gray.500">No new files queued.</Text>}
+                  </Box>
+
+                </FormControl>
+              </Box>
+            </SimpleGrid>
+
+            <Text fontSize="xs" color="gray.500" mt={3}>Tip: uploading will store files in the <code>sad-docs</code> bucket and attach them to the SAD record. Removing an existing doc will only remove it from the SAD record (won't delete the file from storage).</Text>
+          </ModalBody>
+
+          <ModalFooter>
+            <Button variant="ghost" onClick={closeEditModal}>Cancel</Button>
+            <Button colorScheme="teal" ml={3} onClick={handleSaveEdit} isLoading={editUploading}>Save changes</Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
