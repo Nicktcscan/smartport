@@ -117,63 +117,10 @@ function exportToCSV(rows = [], filename = 'confirm-exit.csv') {
   URL.revokeObjectURL(url);
 }
 
-// safeUrl: validate/normalize attachment URLs before using them in fetch/iframe/img/window.open
-function safeUrl(raw) {
-  if (!raw) return null;
-  const s = String(raw).trim();
-  if (!s) return null;
-  // allow data: URIs
-  if (/^\s*data:/i.test(s)) return s;
-  // absolute http(s)
-  if (/^https?:\/\//i.test(s)) return s;
-  // root-relative -> prefix origin
-  if (s.startsWith('/')) {
-    if (typeof window !== 'undefined' && window.location && window.location.origin) {
-      return `${window.location.origin}${s}`;
-    }
-    return s; // best-effort
-  }
-  // anything else (relative segments, short tokens like 'tickets') we treat as invalid to avoid bogus loads
-  return null;
-}
-
-function isPdfUrl(url) {
-  if (!url) return false;
-  const u = String(url).split('?')[0].toLowerCase();
-  return u.endsWith('.pdf');
-}
-function isImageUrl(url) {
-  if (!url) return false;
-  const u = String(url).split('?')[0].toLowerCase();
-  return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(u);
-}
-
-// small helper to fetch with timeout (used for PDF fetch)
-async function fetchWithTimeout(resource, options = {}) {
-  const { timeout = 10000 } = options;
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    const resp = await fetch(resource, { ...options, signal: controller.signal });
-    clearTimeout(id);
-    return resp;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
-  }
-}
-
 // Extract selectable text from a remote PDF URL (best-effort)
 async function extractTextFromPdfUrl(url) {
   try {
-    const resolved = safeUrl(url);
-    if (!resolved) {
-      // don't attempt to fetch nonsense like 'tickets' — that'll trigger 503/404 noise
-      return '';
-    }
-
-    // fetch with timeout
-    const resp = await fetchWithTimeout(resolved, { timeout: 12000 });
+    const resp = await fetch(url);
     if (!resp.ok) {
       throw new Error(`Failed to fetch PDF (${resp.status})`);
     }
@@ -184,13 +131,13 @@ async function extractTextFromPdfUrl(url) {
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
-      const pageText = (textContent.items || []).map((item) => item.str).join(' ');
+      const pageText = textContent.items.map((item) => item.str).join(' ');
       fullText += ' ' + pageText;
     }
     await loadingTask.destroy?.();
     return fullText.trim();
   } catch (err) {
-    console.warn('PDF text extraction failed', err?.message || err);
+    console.warn('PDF text extraction failed', err);
     return '';
   }
 }
@@ -218,6 +165,17 @@ function parseDriverNameFromText(text) {
   return null;
 }
 
+function isPdfUrl(url) {
+  if (!url) return false;
+  const lower = url.split('?')[0].toLowerCase();
+  return lower.endsWith('.pdf');
+}
+function isImageUrl(url) {
+  if (!url) return false;
+  const lower = url.split('?')[0].toLowerCase();
+  return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
+}
+
 /* -----------------------
    Supabase utilities: retry + batching
 ----------------------- */
@@ -238,7 +196,7 @@ async function supabaseWithRetry(fn, { retries = 4, initialDelay = 600, factor =
         const err = res.error;
         // treat 503 / network-type errors as transient
         const status = err?.status ?? res.status;
-        const transient = status === 503 || status === 502 || status === 504 || /timeout|temporar/i.test(err?.message ?? '');
+        const transient = status === 503 || status === 502 || status === 504 || /timeout|temporar|insufficient/i.test(err?.message ?? '');
         if (!transient) {
           // non-transient, throw for caller to handle
           throw err;
@@ -251,7 +209,7 @@ async function supabaseWithRetry(fn, { retries = 4, initialDelay = 600, factor =
     } catch (err) {
       // Network level or thrown error - check if transient
       const msg = String(err?.message ?? err).toLowerCase();
-      const transient = /503|502|504|ecof|temporar|timeout|network/i.test(msg);
+      const transient = /503|502|504|ecof|temporar|timeout|network|insufficient/i.test(msg);
       if (!transient) throw err;
       // else retry
     }
@@ -270,7 +228,7 @@ async function supabaseWithRetry(fn, { retries = 4, initialDelay = 600, factor =
  * Fetch rows via `.in()` but chunk large arrays to avoid very long URLs.
  * Returns aggregated array of rows (deduped by primary key)
  */
-async function fetchInBatches({ table = 'tickets', column, values = [], select = '*', batchSize = 100 }) {
+async function fetchInBatches({ table = 'tickets', column, values = [], select = '*', batchSize = 60 }) {
   if (!Array.isArray(values) || values.length === 0) return [];
   const final = [];
   const seenIds = new Set();
@@ -390,33 +348,72 @@ export default function ConfirmExit() {
   const openOrb = () => setOrbOpen(true);
   const closeOrb = () => setOrbOpen(false);
 
+  // subscriptions refs to avoid duplicates
+  const ticketSubRef = useRef(null);
+  const outgateSubRef = useRef(null);
+  const realtimeSetupRef = useRef(false);
+
   // ---------------------
   // Data fetching
   // ---------------------
+
+  // Limit for pending fetch (guard against huge payloads)
+  const PENDING_FETCH_LIMIT = 4000;
+
   const fetchTickets = useCallback(async () => {
     try {
+      // fetch pending tickets only (server-side filtering)
       const resp = await supabaseWithRetry(() =>
         supabase
           .from('tickets')
           .select('id, ticket_id, ticket_no, gnsw_truck_no, container_no, date, sad_no, status, gross, tare, net, file_url, file_name, submitted_at, driver')
           .eq('status', 'Pending')
           .order('submitted_at', { ascending: false })
+          .limit(PENDING_FETCH_LIMIT)
       );
       if (resp.error) throw resp.error;
-      setAllTickets(resp.data || []);
+      // ensure no Exited records are present
+      const incoming = Array.isArray(resp.data) ? resp.data.filter((r) => (r.status !== 'Exited')) : [];
+      setAllTickets(incoming);
     } catch (err) {
+      console.warn('fetchTickets error', err);
       toast({ title: 'Error fetching tickets', description: err?.message || 'Could not fetch tickets', status: 'error', duration: 5000, isClosable: true });
     }
   }, [toast]);
 
   /**
+   * Safely update tickets.status -> 'Exited' in batches (use id or ticket_id)
+   */
+  async function markTicketsExitedInBatches({ byId = [], byTicketId = [], chunkSize = 200 } = {}) {
+    // prefer using DB id updates in chunks, then ticket_id updates in chunks.
+    try {
+      if (byId.length) {
+        for (let i = 0; i < byId.length; i += chunkSize) {
+          const chunk = byId.slice(i, i + chunkSize);
+          try {
+            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).in('id', chunk));
+          } catch (e) {
+            console.warn('Chunked mark Exited by id failed', e);
+          }
+        }
+      }
+      if (byTicketId.length) {
+        for (let i = 0; i < byTicketId.length; i += chunkSize) {
+          const chunk = byTicketId.slice(i, i + chunkSize);
+          try {
+            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', chunk));
+          } catch (e) {
+            console.warn('Chunked mark Exited by ticket_id failed', e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('markTicketsExitedInBatches overall failure', e);
+    }
+  }
+
+  /**
    * fetchConfirmedExits: fetches outgate rows then attempts to enrich them with matching tickets
-   * - if outgate row has no linked tickets (no r.tickets or empty array) but has ticket_no, we'll try to find the matching tickets row by ticket_no or ticket_id
-   * - if we find a ticket, we merge ticket fields into the outgate row so the confirmed table shows them
-   * - if we find a ticket_id for an outgate row that lacks it, we persist it back to outgate (so joins work later)
-   * - we also mark the matching ticket status -> 'Exited' when necessary (so pending list doesn't show it)
-   *
-   * IMPORTANT: weighed_at is always derived from tickets.submitted_at (if a linked ticket exists)
    */
   const fetchConfirmedExits = useCallback(async () => {
     try {
@@ -441,26 +438,23 @@ export default function ConfirmExit() {
             tickets ( id, ticket_id, ticket_no, date, submitted_at, gnsw_truck_no, status )
           `)
           .order('created_at', { ascending: false })
+          .limit(2000)
       );
       if (resp.error) throw resp.error;
       const rows = resp.data || [];
 
-      // Basic mapping: take ticket.submitted_at from joined tickets if present (per request)
       const mapped = rows.map((r) => {
         const ticketJoin = (r.tickets && Array.isArray(r.tickets) && r.tickets[0]) ? r.tickets[0] : null;
-        // ALWAYS prefer submitted_at for weighed_at column if joined ticket exists
         const ticketDate = ticketJoin ? (ticketJoin.submitted_at || null) : null;
         const merged = { ...r, weighed_at: ticketDate, _joined_ticket: ticketJoin };
-        // normalize vehicle_number fallback from joined ticket
         if (!merged.vehicle_number && ticketJoin && ticketJoin.gnsw_truck_no) merged.vehicle_number = ticketJoin.gnsw_truck_no;
         return merged;
       });
 
-      // Find out which outgate rows have no joined ticket - we'll try to fetch matches by ticket_id / ticket_no
+      // collect keys to try to match missing joins
       const needByTicketId = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_id).map((r) => r.ticket_id)));
       const needByTicketNo = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_no).map((r) => r.ticket_no)));
 
-      // Query tickets for those ids/nos (batch, to avoid extremely long URLs)
       const ticketMapByTicketId = {};
       const ticketMapByTicketNo = {};
 
@@ -471,7 +465,7 @@ export default function ConfirmExit() {
             column: 'ticket_id',
             values: needByTicketId,
             select: 'id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status',
-            batchSize: 120,
+            batchSize: 60,
           });
           for (const t of tById) {
             if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
@@ -489,7 +483,7 @@ export default function ConfirmExit() {
             column: 'ticket_no',
             values: needByTicketNo,
             select: 'id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status',
-            batchSize: 120,
+            batchSize: 60,
           });
           for (const t of tByNo) {
             if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
@@ -500,13 +494,12 @@ export default function ConfirmExit() {
         }
       }
 
-      // Now merge and collect DB updates we want to make (persist ticket_id into outgate, and mark tickets Exited)
-      const outgateUpdates = []; // { id, ticket_id }
+      // merge and schedule updates
+      const outgateUpdates = [];
       const ticketDbIdsToMarkExited = new Set();
       const ticketTicketIdsToMarkExited = new Set();
 
       const finalArr = mapped.map((r) => {
-        // if join exists, keep as is
         if (r._joined_ticket) {
           const jt = r._joined_ticket;
           if (jt.id) ticketDbIdsToMarkExited.add(jt.id);
@@ -514,67 +507,54 @@ export default function ConfirmExit() {
           return { ...r };
         }
 
-        // no joined ticket — try to find by ticket_id then ticket_no
         let matched = null;
         if (r.ticket_id && ticketMapByTicketId[r.ticket_id]) matched = ticketMapByTicketId[r.ticket_id];
         else if (r.ticket_no && ticketMapByTicketNo[r.ticket_no]) matched = ticketMapByTicketNo[r.ticket_no];
 
         if (matched) {
-          // merge fields for UI
           const merged = { ...r };
-          // IMPORTANT: weighed_at must come from matched.submitted_at per request
           merged.weighed_at = matched.submitted_at || merged.weighed_at;
           if (!merged.vehicle_number && matched.gnsw_truck_no) merged.vehicle_number = matched.gnsw_truck_no;
           if (!merged.ticket_id && matched.ticket_id) {
             merged.ticket_id = matched.ticket_id;
-            // schedule persisting ticket_id back to outgate
             outgateUpdates.push({ id: merged.id, ticket_id: matched.ticket_id });
           }
-          // schedule marking ticket as Exited (use id and ticket_id for robustness)
           if (matched.id) ticketDbIdsToMarkExited.add(matched.id);
           if (matched.ticket_id) ticketTicketIdsToMarkExited.add(matched.ticket_id);
           return merged;
         }
 
-        // no matched ticket found — keep as-is, will show but with limited metadata
         return { ...r };
       });
 
-      // Persist outgate ticket_id fixes (one-by-one to avoid complicated bulk logic)
+      // Persist outgate.ticket_id fixes sequentially (small number expected)
       if (outgateUpdates.length) {
         for (const upd of outgateUpdates) {
           try {
-            // only set if still null to avoid race conditions
-            await supabaseWithRetry(() => supabase.from('outgate').update({ ticket_id: upd.ticket_id }).eq('id', upd.id).is('ticket_id', null));
+            // attempt to set only if currently null (best effort). If provider fails, ignore.
+            await supabaseWithRetry(() => supabase.from('outgate').update({ ticket_id: upd.ticket_id }).eq('id', upd.id));
           } catch (e) {
             console.warn('Failed to persist outgate.ticket_id for outgate id', upd.id, e);
           }
         }
       }
 
-      // Mark corresponding tickets as Exited so they disappear from pending list if needed
+      // Mark tickets Exited in chunked batches (robust)
       try {
-        if (ticketDbIdsToMarkExited.size) {
-          const arr = Array.from(ticketDbIdsToMarkExited);
-          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).in('id', arr));
-        }
-        if (ticketTicketIdsToMarkExited.size) {
-          const arr2 = Array.from(ticketTicketIdsToMarkExited);
-          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', arr2));
-        }
+        const byDbIds = Array.from(ticketDbIdsToMarkExited);
+        const byTicketIds = Array.from(ticketTicketIdsToMarkExited);
+        await markTicketsExitedInBatches({ byId: byDbIds, byTicketId: byTicketIds, chunkSize: 200 });
       } catch (e) {
         console.warn('Failed to mark some tickets Exited during fetchConfirmedExits', e);
       }
 
-      // Deduplicate: prefer newer outgate per ticket_id; also include those without ticket_id
+      // Deduplicate final confirmed set (prefer one per ticket_id)
       const dedupeMap = new Map();
       for (const r of finalArr) {
         const key = r.ticket_id ?? `OUTGATE-${r.id}`;
         if (!dedupeMap.has(key)) dedupeMap.set(key, r);
       }
-      const deduped = Array.from(dedupeMap.values());
-      const noTicketIdRows = finalArr.filter((r) => !r.ticket_id && !dedupeMap.has(r.ticket_id));
-      const finalConfirmed = [...deduped, ...noTicketIdRows];
+      const finalConfirmed = Array.from(dedupeMap.values());
 
       setConfirmedTickets(finalConfirmed);
 
@@ -582,7 +562,7 @@ export default function ConfirmExit() {
       const creatorIds = Array.from(new Set(finalConfirmed.map((r) => r.created_by).filter(Boolean)));
       if (creatorIds.length) {
         try {
-          const respUsers = await supabaseWithRetry(() => supabase.from('users').select('id,username,email').in('id', creatorIds));
+          const respUsers = await supabaseWithRetry(() => supabase.from('users').select('id,username,email').in('id', creatorIds).limit(1000));
           if (!respUsers.error && respUsers.data) {
             const m = {};
             respUsers.data.forEach(u => { m[u.id] = u; });
@@ -593,12 +573,14 @@ export default function ConfirmExit() {
         }
       }
     } catch (err) {
+      console.error('fetchConfirmedExits error', err);
       toast({ title: 'Error fetching confirmed exits', description: err?.message || 'Could not fetch confirmed exits', status: 'error', duration: 5000, isClosable: true });
     }
   }, [toast]);
 
   const fetchTotalTickets = useCallback(async () => {
     try {
+      // keep this lightweight — head=true count only
       const respAll = await supabaseWithRetry(() => supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' }));
       const total = respAll?.count ?? null;
       const respExited = await supabaseWithRetry(() => supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' }).eq('status', 'Exited'));
@@ -612,42 +594,67 @@ export default function ConfirmExit() {
     }
   }, []);
 
+  // initial load: run sequentially to avoid bursting the backend
   useEffect(() => {
-    setLoading(true);
-    Promise.all([fetchTickets(), fetchConfirmedExits(), fetchTotalTickets()]).finally(() => setLoading(false));
+    let mounted = true;
+    (async () => {
+      setLoading(true);
+      try {
+        await fetchTickets();
+        await fetchConfirmedExits();
+        await fetchTotalTickets();
+      } catch (e) {
+        console.warn('Initial load error', e);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // Realtime subscriptions (kept but read operations are now resilient)
+  // Realtime subscriptions (debounced handlers)
   useEffect(() => {
     let ticketSub = null;
     let outgateSub = null;
+    const debounce = (fn, delay = 300) => {
+      let t = null;
+      return () => {
+        if (t) clearTimeout(t);
+        t = setTimeout(() => { fn(); t = null; }, delay);
+      };
+    };
+
+    const debFetchTickets = debounce(() => { fetchTickets(); fetchTotalTickets(); }, 400);
+    const debFetchConfirmed = debounce(() => { fetchConfirmedExits(); fetchTickets(); fetchTotalTickets(); }, 400);
 
     const setup = async () => {
+      if (realtimeSetupRef.current) return;
       try {
         if (typeof supabase.channel === 'function') {
           ticketSub = supabase
             .channel('public:tickets')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
-              fetchTickets();
-              fetchTotalTickets();
+              debFetchTickets();
             })
             .subscribe();
+          ticketSubRef.current = ticketSub;
 
           outgateSub = supabase
             .channel('public:outgate')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'outgate' }, () => {
-              // outgate changed -> refresh confirmed list and try to reconcile tickets
-              fetchConfirmedExits();
-              // also refresh tickets just in case an outgate insertion should have marked a ticket Exited
-              fetchTickets();
-              fetchTotalTickets();
+              debFetchConfirmed();
             })
             .subscribe();
+          outgateSubRef.current = outgateSub;
+          realtimeSetupRef.current = true;
         } else if (typeof supabase.from === 'function') {
-          ticketSub = supabase.from('tickets').on('*', () => {
-            fetchTickets(); fetchTotalTickets();
-          }).subscribe();
-          outgateSub = supabase.from('outgate').on('*', () => { fetchConfirmedExits(); fetchTickets(); }).subscribe();
+          // legacy realtime
+          ticketSub = supabase.from('tickets').on('*', debFetchTickets).subscribe();
+          ticketSubRef.current = ticketSub;
+          outgateSub = supabase.from('outgate').on('*', debFetchConfirmed).subscribe();
+          outgateSubRef.current = outgateSub;
+          realtimeSetupRef.current = true;
         }
       } catch (err) {
         console.warn('realtime setup failed', err);
@@ -658,25 +665,28 @@ export default function ConfirmExit() {
 
     return () => {
       try {
-        if (ticketSub) {
-          if (ticketSub.unsubscribe) ticketSub.unsubscribe();
-          else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(ticketSub);
+        if (ticketSubRef.current) {
+          if (ticketSubRef.current.unsubscribe) ticketSubRef.current.unsubscribe();
+          else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(ticketSubRef.current).catch(() => {});
+          ticketSubRef.current = null;
         }
-        if (outgateSub) {
-          if (outgateSub.unsubscribe) outgateSub.unsubscribe();
-          else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(outgateSub);
+        if (outgateSubRef.current) {
+          if (outgateSubRef.current.unsubscribe) outgateSubRef.current.unsubscribe();
+          else if (typeof supabase.removeChannel === 'function') supabase.removeChannel(outgateSubRef.current).catch(() => {});
+          outgateSubRef.current = null;
         }
+        realtimeSetupRef.current = false;
       } catch (e) {}
     };
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // Exclude confirmed tickets from pending list
+  // Exclude confirmed/exited tickets from pending list
   useEffect(() => {
     const confirmedIds = new Set(confirmedTickets.filter((t) => t.ticket_id).map((t) => t.ticket_id));
     const confirmedNos = new Set(confirmedTickets.filter((t) => t.ticket_no).map((t) => t.ticket_no));
 
     const unconfirmed = allTickets.filter((t) =>
-      t.status !== 'Exited' &&
+      (t.status !== 'Exited') &&
       !confirmedIds.has(t.ticket_id) &&
       !confirmedNos.has(t.ticket_no)
     );
@@ -717,7 +727,6 @@ export default function ConfirmExit() {
       if (confirmedNos.has(ticket.ticket_no)) return false;
       if (ticket.status === 'Exited') return false;
 
-      // For pending tickets, use submitted_at primarily (per request)
       const dateStr = ticket.submitted_at || ticket.date;
       if (df || dt || tFrom !== null || tTo !== null) {
         if (!dateStr) return false;
@@ -768,7 +777,6 @@ export default function ConfirmExit() {
       let va = a[sortKey];
       let vb = b[sortKey];
       if (sortKey === 'date') {
-        // For sorting by date on pending list, use submitted_at primarily
         va = new Date(a.submitted_at || a.date || 0);
         vb = new Date(b.submitted_at || b.date || 0);
       } else {
@@ -824,7 +832,7 @@ export default function ConfirmExit() {
             resolved.driver = parsed;
             if (resolved.id) {
               try {
-                // safe update using supabaseWithRetry pattern
+                // update outgate driver (best-effort)
                 await supabaseWithRetry(() => supabase.from('outgate').update({ driver: parsed }).eq('id', resolved.id));
               } catch (e) {
                 console.warn('Could not update outgate driver field', e);
@@ -842,18 +850,6 @@ export default function ConfirmExit() {
       onOpen();
     }
   };
-
-  // helper wrapper for insert/update with retry
-  async function supabaseFromWithRetry(table) {
-    // Returns an object with similar API as supabase.from(table) but each call is wrapped with supabaseWithRetry
-    // For convenience we return a simple wrapper object using Proxy-like functions
-    return {
-      insert: (payload) => supabaseWithRetry(() => supabase.from(table).insert(payload)),
-      update: (payload) => ({ eq: (col, val) => supabaseWithRetry(() => supabase.from(table).update(payload).eq(col, val)) }),
-      // Provide simple helpers to used patterns above; callers must await returned promise and then call .then on it accordingly
-      // Note: used only in limited places; for full API you can call supabase directly with supabaseWithRetry wrapper as done elsewhere
-    };
-  }
 
   const handleConfirmExit = async () => {
     if (!selectedTicket) return;
@@ -881,7 +877,6 @@ export default function ConfirmExit() {
         driver: resolvedDriver || null,
       };
 
-      // attach creator / editor info if available
       if (user && user.id) payload.created_by = user.id;
       if (currentUsername) payload.edited_by = currentUsername;
 
@@ -892,7 +887,6 @@ export default function ConfirmExit() {
         if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
         let existing = null;
         if (orParts.length) {
-          // use `.or()` but avoid constructing insane query strings
           const resp = await supabaseWithRetry(() => supabase.from('outgate').select('id,created_at').or(orParts.join(',')));
           if (resp.error) console.warn('check existing outgate error', resp.error);
           existing = resp.data;
@@ -916,7 +910,7 @@ export default function ConfirmExit() {
               await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no));
             }
 
-            // Immediately reflect change in UI so row disappears
+            // Reflect change in UI so row disappears
             setFilteredResults((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
             setAllTickets((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
             setSelectedPending((prev) => {
@@ -925,7 +919,10 @@ export default function ConfirmExit() {
               return next;
             });
 
-            await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+            // refresh counts/list in background (sequential small calls)
+            await fetchTickets();
+            await fetchConfirmedExits();
+            await fetchTotalTickets();
           } catch (e) {
             console.warn('mark exited after existing outgate failed', e);
           }
@@ -938,25 +935,20 @@ export default function ConfirmExit() {
       }
 
       // Insert outgate
-      const { error: insertErr } = await supabaseWithRetry(() => supabase.from('outgate').insert([payload]));
-      if (insertErr) {
-        toast({ title: 'Error confirming exit', description: insertErr.message, status: 'error', duration: 5000, isClosable: true });
+      const insertResp = await supabaseWithRetry(() => supabase.from('outgate').insert([payload]));
+      if (insertResp.error) {
+        toast({ title: 'Error confirming exit', description: insertResp.error.message || 'DB error', status: 'error', duration: 5000, isClosable: true });
         return;
       }
 
       // Update tickets.status -> 'Exited' robustly (use id when present, else ticket_id, else ticket_no)
       try {
         if (selectedTicket.id) {
-          const { error: updErr } = await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id));
-          if (updErr) console.warn('Failed to update tickets by id', updErr);
+          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id));
         } else if (selectedTicket.ticket_id) {
-          const { error: updErr } = await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id));
-          if (updErr) console.warn('Failed to update tickets by ticket_id', updErr);
+          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id));
         } else if (selectedTicket.ticket_no) {
-          const { error: updErr } = await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no));
-          if (updErr) console.warn('Failed to update tickets by ticket_no', updErr);
-        } else {
-          console.warn('No id/ticket_id/ticket_no present to update tickets.status', selectedTicket);
+          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no));
         }
       } catch (e) {
         console.warn('Error updating tickets status', e);
@@ -964,7 +956,7 @@ export default function ConfirmExit() {
 
       toast({ title: `Exit confirmed for ${selectedTicket.gnsw_truck_no}`, status: 'success', duration: 3000, isClosable: true });
 
-      // Instantly remove from UI (fixes "not leaving table" issue)
+      // Instantly remove from UI
       setFilteredResults((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
       setAllTickets((prev) => prev.filter((t) => t.id !== selectedTicket.id && t.ticket_id !== selectedTicket.ticket_id && t.ticket_no !== selectedTicket.ticket_no));
       setSelectedPending((prev) => {
@@ -974,7 +966,9 @@ export default function ConfirmExit() {
       });
 
       // Re-fetch to ensure confirmed list and counts are fresh
-      await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+      await fetchTickets();
+      await fetchConfirmedExits();
+      await fetchTotalTickets();
       onClose();
     } catch (err) {
       console.error('Confirm exit error:', err);
@@ -1052,7 +1046,10 @@ export default function ConfirmExit() {
         }
       }
 
-      await fetchTickets(); await fetchConfirmedExits(); await fetchTotalTickets();
+      // Re-fetch once after loop
+      await fetchTickets();
+      await fetchConfirmedExits();
+      await fetchTotalTickets();
 
       try {
         let confetti = null;
@@ -1219,12 +1216,14 @@ export default function ConfirmExit() {
       toast({ title: `Bulk confirming ${ids.length} tickets...`, status: 'info', duration: 2000 });
       for (const id of ids) {
         try {
-          // try by ticket_id, fallback by id
-          const resp = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('ticket_id', id).limit(1).maybeSingle());
-          let ticketRow = resp?.data;
-          if (!ticketRow) {
-            const resp2 = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('id', id).limit(1).maybeSingle());
-            ticketRow = resp2?.data || ticketRow;
+          let ticketRow = null;
+          if (id) {
+            const resp = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('ticket_id', id).limit(1).maybeSingle());
+            ticketRow = resp?.data || null;
+            if (!ticketRow) {
+              const resp2 = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('id', id).limit(1).maybeSingle());
+              ticketRow = resp2?.data || ticketRow;
+            }
           }
           if (!ticketRow) continue;
           const { gross, tare, net } = computeWeights(ticketRow);
@@ -1751,39 +1750,16 @@ export default function ConfirmExit() {
                 {selectedTicket.file_url && (
                   <>
                     <Divider mt={4} mb={3} />
-                    <Box border="1px solid" borderColor="gray.200" borderRadius="md" overflow="hidden" minH="300px" p={2}>
-                      {(() => {
-                        const u = safeUrl(selectedTicket.file_url);
-                        if (!u) {
-                          return (
-                            <Box p={4}>
-                              <Text color="red.500" mb={2}>Attachment URL invalid or relative — cannot embed safely.</Text>
-                              <Button size="sm" onClick={() => {
-                                // try to open raw but only if it looks like a reasonable string (best-effort)
-                                const raw = String(selectedTicket.file_url || '');
-                                if (raw.startsWith('http') || raw.startsWith('/')) {
-                                  window.open(raw, '_blank', 'noopener');
-                                } else {
-                                  toast({ title: 'Invalid URL', description: 'Attachment URL cannot be opened', status: 'warning' });
-                                }
-                              }}>Open raw (best-effort)</Button>
-                            </Box>
-                          );
-                        }
-
-                        if (isPdfUrl(u)) {
-                          return <iframe src={u} width="100%" height="100%" style={{ border: 'none', minHeight: 300 }} title="file" />;
-                        }
-                        if (isImageUrl(u)) {
-                          return (
-                            <Box textAlign="center" p={3}>
-                              <img src={u} alt="attachment" style={{ maxWidth: '100%', maxHeight: '60vh', borderRadius: 6 }} />
-                            </Box>
-                          );
-                        }
-                        // fallback: embed in iframe for other file types
-                        return <iframe src={u} width="100%" height="100%" style={{ border: 'none', minHeight: 300 }} title="file" />;
-                      })()}
+                    <Box border="1px solid" borderColor="gray.200" borderRadius="md" overflow="hidden" minH="300px">
+                      {isPdfUrl(selectedTicket.file_url) ? (
+                        <iframe src={selectedTicket.file_url} width="100%" height="100%" style={{ border: 'none', minHeight: 300 }} title="file" />
+                      ) : isImageUrl(selectedTicket.file_url) ? (
+                        <Box textAlign="center" p={3}>
+                          <img src={selectedTicket.file_url} alt="attachment" style={{ maxWidth: '100%', maxHeight: '60vh', borderRadius: 6 }} />
+                        </Box>
+                      ) : (
+                        <iframe src={selectedTicket.file_url} width="100%" height="100%" style={{ border: 'none', minHeight: 300 }} title="file" />
+                      )}
                     </Box>
                   </>
                 )}
@@ -1892,12 +1868,8 @@ export default function ConfirmExit() {
                         }}>Show Exited By</MenuItem>
                         <MenuItem icon={<FaEllipsisV />} onClick={() => { setSelectedTicket(ticket); setActionType('view'); onOpen(); }}>More Info</MenuItem>
                         <MenuItem icon={<FaDownload />} onClick={() => {
-                          const u = safeUrl(ticket.file_url);
-                          if (u) {
-                            window.open(u, '_blank');
-                          } else {
-                            toast({ title: 'No valid file URL', status: 'info' });
-                          }
+                          if (ticket.file_url) window.open(ticket.file_url, '_blank');
+                          else toast({ title: 'No file', status: 'info' });
                         }}>Open Attachment</MenuItem>
                       </MenuList>
                     </Menu>
