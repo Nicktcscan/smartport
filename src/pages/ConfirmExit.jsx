@@ -177,84 +177,6 @@ function isImageUrl(url) {
 }
 
 /* -----------------------
-   Supabase utilities: retry + batching
------------------------ */
-
-/**
- * Wrap a function returning a Supabase response `{ data, error, status }` with retry/backoff for transient failures.
- * Caller supplies a function that performs the supabase call and returns that response.
- */
-async function supabaseWithRetry(fn, { retries = 4, initialDelay = 600, factor = 2 } = {}) {
-  let attempt = 0;
-  let delay = initialDelay;
-
-  while (attempt <= retries) {
-    try {
-      const res = await fn();
-      // PostgREST errors come back in `error` property
-      if (res && res.error) {
-        const err = res.error;
-        // treat 503 / network-type errors as transient
-        const status = err?.status ?? res.status;
-        const transient = status === 503 || status === 502 || status === 504 || /timeout|temporar/i.test(err?.message ?? '');
-        if (!transient) {
-          // non-transient, throw for caller to handle
-          throw err;
-        }
-        // else fallthrough to retry
-      } else {
-        // success
-        return res;
-      }
-    } catch (err) {
-      // Network level or thrown error - check if transient
-      const msg = String(err?.message ?? err).toLowerCase();
-      const transient = /503|502|504|ecof|temporar|timeout|network/i.test(msg);
-      if (!transient) throw err;
-      // else retry
-    }
-
-    // If we reached here, error considered transient — retry after delay
-    attempt += 1;
-    if (attempt > retries) break;
-    await new Promise((res) => setTimeout(res, delay));
-    delay *= factor;
-  }
-  // last attempt without wrapper to allow caller to get real error
-  return fn();
-}
-
-/**
- * Fetch rows via `.in()` but chunk large arrays to avoid very long URLs.
- * Returns aggregated array of rows (deduped by primary key)
- */
-async function fetchInBatches({ table = 'tickets', column, values = [], select = '*', batchSize = 100 }) {
-  if (!Array.isArray(values) || values.length === 0) return [];
-  const final = [];
-  const seenIds = new Set();
-  for (let i = 0; i < values.length; i += batchSize) {
-    const chunk = values.slice(i, i + batchSize);
-    const resp = await supabaseWithRetry(() => supabase.from(table).select(select).in(column, chunk).limit(1000));
-    const { data, error } = resp;
-    if (error) {
-      console.warn(`fetchInBatches chunk failed for ${table}.${column}`, error);
-      // continue; don't break entire operation
-      continue;
-    }
-    if (Array.isArray(data)) {
-      for (const r of data) {
-        const key = r.id ?? r.ticket_id ?? JSON.stringify(r);
-        if (!seenIds.has(key)) {
-          seenIds.add(key);
-          final.push(r);
-        }
-      }
-    }
-  }
-  return final;
-}
-
-/* -----------------------
    Component
 ----------------------- */
 export default function ConfirmExit() {
@@ -271,12 +193,12 @@ export default function ConfirmExit() {
         if (!user) return setCurrentUsername(null);
         // Prefer matching by id; fallback to email
         if (user.id) {
-          const resp = await supabaseWithRetry(() => supabase.from('users').select('username').eq('id', user.id).maybeSingle());
-          if (!resp.error && resp.data && resp.data.username) return setCurrentUsername(resp.data.username);
+          const { data: u, error } = await supabase.from('users').select('username').eq('id', user.id).maybeSingle();
+          if (!error && u && u.username) return setCurrentUsername(u.username);
         }
         if (user.email) {
-          const resp = await supabaseWithRetry(() => supabase.from('users').select('username').ilike('email', user.email).maybeSingle());
-          if (!resp.error && resp.data && resp.data.username) return setCurrentUsername(resp.data.username);
+          const { data: u, error } = await supabase.from('users').select('username').ilike('email', user.email).maybeSingle();
+          if (!error && u && u.username) return setCurrentUsername(u.username);
         }
         // fallback
         setCurrentUsername(user.email || user.id || null);
@@ -353,15 +275,14 @@ export default function ConfirmExit() {
   // ---------------------
   const fetchTickets = useCallback(async () => {
     try {
-      const resp = await supabaseWithRetry(() =>
-        supabase
-          .from('tickets')
-          .select('id, ticket_id, ticket_no, gnsw_truck_no, container_no, date, sad_no, status, gross, tare, net, file_url, file_name, submitted_at, driver')
-          .eq('status', 'Pending')
-          .order('submitted_at', { ascending: false })
-      );
-      if (resp.error) throw resp.error;
-      setAllTickets(resp.data || []);
+      const { data, error } = await supabase
+        .from('tickets')
+        .select('id, ticket_id, ticket_no, gnsw_truck_no, container_no, date, sad_no, status, gross, tare, net, file_url, file_name, submitted_at, driver')
+        .eq('status', 'Pending')
+        .order('submitted_at', { ascending: false });
+
+      if (error) throw error;
+      setAllTickets(data || []);
     } catch (err) {
       toast({ title: 'Error fetching tickets', description: err?.message || 'Could not fetch tickets', status: 'error', duration: 5000, isClosable: true });
     }
@@ -378,30 +299,29 @@ export default function ConfirmExit() {
    */
   const fetchConfirmedExits = useCallback(async () => {
     try {
-      const resp = await supabaseWithRetry(() =>
-        supabase
-          .from('outgate')
-          .select(`
-            id,
-            ticket_id,
-            ticket_no,
-            vehicle_number,
-            container_id,
-            sad_no,
-            gross,
-            tare,
-            net,
-            created_at,
-            file_url,
-            file_name,
-            driver,
-            created_by,
-            tickets ( id, ticket_id, ticket_no, date, submitted_at, gnsw_truck_no, status )
-          `)
-          .order('created_at', { ascending: false })
-      );
-      if (resp.error) throw resp.error;
-      const rows = resp.data || [];
+      const { data, error } = await supabase
+        .from('outgate')
+        .select(`
+          id,
+          ticket_id,
+          ticket_no,
+          vehicle_number,
+          container_id,
+          sad_no,
+          gross,
+          tare,
+          net,
+          created_at,
+          file_url,
+          file_name,
+          driver,
+          created_by,
+          tickets ( id, ticket_id, ticket_no, date, submitted_at, gnsw_truck_no, status )
+        `)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      const rows = data || [];
 
       // Basic mapping: take ticket.submitted_at from joined tickets if present (per request)
       const mapped = rows.map((r) => {
@@ -418,43 +338,25 @@ export default function ConfirmExit() {
       const needByTicketId = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_id).map((r) => r.ticket_id)));
       const needByTicketNo = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_no).map((r) => r.ticket_no)));
 
-      // Query tickets for those ids/nos (batch, to avoid extremely long URLs)
+      // Query tickets for those ids/nos (batch)
       const ticketMapByTicketId = {};
       const ticketMapByTicketNo = {};
-
       if (needByTicketId.length) {
-        try {
-          const tById = await fetchInBatches({
-            table: 'tickets',
-            column: 'ticket_id',
-            values: needByTicketId,
-            select: 'id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status',
-            batchSize: 120,
-          });
+        const { data: tById, error: tIdErr } = await supabase.from('tickets').select('id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status').in('ticket_id', needByTicketId);
+        if (!tIdErr && Array.isArray(tById)) {
           for (const t of tById) {
             if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
             if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = ticketMapByTicketNo[t.ticket_no] || t;
           }
-        } catch (e) {
-          console.warn('fetch confirmed: byTicketId failed', e);
         }
       }
-
       if (needByTicketNo.length) {
-        try {
-          const tByNo = await fetchInBatches({
-            table: 'tickets',
-            column: 'ticket_no',
-            values: needByTicketNo,
-            select: 'id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status',
-            batchSize: 120,
-          });
+        const { data: tByNo, error: tNoErr } = await supabase.from('tickets').select('id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status').in('ticket_no', needByTicketNo);
+        if (!tNoErr && Array.isArray(tByNo)) {
           for (const t of tByNo) {
             if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
             if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = t;
           }
-        } catch (e) {
-          console.warn('fetch confirmed: byTicketNo failed', e);
         }
       }
 
@@ -503,7 +405,7 @@ export default function ConfirmExit() {
         for (const upd of outgateUpdates) {
           try {
             // only set if still null to avoid race conditions
-            await supabaseWithRetry(() => supabase.from('outgate').update({ ticket_id: upd.ticket_id }).eq('id', upd.id).is('ticket_id', null));
+            await supabase.from('outgate').update({ ticket_id: upd.ticket_id }).eq('id', upd.id).is('ticket_id', null);
           } catch (e) {
             console.warn('Failed to persist outgate.ticket_id for outgate id', upd.id, e);
           }
@@ -514,11 +416,11 @@ export default function ConfirmExit() {
       try {
         if (ticketDbIdsToMarkExited.size) {
           const arr = Array.from(ticketDbIdsToMarkExited);
-          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).in('id', arr));
+          await supabase.from('tickets').update({ status: 'Exited' }).in('id', arr);
         }
         if (ticketTicketIdsToMarkExited.size) {
           const arr2 = Array.from(ticketTicketIdsToMarkExited);
-          await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', arr2));
+          await supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', arr2);
         }
       } catch (e) {
         console.warn('Failed to mark some tickets Exited during fetchConfirmedExits', e);
@@ -540,10 +442,10 @@ export default function ConfirmExit() {
       const creatorIds = Array.from(new Set(finalConfirmed.map((r) => r.created_by).filter(Boolean)));
       if (creatorIds.length) {
         try {
-          const respUsers = await supabaseWithRetry(() => supabase.from('users').select('id,username,email').in('id', creatorIds));
-          if (!respUsers.error && respUsers.data) {
+          const { data: users, error: uErr } = await supabase.from('users').select('id,username,email').in('id', creatorIds);
+          if (!uErr && users) {
             const m = {};
-            respUsers.data.forEach(u => { m[u.id] = u; });
+            users.forEach(u => { m[u.id] = u; });
             setUsersMap((prev) => ({ ...prev, ...m }));
           }
         } catch (e) {
@@ -557,9 +459,9 @@ export default function ConfirmExit() {
 
   const fetchTotalTickets = useCallback(async () => {
     try {
-      const respAll = await supabaseWithRetry(() => supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' }));
+      const respAll = await supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' });
       const total = respAll?.count ?? null;
-      const respExited = await supabaseWithRetry(() => supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' }).eq('status', 'Exited'));
+      const respExited = await supabase.from('tickets').select('ticket_id', { head: true, count: 'exact' }).eq('status', 'Exited');
       const exited = respExited?.count ?? 0;
       setTotalTickets(total);
       setExitedCount(exited);
@@ -575,7 +477,7 @@ export default function ConfirmExit() {
     Promise.all([fetchTickets(), fetchConfirmedExits(), fetchTotalTickets()]).finally(() => setLoading(false));
   }, [fetchTickets, fetchConfirmedExits, fetchTotalTickets]);
 
-  // Realtime subscriptions (kept but read operations are now resilient)
+  // Realtime subscriptions
   useEffect(() => {
     let ticketSub = null;
     let outgateSub = null;
@@ -782,7 +684,7 @@ export default function ConfirmExit() {
             resolved.driver = parsed;
             if (resolved.id) {
               try {
-                await supabaseFromWithRetry('outgate').update({ driver: parsed }).eq('id', resolved.id);
+                await supabase.from('outgate').update({ driver: parsed }).eq('id', resolved.id);
               } catch (e) {
                 console.warn('Could not update outgate driver field', e);
               }
@@ -799,18 +701,6 @@ export default function ConfirmExit() {
       onOpen();
     }
   };
-
-  // helper wrapper for insert/update with retry
-  async function supabaseFromWithRetry(table) {
-    // Returns an object with similar API as supabase.from(table) but each call is wrapped with supabaseWithRetry
-    // For convenience we return a simple wrapper object using Proxy-like functions
-    return {
-      insert: (payload) => supabaseWithRetry(() => supabase.from(table).insert(payload)),
-      update: (payload) => ({ eq: (col, val) => supabaseWithRetry(() => supabase.from(table).update(payload).eq(col, val)) }),
-      // Provide simple helpers to used patterns above; callers must await returned promise and then call .then on it accordingly
-      // Note: used only in limited places; for full API you can call supabase directly with supabaseWithRetry wrapper as done elsewhere
-    };
-  }
 
   const handleConfirmExit = async () => {
     if (!selectedTicket) return;
@@ -849,10 +739,10 @@ export default function ConfirmExit() {
         if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
         let existing = null;
         if (orParts.length) {
-          // use `.or()` but avoid constructing insane query strings
-          const resp = await supabaseWithRetry(() => supabase.from('outgate').select('id,created_at').or(orParts.join(',')));
-          if (resp.error) console.warn('check existing outgate error', resp.error);
-          existing = resp.data;
+          const q = supabase.from('outgate').select('id,created_at').or(orParts.join(','));
+          const { data: exData, error: exErr } = await q.limit(1);
+          if (exErr) console.warn('check existing outgate error', exErr);
+          existing = exData;
         }
         if (existing && existing.length) {
           toast({
@@ -866,11 +756,11 @@ export default function ConfirmExit() {
           // Ensure tickets row is marked Exited using best available identifier (id -> ticket_id -> ticket_no)
           try {
             if (selectedTicket.id) {
-              await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id));
+              await supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id);
             } else if (selectedTicket.ticket_id) {
-              await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id));
+              await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
             } else if (selectedTicket.ticket_no) {
-              await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no));
+              await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no);
             }
 
             // Immediately reflect change in UI so row disappears
@@ -895,7 +785,7 @@ export default function ConfirmExit() {
       }
 
       // Insert outgate
-      const { error: insertErr } = await supabaseWithRetry(() => supabase.from('outgate').insert([payload]));
+      const { error: insertErr } = await supabase.from('outgate').insert([payload]);
       if (insertErr) {
         toast({ title: 'Error confirming exit', description: insertErr.message, status: 'error', duration: 5000, isClosable: true });
         return;
@@ -904,13 +794,13 @@ export default function ConfirmExit() {
       // Update tickets.status -> 'Exited' robustly (use id when present, else ticket_id, else ticket_no)
       try {
         if (selectedTicket.id) {
-          const { error: updErr } = await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id));
+          const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('id', selectedTicket.id);
           if (updErr) console.warn('Failed to update tickets by id', updErr);
         } else if (selectedTicket.ticket_id) {
-          const { error: updErr } = await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id));
+          const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', selectedTicket.ticket_id);
           if (updErr) console.warn('Failed to update tickets by ticket_id', updErr);
         } else if (selectedTicket.ticket_no) {
-          const { error: updErr } = await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no));
+          const { error: updErr } = await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', selectedTicket.ticket_no);
           if (updErr) console.warn('Failed to update tickets by ticket_no', updErr);
         } else {
           console.warn('No id/ticket_id/ticket_no present to update tickets.status', selectedTicket);
@@ -953,11 +843,11 @@ export default function ConfirmExit() {
           // first try to fetch by ticket_id, if not found try by id
           let ticketRow = null;
           if (tId) {
-            const resp = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle());
-            if (!resp.error) ticketRow = resp.data;
+            const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', tId).limit(1).maybeSingle();
+            ticketRow = tk;
             if (!ticketRow) {
-              const resp2 = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('id', tId).limit(1).maybeSingle());
-              if (!resp2.error) ticketRow = resp2.data;
+              const { data: byId } = await supabase.from('tickets').select('*').eq('id', tId).limit(1).maybeSingle();
+              ticketRow = byId || tk;
             }
           }
           if (!ticketRow) continue;
@@ -985,20 +875,20 @@ export default function ConfirmExit() {
           if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
           let exists = null;
           if (orParts.length) {
-            const resp = await supabaseWithRetry(() => supabase.from('outgate').select('id').or(orParts.join(',')).limit(1));
-            exists = resp.data;
+            const { data: exData } = await supabase.from('outgate').select('id').or(orParts.join(',')).limit(1);
+            exists = exData;
           }
           if (!(exists && exists.length)) {
-            await supabaseWithRetry(() => supabase.from('outgate').insert([payload]));
+            await supabase.from('outgate').insert([payload]);
           }
 
           // Update ticket row status: prefer id if available in ticketRow
           if (ticketRow.id) {
-            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticketRow.id));
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticketRow.id);
           } else if (ticketRow.ticket_id) {
-            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticketRow.ticket_id));
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticketRow.ticket_id);
           } else if (ticketRow.ticket_no) {
-            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticketRow.ticket_no));
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticketRow.ticket_no);
           }
 
           // Remove from UI immediately
@@ -1177,11 +1067,11 @@ export default function ConfirmExit() {
       for (const id of ids) {
         try {
           // try by ticket_id, fallback by id
-          const resp = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('ticket_id', id).limit(1).maybeSingle());
-          let ticketRow = resp?.data;
+          const { data: tk } = await supabase.from('tickets').select('*').eq('ticket_id', id).limit(1).maybeSingle();
+          let ticketRow = tk;
           if (!ticketRow) {
-            const resp2 = await supabaseWithRetry(() => supabase.from('tickets').select('*').eq('id', id).limit(1).maybeSingle());
-            ticketRow = resp2?.data || ticketRow;
+            const { data: byId } = await supabase.from('tickets').select('*').eq('id', id).limit(1).maybeSingle();
+            ticketRow = byId || tk;
           }
           if (!ticketRow) continue;
           const { gross, tare, net } = computeWeights(ticketRow);
@@ -1207,21 +1097,21 @@ export default function ConfirmExit() {
           if (payload.ticket_id) orParts.push(`ticket_id.eq.${payload.ticket_id}`);
           if (payload.ticket_no) orParts.push(`ticket_no.eq.${payload.ticket_no}`);
           if (orParts.length) {
-            const respEx = await supabaseWithRetry(() => supabase.from('outgate').select('id').or(orParts.join(',')).limit(1));
-            if (!(respEx.data && respEx.data.length)) {
-              await supabaseWithRetry(() => supabase.from('outgate').insert([payload]));
+            const { data: exData } = await supabase.from('outgate').select('id').or(orParts.join(',')).limit(1);
+            if (!(exData && exData.length)) {
+              await supabase.from('outgate').insert([payload]);
             }
           } else {
-            await supabaseWithRetry(() => supabase.from('outgate').insert([payload]));
+            await supabase.from('outgate').insert([payload]);
           }
 
           // update tickets.status
           if (ticketRow.id) {
-            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticketRow.id));
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('id', ticketRow.id);
           } else if (ticketRow.ticket_id) {
-            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticketRow.ticket_id));
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_id', ticketRow.ticket_id);
           } else if (ticketRow.ticket_no) {
-            await supabaseWithRetry(() => supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticketRow.ticket_no));
+            await supabase.from('tickets').update({ status: 'Exited' }).eq('ticket_no', ticketRow.ticket_no);
           }
 
           // remove from UI immediately
@@ -1814,8 +1704,8 @@ export default function ConfirmExit() {
                           if (!by) return toast({ title: 'No creator info', description: 'This record has no created_by', status: 'info' });
                           try {
                             if (!usersMap[by]) {
-                              const resp = await supabaseWithRetry(() => supabase.from('users').select('id,username,email').eq('id', by).maybeSingle());
-                              if (!resp.error && resp.data) setUsersMap((p) => ({ ...p, [resp.data.id]: resp.data }));
+                              const { data: u } = await supabase.from('users').select('id,username,email').eq('id', by).maybeSingle();
+                              if (u) setUsersMap((p) => ({ ...p, [u.id]: u }));
                             }
                             const info = usersMap[by] ? (usersMap[by].username || usersMap[by].email) : 'Unknown';
                             toast({ title: `Exited by: ${info}`, status: 'info', duration: 3500 });
