@@ -176,6 +176,43 @@ function isImageUrl(url) {
   return /\.(jpe?g|png|gif|bmp|webp|tiff?)$/.test(lower);
 }
 
+/**
+ * Supabase helper: fetch rows using .in() but chunk the IN values to avoid extremely long GET URLs.
+ * Returns concatenated array of rows (deduped by primary key if provided).
+ */
+async function fetchRecordsInChunks({
+  table,
+  column,
+  values = [],
+  select = '*',
+  chunkSize = 100,
+  dedupeKey = 'id',
+}) {
+  if (!values || !values.length) return [];
+  const out = [];
+  for (let i = 0; i < values.length; i += chunkSize) {
+    const chunk = values.slice(i, i + chunkSize);
+    try {
+      const { data, error } = await supabase.from(table).select(select).in(column, chunk);
+      if (error) {
+        console.warn(`Chunk fetch error for ${table}.${column}`, error);
+        continue;
+      }
+      if (Array.isArray(data)) out.push(...data);
+    } catch (e) {
+      console.warn('fetchRecordsInChunks exception', e);
+    }
+  }
+  if (!dedupeKey) return out;
+  // dedupe by dedupeKey
+  const map = new Map();
+  for (const r of out) {
+    const k = r[dedupeKey] ?? JSON.stringify(r);
+    if (!map.has(k)) map.set(k, r);
+  }
+  return Array.from(map.values());
+}
+
 /* -----------------------
    Component
 ----------------------- */
@@ -290,12 +327,7 @@ export default function ConfirmExit() {
 
   /**
    * fetchConfirmedExits: fetches outgate rows then attempts to enrich them with matching tickets
-   * - if outgate row has no linked tickets (no r.tickets or empty array) but has ticket_no, we'll try to find the matching tickets row by ticket_no or ticket_id
-   * - if we find a ticket, we merge ticket fields into the outgate row so the confirmed table shows them
-   * - if we find a ticket_id for an outgate row that lacks it, we persist it back to outgate (so joins work later)
-   * - we also mark the matching ticket status -> 'Exited' when necessary (so pending list doesn't show it)
-   *
-   * IMPORTANT: weighed_at is always derived from tickets.submitted_at (if a linked ticket exists)
+   * - uses chunked queries for any .in(...) usage to avoid long GET URLs
    */
   const fetchConfirmedExits = useCallback(async () => {
     try {
@@ -338,25 +370,37 @@ export default function ConfirmExit() {
       const needByTicketId = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_id).map((r) => r.ticket_id)));
       const needByTicketNo = Array.from(new Set(mapped.filter((r) => (!r._joined_ticket) && r.ticket_no).map((r) => r.ticket_no)));
 
-      // Query tickets for those ids/nos (batch)
+      // Query tickets for those ids/nos using chunked helper
       const ticketMapByTicketId = {};
       const ticketMapByTicketNo = {};
+
       if (needByTicketId.length) {
-        const { data: tById, error: tIdErr } = await supabase.from('tickets').select('id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status').in('ticket_id', needByTicketId);
-        if (!tIdErr && Array.isArray(tById)) {
-          for (const t of tById) {
-            if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
-            if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = ticketMapByTicketNo[t.ticket_no] || t;
-          }
+        const tById = await fetchRecordsInChunks({
+          table: 'tickets',
+          column: 'ticket_id',
+          values: needByTicketId,
+          select: 'id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status',
+          chunkSize: 120,
+          dedupeKey: 'ticket_id',
+        });
+        for (const t of tById) {
+          if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
+          if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = ticketMapByTicketNo[t.ticket_no] || t;
         }
       }
+
       if (needByTicketNo.length) {
-        const { data: tByNo, error: tNoErr } = await supabase.from('tickets').select('id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status').in('ticket_no', needByTicketNo);
-        if (!tNoErr && Array.isArray(tByNo)) {
-          for (const t of tByNo) {
-            if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
-            if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = t;
-          }
+        const tByNo = await fetchRecordsInChunks({
+          table: 'tickets',
+          column: 'ticket_no',
+          values: needByTicketNo,
+          select: 'id,ticket_id,ticket_no,gnsw_truck_no,date,submitted_at,status',
+          chunkSize: 120,
+          dedupeKey: 'ticket_no',
+        });
+        for (const t of tByNo) {
+          if (t.ticket_id) ticketMapByTicketId[t.ticket_id] = t;
+          if (t.ticket_no) ticketMapByTicketNo[t.ticket_no] = t;
         }
       }
 
@@ -416,11 +460,18 @@ export default function ConfirmExit() {
       try {
         if (ticketDbIdsToMarkExited.size) {
           const arr = Array.from(ticketDbIdsToMarkExited);
-          await supabase.from('tickets').update({ status: 'Exited' }).in('id', arr);
+          // chunk update to be safe (some drivers may have large arrays)
+          for (let i = 0; i < arr.length; i += 100) {
+            const seg = arr.slice(i, i + 100);
+            await supabase.from('tickets').update({ status: 'Exited' }).in('id', seg);
+          }
         }
         if (ticketTicketIdsToMarkExited.size) {
           const arr2 = Array.from(ticketTicketIdsToMarkExited);
-          await supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', arr2);
+          for (let i = 0; i < arr2.length; i += 100) {
+            const seg = arr2.slice(i, i + 100);
+            await supabase.from('tickets').update({ status: 'Exited' }).in('ticket_id', seg);
+          }
         }
       } catch (e) {
         console.warn('Failed to mark some tickets Exited during fetchConfirmedExits', e);
@@ -433,19 +484,28 @@ export default function ConfirmExit() {
         if (!dedupeMap.has(key)) dedupeMap.set(key, r);
       }
       const deduped = Array.from(dedupeMap.values());
+
+      // also keep rows that have no ticket_id but might not be in dedupeMap keying (this is defensive)
       const noTicketIdRows = finalArr.filter((r) => !r.ticket_id && !dedupeMap.has(r.ticket_id));
       const finalConfirmed = [...deduped, ...noTicketIdRows];
 
       setConfirmedTickets(finalConfirmed);
 
-      // load users who created these outgates (if created_by present)
+      // load users who created these outgates (if created_by present) — chunked
       const creatorIds = Array.from(new Set(finalConfirmed.map((r) => r.created_by).filter(Boolean)));
       if (creatorIds.length) {
         try {
-          const { data: users, error: uErr } = await supabase.from('users').select('id,username,email').in('id', creatorIds);
-          if (!uErr && users) {
+          const users = await fetchRecordsInChunks({
+            table: 'users',
+            column: 'id',
+            values: creatorIds,
+            select: 'id,username,email',
+            chunkSize: 120,
+            dedupeKey: 'id',
+          });
+          if (Array.isArray(users)) {
             const m = {};
-            users.forEach(u => { m[u.id] = u; });
+            users.forEach(u => { if (u && u.id) m[u.id] = u; });
             setUsersMap((prev) => ({ ...prev, ...m }));
           }
         } catch (e) {
