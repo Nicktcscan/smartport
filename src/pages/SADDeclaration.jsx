@@ -88,6 +88,48 @@ async function runInBatches(items = [], batchSize = 20, fn) {
   return results;
 }
 
+/* -----------------------
+   Supabase helper: retries + backoff on transient (5xx/503) errors
+   Use by passing a function that returns a Supabase-style result object ( { data, error } )
+----------------------- */
+async function withRetries(fn, { attempts = 3, baseDelay = 450 } = {}) {
+  let i = 0;
+  while (i < attempts) {
+    try {
+      const res = await fn();
+      // Supabase returns { data, error } objects; also some calls may throw
+      if (res && typeof res === 'object' && 'error' in res && res.error) {
+        const err = res.error;
+        const status = err?.status ?? err?.statusCode ?? null;
+        const isTransient = status === 502 || status === 503 || status === 504 || /503|504|502/.test(String(err?.message || ''));
+        if (isTransient && i < attempts - 1) {
+          const delay = baseDelay * Math.pow(2, i);
+          // tiny jitter
+          await new Promise((r) => setTimeout(r, delay + Math.round(Math.random() * 100)));
+          i += 1;
+          continue;
+        }
+        // non-transient or exhausted -> return res so caller can handle error
+        return res;
+      }
+      // success case (no error field or error is null)
+      return res;
+    } catch (err) {
+      const isTransient = /503|504|502/.test(String(err?.message || ''));
+      if (isTransient && i < attempts - 1) {
+        const delay = baseDelay * Math.pow(2, i);
+        await new Promise((r) => setTimeout(r, delay + Math.round(Math.random() * 100)));
+        i += 1;
+        continue;
+      }
+      // if non-transient or exhausted, rethrow
+      throw err;
+    }
+  }
+  // fallback - shouldn't reach
+  return fn();
+}
+
 export default function SADDeclaration() {
   const toast = useToast();
 
@@ -162,6 +204,9 @@ export default function SADDeclaration() {
   // realtime
   const subRef = useRef(null);
   const ticketsSubRef = useRef(null);
+  const refreshTimerRef = useRef(null);
+  const isMountedRef = useRef(true);
+  useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
 
   // orb CTA
   const { isOpen: orbOpen, onOpen: openOrb, onClose: closeOrb } = useDisclosure();
@@ -169,6 +214,10 @@ export default function SADDeclaration() {
   // map of created_by -> username for showing who created SADs
   const createdByMapRef = useRef({});
   const createdByMap = createdByMapRef.current;
+
+  // admin detection
+  const [currentUser, setCurrentUser] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   // file input ref + drag/drop helpers for edit modal
   const editFileInputRef = useRef(null);
@@ -181,6 +230,54 @@ export default function SADDeclaration() {
   };
   const handleEditDragOver = (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; };
 
+  // detect current user and admin status on mount
+  useEffect(() => {
+    const detect = async () => {
+      try {
+        let user = null;
+        // try new getUser
+        if (supabase.auth && supabase.auth.getUser) {
+          const res = await supabase.auth.getUser();
+          user = res?.data?.user ?? null;
+        } else if (supabase.auth && supabase.auth.user) {
+          user = supabase.auth.user();
+        }
+
+        if (!user) {
+          setCurrentUser(null);
+          setIsAdmin(false);
+          return;
+        }
+        setCurrentUser(user);
+
+        // quick check in metadata
+        const meta = user.user_metadata || {};
+        if (meta.role === 'admin' || meta.is_admin === true) {
+          setIsAdmin(true);
+          return;
+        }
+
+        // fallback: query users table for role/is_admin columns
+        try {
+          const { data } = await withRetries(() => supabase.from('users').select('id, role, is_admin').eq('id', user.id).maybeSingle());
+          if (data && (data.role === 'admin' || data.is_admin === true)) {
+            setIsAdmin(true);
+          } else {
+            setIsAdmin(false);
+          }
+        } catch (e) {
+          // if anything fails, default to non-admin
+          setIsAdmin(false);
+        }
+      } catch (err) {
+        console.warn('admin detect err', err);
+        setIsAdmin(false);
+      }
+    };
+    detect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ensure created_at sorting keeps newest first if sortBy is created_at
   useEffect(() => {
     if (sortBy === 'created_at' && sortDir !== 'asc') {
@@ -189,8 +286,18 @@ export default function SADDeclaration() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortBy]);
 
-  // ----- fetchSADs -----
+  // small helper to schedule a (debounced) refresh from realtime events so we don't spam
+  const scheduleFetchSADs = (delay = 700) => {
+    clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      fetchSADs().catch(() => {});
+    }, delay);
+  };
+
+  // ----- fetchSADs (hardened) -----
   const fetchSADs = async (filter = null) => {
+    // ensure only one in-flight fetchSADs at a time to avoid request storms
+    if (!isMountedRef.current) return;
     setLoading(true);
     try {
       // when talking to DB, regime values are the codes (IM4/EX1/IM7)
@@ -200,7 +307,8 @@ export default function SADDeclaration() {
         if (filter.sad_no) q = q.eq('sad_no', filter.sad_no);
         if (filter.regime) q = q.eq('regime', filter.regime);
       }
-      const { data, error } = await q;
+
+      const { data, error } = await withRetries(() => q);
       if (error) throw error;
 
       const normalized = (data || []).map((r) => {
@@ -217,19 +325,18 @@ export default function SADDeclaration() {
         };
       });
 
-      // get counts per sad
+      // get counts per sad - but do this in batches with retries to avoid many concurrent head calls
       const sadNos = Array.from(new Set(normalized.map((s) => (s.sad_no ? String(s.sad_no).trim() : null)).filter(Boolean)));
       if (sadNos.length) {
         const countResults = await runInBatches(sadNos, 25, async (sadKey) => {
           try {
-            const { error: cErr, count } = await supabase
-              .from('tickets')
-              .select('id', { head: true, count: 'exact' })
-              .eq('sad_no', sadKey);
-            if (cErr) {
-              console.warn('count query failed for', sadKey, cErr);
-              return { sadKey, count: 0 };
-            }
+            const res = await withRetries(() =>
+              supabase
+                .from('tickets')
+                .select('id', { head: true, count: 'exact' })
+                .eq('sad_no', sadKey)
+            );
+            const count = res?.count ?? 0;
             return { sadKey, count: Number(count || 0) };
           } catch (e) {
             console.warn('count exception for', sadKey, e);
@@ -257,7 +364,7 @@ export default function SADDeclaration() {
         const unresolved = creatorIds.filter((id) => !createdByMap[id]);
         if (unresolved.length) {
           try {
-            const { data: usersData } = await supabase.from('users').select('id, username, email').in('id', unresolved);
+            const { data: usersData } = await withRetries(() => supabase.from('users').select('id, username, email').in('id', unresolved));
             if (usersData && usersData.length) {
               for (const u of usersData) {
                 createdByMap[u.id] = u.username || u.email || 'Unknown';
@@ -275,16 +382,19 @@ export default function SADDeclaration() {
         return { ...s, dischargeCompleted, created_by_username: createdByMap[s.created_by] || null };
       });
 
+      if (!isMountedRef.current) return;
       setSads(enhanced);
     } catch (err) {
       console.error('fetchSADs', err);
-      toast({ title: 'Failed to load SADs', description: err?.message || 'Unexpected', status: 'error' });
+      if (isMountedRef.current) {
+        toast({ title: 'Failed to load SADs', description: err?.message || 'Unexpected', status: 'error' });
+      }
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) setLoading(false);
     }
   };
 
-  // lifecycle: load + realtime
+  // lifecycle: load + realtime (with guarded subscriptions)
   useEffect(() => {
     try {
       const raw = localStorage.getItem('sad_activity');
@@ -294,32 +404,72 @@ export default function SADDeclaration() {
       }
     } catch (e) { /* ignore */ }
 
-    fetchSADs();
+    // initial load
+    fetchSADs().catch(() => {});
 
+    // realtime subscriptions (guarded)
     try {
-      if (supabase.channel) {
-        const ch = supabase.channel('public:sad_declarations')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, () => fetchSADs())
-          .subscribe();
-        subRef.current = ch;
-      } else {
-        const s = supabase.from('sad_declarations').on('*', () => { fetchSADs(); }).subscribe();
-        subRef.current = s;
-      }
-    } catch (e) { /* ignore */ }
+      // remove any existing channel references if present (avoid duplicate subscriptions)
+      const safeSubscribeSad = async () => {
+        try {
+          if (subRef.current && supabase.removeChannel) {
+            try { await supabase.removeChannel(subRef.current); } catch (e) { /* ignore */ }
+            subRef.current = null;
+          }
+        } catch (e) {}
 
-    try {
-      if (supabase.channel) {
-        const tch = supabase.channel('public:tickets')
-          .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => fetchSADs())
-          .subscribe();
-        ticketsSubRef.current = tch;
-      }
+        try {
+          if (supabase.channel) {
+            const ch = supabase.channel('public:sad_declarations')
+              .on('postgres_changes', { event: '*', schema: 'public', table: 'sad_declarations' }, () => {
+                // debounce refreshes to avoid storms
+                scheduleFetchSADs(600);
+              })
+              .subscribe();
+            subRef.current = ch;
+          } else {
+            const s = supabase.from('sad_declarations').on('*', () => { scheduleFetchSADs(600); }).subscribe();
+            subRef.current = s;
+          }
+        } catch (e) {
+          console.warn('failed to subscribe sad_declarations', e);
+        }
+      };
+
+      const safeSubscribeTickets = async () => {
+        try {
+          if (ticketsSubRef.current && supabase.removeChannel) {
+            try { await supabase.removeChannel(ticketsSubRef.current); } catch (e) { /* ignore */ }
+            ticketsSubRef.current = null;
+          }
+        } catch (e) {}
+
+        try {
+          if (supabase.channel) {
+            const tch = supabase.channel('public:tickets')
+              .on('postgres_changes', { event: '*', schema: 'public', table: 'tickets' }, () => {
+                // tickets changed -> refresh counts but debounce
+                scheduleFetchSADs(800);
+              })
+              .subscribe();
+            ticketsSubRef.current = tch;
+          } else {
+            const s = supabase.from('tickets').on('*', () => { scheduleFetchSADs(800); }).subscribe();
+            ticketsSubRef.current = s;
+          }
+        } catch (e) {
+          console.warn('failed to subscribe tickets', e);
+        }
+      };
+
+      safeSubscribeSad();
+      safeSubscribeTickets();
     } catch (e) { /* ignore */ }
 
     return () => {
       try { if (subRef.current && supabase.removeChannel) supabase.removeChannel(subRef.current).catch(() => {}); } catch (e) {}
       try { if (ticketsSubRef.current && supabase.removeChannel) supabase.removeChannel(ticketsSubRef.current).catch(() => {}); } catch (e) {}
+      clearTimeout(refreshTimerRef.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -331,7 +481,7 @@ export default function SADDeclaration() {
   const pushActivity = async (text, meta = {}) => {
     const ev = { time: new Date().toISOString(), text, meta };
     setActivity(prev => [ev, ...prev].slice(0, 200));
-    try { await supabase.from('sad_activity').insert([{ text, meta }]); } catch (e) { /* ignore */ }
+    try { await withRetries(() => supabase.from('sad_activity').insert([{ text, meta }])); } catch (e) { /* ignore */ }
   };
 
   // open docs modal
@@ -339,30 +489,41 @@ export default function SADDeclaration() {
     setDocsModal({ open: true, docs: Array.isArray(sad.docs) ? sad.docs : [], sad_no: sad.sad_no });
   };
 
-  // upload docs
+  // upload docs (hardened with retries)
   const uploadDocs = async (sad_no, files = []) => {
     if (!files || files.length === 0) return [];
     const uploaded = [];
     for (const f of files) {
       const key = `sad-${sad_no}/${Date.now()}-${f.name.replace(/\s+/g, '_')}`;
-      const { data, error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(key, f, { cacheControl: '3600', upsert: false });
-      if (error) throw error;
-      const filePath = data?.path ?? data?.Key ?? key;
-      let url = null;
+      // attempt upload with retries (wrap as function returning { data, error })
       try {
-        const getPublic = await supabase.storage.from(SAD_DOCS_BUCKET).getPublicUrl(filePath);
-        const publicUrl = (getPublic?.data && (getPublic.data.publicUrl || getPublic.data.publicURL)) ?? getPublic?.publicURL ?? null;
-        if (publicUrl) url = publicUrl;
-        else {
-          const signedResp = await supabase.storage.from(SAD_DOCS_BUCKET).createSignedUrl(filePath, 60 * 60 * 24 * 7);
-          const signedUrl = (signedResp?.data && (signedResp.data.signedUrl || signedResp.data.signedURL)) ?? signedResp?.signedUrl ?? signedResp?.signedURL ?? null;
-          if (!signedUrl) throw new Error('Could not obtain public or signed URL for uploaded file.');
-          url = signedUrl;
-        }
-      } catch (uErr) { throw uErr; }
+        const uploadRes = await withRetries(() => supabase.storage.from(SAD_DOCS_BUCKET).upload(key, f, { cacheControl: '3600', upsert: false }));
+        if (uploadRes?.error) throw uploadRes.error;
+        const filePath = uploadRes?.data?.path ?? uploadRes?.data?.Key ?? key;
 
-      uploaded.push({ name: f.name, path: filePath, url, tags: [], parsed: null });
-      await pushActivity(`Uploaded doc ${f.name} for SAD ${sad_no}`, { sad_no, file: f.name });
+        let url = null;
+        try {
+          // prefer public URL, fallback to signed
+          const getPublic = await withRetries(() => supabase.storage.from(SAD_DOCS_BUCKET).getPublicUrl(filePath));
+          const publicUrl = (getPublic?.data && (getPublic.data.publicUrl || getPublic.data.publicURL)) ?? getPublic?.publicURL ?? null;
+          if (publicUrl) url = publicUrl;
+          else {
+            const signedResp = await withRetries(() => supabase.storage.from(SAD_DOCS_BUCKET).createSignedUrl(filePath, 60 * 60 * 24 * 7));
+            const signedUrl = (signedResp?.data && (signedResp.data.signedUrl || signedResp.data.signedURL)) ?? signedResp?.signedUrl ?? signedResp?.signedURL ?? null;
+            if (!signedUrl) throw new Error('Could not obtain public or signed URL for uploaded file.');
+            url = signedUrl;
+          }
+        } catch (uErr) {
+          throw uErr;
+        }
+
+        uploaded.push({ name: f.name, path: filePath, url, tags: [], parsed: null });
+        await pushActivity(`Uploaded doc ${f.name} for SAD ${sad_no}`, { sad_no, file: f.name });
+      } catch (e) {
+        console.error('uploadDocs failure for', f.name, e);
+        // don't abort entire upload; continue to next file but notify
+        toast({ title: `Upload failed: ${f.name}`, description: e?.message || 'Error uploading', status: 'warning' });
+      }
     }
     return uploaded;
   };
@@ -408,7 +569,7 @@ export default function SADDeclaration() {
 
     setLoading(true);
     try {
-      const currentUser = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
+      const currentUserRes = (supabase.auth && supabase.auth.getUser) ? (await supabase.auth.getUser()).data?.user : (supabase.auth && supabase.auth.user ? supabase.auth.user() : null);
       const docRecords = await uploadDocs(sadNoTrim, docs);
       const trimmedSad = sadNoTrim;
 
@@ -430,14 +591,14 @@ export default function SADDeclaration() {
         updated_at: new Date().toISOString(),
         completed_at: null, // ensure created with null completed_at
       };
-      if (currentUser && currentUser.id) payload.created_by = currentUser.id;
+      if (currentUserRes && currentUserRes.id) payload.created_by = currentUserRes.id;
 
-      const { error } = await supabase.from('sad_declarations').insert([payload]);
-      if (error) throw error;
+      const insertRes = await withRetries(() => supabase.from('sad_declarations').insert([payload]));
+      if (insertRes?.error) throw insertRes.error;
 
-      if (currentUser && currentUser.id) {
-        const uname = (currentUser.user_metadata && currentUser.user_metadata.full_name) || currentUser.email || '';
-        if (uname) createdByMapRef.current = { ...createdByMapRef.current, [currentUser.id]: uname };
+      if (currentUserRes && currentUserRes.id) {
+        const uname = (currentUserRes.user_metadata && currentUserRes.user_metadata.full_name) || currentUserRes.email || '';
+        if (uname) createdByMapRef.current = { ...createdByMapRef.current, [currentUserRes.id]: uname };
       }
 
       if (typeof window !== 'undefined' && window.confetti) {
@@ -466,11 +627,13 @@ export default function SADDeclaration() {
       const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
 
       // fetch latest SAD row to include completed_at
-      const { data: sadRow, error: sadErr } = await supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle();
-      if (sadErr) console.warn('could not fetch sad_row for openSadDetail', sadErr);
+      const sadRowRes = await withRetries(() => supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle());
+      if (sadRowRes?.error) console.warn('could not fetch sad_row for openSadDetail', sadRowRes.error);
+      const sadRow = sadRowRes?.data ?? null;
 
-      const { data, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (error) throw error;
+      const ticketsRes = await withRetries(() => supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false }));
+      if (ticketsRes?.error) throw ticketsRes.error;
+      const data = ticketsRes?.data ?? [];
       const computedTotal = (data || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
 
       const base = sadRow || sad || {};
@@ -501,17 +664,19 @@ export default function SADDeclaration() {
       const trimmed = sad.sad_no != null ? String(sad.sad_no).trim() : sad.sad_no;
 
       // fetch the latest SAD row
-      const { data: sadRow, error: sadErr } = await supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle();
-      if (sadErr) {
-        console.warn('openDetailsModal: could not fetch sad row', sadErr);
-      }
+      const sadRowRes = await withRetries(() => supabase.from('sad_declarations').select('*').eq('sad_no', trimmed).maybeSingle());
+      if (sadRowRes?.error) console.warn('openDetailsModal: could not fetch sad row', sadRowRes.error);
+      const sadRow = sadRowRes?.data ?? null;
 
-      const { data: tickets, error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (!error) {
+      const ticketsRes = await withRetries(() => supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false }));
+      if (ticketsRes?.error) {
+        setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
+      } else {
         let createdByUsername = sad.created_by_username || null;
         if (!createdByUsername && sadRow && sadRow.created_by) {
           try {
-            const { data: u } = await supabase.from('users').select('id, username, email').eq('id', sadRow.created_by).maybeSingle();
+            const uRes = await withRetries(() => supabase.from('users').select('id, username, email').eq('id', sadRow.created_by).maybeSingle());
+            const u = uRes?.data ?? null;
             if (u) {
               createdByMapRef.current = { ...createdByMapRef.current, [u.id]: u.username || u.email || null };
               createdByUsername = u.username || u.email || null;
@@ -519,9 +684,7 @@ export default function SADDeclaration() {
           } catch (e) { /* ignore */ }
         }
 
-        setDetailsData({ sad: sadRow || sad, tickets: tickets || [], created_by_username: createdByUsername, loading: false });
-      } else {
-        setDetailsData((d) => ({ ...d, tickets: [], loading: false }));
+        setDetailsData({ sad: sadRow || sad, tickets: ticketsRes?.data || [], created_by_username: createdByUsername, loading: false });
       }
     } catch (err) {
       console.error('openDetailsModal', err);
@@ -530,8 +693,19 @@ export default function SADDeclaration() {
     }
   };
 
-  // edit modal open
+  // edit modal open (guarded: only admin allowed to edit Completed SADs)
   const openEditModal = (sad) => {
+    // If SAD is Completed and current user is not admin -> prevent
+    if (sad.status === 'Completed' && !isAdmin) {
+      toast({
+        title: 'Edit locked',
+        description: 'Only admins can edit a SAD marked as Completed. Change status back to "In Progress" to allow editing.',
+        status: 'warning',
+        duration: 6000,
+      });
+      return;
+    }
+
     setEditModalData({
       original_sad_no: sad.sad_no,
       sad_no: sad.sad_no,
@@ -574,6 +748,13 @@ export default function SADDeclaration() {
   // save edit modal (handles renaming and regime/code changes) - ensure completed_at is set/cleared appropriately
   const saveEditModal = async () => {
     if (!editModalData || !editModalData.original_sad_no) return;
+
+    // extra guard: if this is locked (completed + non-admin) block server update as well
+    if (editModalData.status === 'Completed' && !isAdmin) {
+      toast({ title: 'Edit blocked', description: 'You are not permitted to save changes to a Completed SAD.', status: 'error' });
+      return;
+    }
+
     const originalSad = editModalData.original_sad_no;
     const newSad = String(editModalData.sad_no ?? '').trim();
     const before = (sadsRef.current || []).find(s => s.sad_no === originalSad) || {};
@@ -616,20 +797,20 @@ export default function SADDeclaration() {
       }
 
       if (newSad !== originalSad) {
-        const { data: conflict } = await supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle();
-        if (conflict) {
+        const conflictRes = await withRetries(() => supabase.from('sad_declarations').select('sad_no').eq('sad_no', newSad).maybeSingle());
+        if (conflictRes?.data) {
           throw new Error(`SAD number "${newSad}" already exists. Choose another.`);
         }
 
         // update child tables first: tickets, reports_generated
-        const { error: tErr } = await supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad);
+        const { error: tErr } = (await withRetries(() => supabase.from('tickets').update({ sad_no: newSad }).eq('sad_no', originalSad))) || {};
         if (tErr) console.warn('tickets update returned error', tErr);
 
-        const { error: rErr } = await supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad);
+        const { error: rErr } = (await withRetries(() => supabase.from('reports_generated').update({ sad_no: newSad }).eq('sad_no', originalSad))) || {};
         if (rErr) console.warn('reports_generated update returned error', rErr);
 
         // now update the parent SAD row — include docs field
-        const { error: parentErr } = await supabase.from('sad_declarations').update({
+        const parentRes = await withRetries(() => supabase.from('sad_declarations').update({
           sad_no: newSad,
           regime: regimeToSave ?? null,
           declared_weight: declaredParsed,
@@ -638,16 +819,16 @@ export default function SADDeclaration() {
           manual_update: true,
           completed_at: completedAtValue,
           docs: finalDocs,
-        }).eq('sad_no', originalSad);
-        if (parentErr) {
+        }).eq('sad_no', originalSad));
+        if (parentRes?.error) {
           // attempt rollback children updates to originalSad (best-effort)
-          try { await supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
-          try { await supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad); } catch (e) { /* ignore */ }
-          throw parentErr;
+          try { await withRetries(() => supabase.from('tickets').update({ sad_no: originalSad }).eq('sad_no', newSad)); } catch (e) { /* ignore */ }
+          try { await withRetries(() => supabase.from('reports_generated').update({ sad_no: originalSad }).eq('sad_no', newSad)); } catch (e) { /* ignore */ }
+          throw parentRes.error;
         }
       } else {
         // same sad_no -> simple update (include docs field)
-        const { error } = await supabase.from('sad_declarations').update({
+        const updRes = await withRetries(() => supabase.from('sad_declarations').update({
           regime: regimeToSave ?? null,
           declared_weight: declaredParsed,
           status: editModalData.status ?? null,
@@ -655,8 +836,8 @@ export default function SADDeclaration() {
           manual_update: true,
           completed_at: completedAtValue,
           docs: finalDocs,
-        }).eq('sad_no', originalSad);
-        if (error) throw error;
+        }).eq('sad_no', originalSad));
+        if (updRes?.error) throw updRes.error;
       }
 
       // log change
@@ -671,7 +852,7 @@ export default function SADDeclaration() {
           completed_at: editModalData.status === 'Completed' ? new Date().toISOString() : null,
           docs: finalDocs,
         };
-        await supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]);
+        await withRetries(() => supabase.from('sad_change_logs').insert([{ sad_no: newSad, changed_by: null, before: JSON.stringify(before), after: JSON.stringify(after), created_at: new Date().toISOString() }]));
       } catch (e) { /* ignore */ }
 
       await pushActivity(`Edited SAD ${originalSad} → ${newSad}`, { before, after: { sad_no: newSad, docs_count: (finalDocs || []).length } });
@@ -694,7 +875,7 @@ export default function SADDeclaration() {
         payload.completed_at = null;
       }
 
-      const { error } = await supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no);
+      const { error } = await withRetries(() => supabase.from('sad_declarations').update(payload).eq('sad_no', sad_no));
       if (error) throw error;
       toast({ title: 'Status updated', description: `${sad_no} status set to ${newStatus}`, status: 'success' });
       await pushActivity(`Status of ${sad_no} set to ${newStatus}`);
@@ -716,10 +897,12 @@ export default function SADDeclaration() {
   const recalcTotalForSad = async (sad_no) => {
     try {
       const trimmed = sad_no != null ? String(sad_no).trim() : sad_no;
-      const { data: tickets, error } = await supabase.from('tickets').select('net, weight').eq('sad_no', trimmed);
-      if (error) throw error;
+      const ticketsRes = await withRetries(() => supabase.from('tickets').select('net, weight').eq('sad_no', trimmed));
+      if (ticketsRes?.error) throw ticketsRes.error;
+      const tickets = ticketsRes?.data ?? [];
       const total = (tickets || []).reduce((s, r) => s + Number(r.net ?? r.weight ?? 0), 0);
-      await supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed);
+      const updRes = await withRetries(() => supabase.from('sad_declarations').update({ total_recorded_weight: total, updated_at: new Date().toISOString() }).eq('sad_no', trimmed));
+      if (updRes?.error) throw updRes.error;
       await pushActivity(`Recalculated total for ${trimmed}: ${total}`);
       fetchSADs();
       toast({ title: 'Recalculated', description: `Total recorded ${total.toLocaleString()}`, status: 'success' });
@@ -731,7 +914,7 @@ export default function SADDeclaration() {
 
   const archiveSadConfirmed = async (sad_no) => {
     try {
-      const { error } = await supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no);
+      const { error } = await withRetries(() => supabase.from('sad_declarations').update({ status: 'Archived', updated_at: new Date().toISOString() }).eq('sad_no', sad_no));
       if (error) throw error;
       toast({ title: 'Archived', description: `SAD ${sad_no} archived`, status: 'info' });
       await pushActivity(`Archived SAD ${sad_no}`);
@@ -758,8 +941,8 @@ export default function SADDeclaration() {
       // 1) Attempt to fetch the SAD row to get docs paths (best-effort)
       let sadRow = null;
       try {
-        const { data, error } = await supabase.from('sad_declarations').select('*').eq('sad_no', target).maybeSingle();
-        if (!error && data) sadRow = data;
+        const res = await withRetries(() => supabase.from('sad_declarations').select('*').eq('sad_no', target).maybeSingle());
+        if (!res?.error && res?.data) sadRow = res.data;
       } catch (e) {
         console.warn('could not fetch sad row before delete', e);
       }
@@ -770,7 +953,7 @@ export default function SADDeclaration() {
           const paths = sadRow.docs.map(d => d.path).filter(Boolean);
           if (paths.length) {
             // Supabase storage remove expects array of paths
-            const { error: rmErr } = await supabase.storage.from(SAD_DOCS_BUCKET).remove(paths);
+            const { error: rmErr } = await withRetries(() => supabase.storage.from(SAD_DOCS_BUCKET).remove(paths));
             if (rmErr) console.warn('could not remove some docs from storage', rmErr);
           }
         }
@@ -780,18 +963,18 @@ export default function SADDeclaration() {
 
       // 3) Delete child tickets and reports_generated (best-effort)
       try {
-        const { error: tErr } = await supabase.from('tickets').delete().eq('sad_no', target);
+        const { error: tErr } = await withRetries(() => supabase.from('tickets').delete().eq('sad_no', target));
         if (tErr) console.warn('could not delete tickets for sad', tErr);
       } catch (e) { console.warn('tickets delete error', e); }
 
       try {
-        const { error: rErr } = await supabase.from('reports_generated').delete().eq('sad_no', target);
+        const { error: rErr } = await withRetries(() => supabase.from('reports_generated').delete().eq('sad_no', target));
         if (rErr) console.warn('could not delete reports_generated for sad', rErr);
       } catch (e) { console.warn('reports_generated delete error', e); }
 
       // 4) Delete the sad_declarations row
-      const { error } = await supabase.from('sad_declarations').delete().eq('sad_no', target);
-      if (error) throw error;
+      const delRes = await withRetries(() => supabase.from('sad_declarations').delete().eq('sad_no', target));
+      if (delRes?.error) throw delRes.error;
 
       await pushActivity(`Deleted SAD ${target}`);
       toast({ title: 'Deleted', description: `SAD ${target} has been deleted`, status: 'success' });
@@ -888,8 +1071,8 @@ export default function SADDeclaration() {
   const generatePdfReport = async (s) => {
     try {
       const trimmed = s.sad_no != null ? String(s.sad_no).trim() : s.sad_no;
-      const { data: tickets = [], error } = await supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false });
-      if (error) console.warn('Could not fetch tickets for PDF', error);
+      const ticketsRes = await withRetries(() => supabase.from('tickets').select('*').eq('sad_no', trimmed).order('date', { ascending: false }));
+      const tickets = ticketsRes?.data ?? [];
       const declared = Number(s.declared_weight || 0);
       const recorded = Number(s.total_recorded_weight || 0);
       const regimeLabel = REGIME_LABEL_MAP[s.regime] ? `${REGIME_LABEL_MAP[s.regime]} (${s.regime})` : (s.regime || '—');
@@ -989,16 +1172,17 @@ export default function SADDeclaration() {
     setTxnModalLoading(true);
     setTxnModalOpen(true);
     try {
-      const { data: tickets = [], error } = await supabase
-        .from('tickets')
-        .select('ticket_no, net, weight, gnsw_truck_no, date')
-        .eq('sad_no', trimmed)
-        .order('date', { ascending: false })
-        .limit(1000);
+      const res = await withRetries(() =>
+        supabase
+          .from('tickets')
+          .select('ticket_no, net, weight, gnsw_truck_no, date')
+          .eq('sad_no', trimmed)
+          .order('date', { ascending: false })
+          .limit(1000)
+      );
 
-      if (error) {
-        throw error;
-      }
+      if (res?.error) throw res.error;
+      const tickets = res?.data ?? [];
 
       // classify manual vs uploaded
       const manual = (tickets || []).filter(t => /^M-/i.test(String(t.ticket_no || ''))).length;
@@ -1131,7 +1315,7 @@ export default function SADDeclaration() {
       ].join('\n');
       const filename = `backup/sad_declarations_backup_${new Date().toISOString().slice(0,10)}.csv`;
       const blob = new Blob([csv], { type: 'text/csv' });
-      const { error } = await supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true });
+      const { error } = await withRetries(() => supabase.storage.from(SAD_DOCS_BUCKET).upload(filename, blob, { upsert: true }));
       if (error) throw error;
       await pushActivity('Manual backup uploaded', { path: filename });
       toast({ title: 'Backup uploaded', description: `Saved as ${filename}`, status: 'success' });
@@ -1430,6 +1614,8 @@ export default function SADDeclaration() {
                   const readyToComplete = Number(s.total_recorded_weight || 0) >= Number(s.declared_weight || 0) && s.status !== 'Completed';
                   const regimeDisplay = REGIME_LABEL_MAP[s.regime] ? `${s.regime}` : (s.regime || '—'); // show code
 
+                  const editLocked = s.status === 'Completed' && !isAdmin;
+
                   return (
                     <RowMotion key={s.sad_no || Math.random()} {...MOTION_ROW} style={{ background: 'transparent' }}>
                       <Td data-label="SAD"><Text fontWeight="bold">{s.sad_no}</Text></Td>
@@ -1475,7 +1661,19 @@ export default function SADDeclaration() {
                             <MenuList>
                               <MenuItem icon={<FaEye />} onClick={() => openDetailsModal(s)}>View Details</MenuItem>
                               <MenuItem icon={<FaFileAlt />} onClick={() => openDocsModal(s)}>View Docs</MenuItem>
-                              <MenuItem icon={<FaEdit />} onClick={() => openEditModal(s)}>Edit</MenuItem>
+
+                              <Tooltip label={editLocked ? 'Only admins can edit completed SADs' : 'Edit SAD'} placement="left" closeOnClick={false}>
+                                <Box>
+                                  <MenuItem
+                                    icon={<FaEdit />}
+                                    onClick={() => openEditModal(s)}
+                                    isDisabled={editLocked}
+                                  >
+                                    Edit
+                                  </MenuItem>
+                                </Box>
+                              </Tooltip>
+
                               <MenuItem icon={<FaRedoAlt />} onClick={() => recalcTotalForSad(s.sad_no)}>Recalc Totals</MenuItem>
                               {readyToComplete && <MenuItem icon={<FaCheck />} onClick={() => requestMarkCompleted(s.sad_no)}>Mark as Completed</MenuItem>}
                               <MenuItem onClick={() => handleExplainDiscrepancy(s)}>Explain discrepancy</MenuItem>
@@ -1598,7 +1796,7 @@ export default function SADDeclaration() {
 
                     <Text mb={2}>Status: <strong>{detailsData.sad.status}</strong></Text>
                     <Text mb={2}>Created At: <strong>{detailsData.sad.created_at ? new Date(detailsData.sad.created_at).toLocaleString() : '—'}</strong></Text>
-                    <Text mb={2}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleDateString() : 'Not recorded'}</strong></Text>
+                    <Text mb={2}>Completed At: <strong>{detailsData.sad.completed_at ? new Date(detailsData.sad.completed_at).toLocaleString() : 'Not recorded'}</strong></Text>
                     <Text mb={4}>Created By: <strong>{detailsData.created_by_username || (detailsData.sad && detailsData.sad.created_by ? (createdByMap[detailsData.sad.created_by] || detailsData.sad.created_by) : '—')}</strong></Text>
 
                     <Heading size="sm" mb={2}>Tickets for this SAD</Heading>
@@ -1699,13 +1897,17 @@ export default function SADDeclaration() {
                 <Box>
                   <FormControl>
                     <FormLabel>SAD Number</FormLabel>
-                    <Input value={editModalData.sad_no} onChange={(e) => setEditModalData(d => ({ ...d, sad_no: e.target.value }))} />
+                    <Input
+                      value={editModalData.sad_no}
+                      onChange={(e) => setEditModalData(d => ({ ...d, sad_no: e.target.value }))}
+                      isDisabled={!!(editModalData.status === 'Completed' && !isAdmin)}
+                    />
                     <Text fontSize="xs" color="gray.500" mt={2}>Changing SAD number will update child tickets and generated reports (best-effort).</Text>
                   </FormControl>
 
                   <FormControl mt={3}>
                     <FormLabel>Regime</FormLabel>
-                    <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))}>
+                    <Select value={editModalData.regime} onChange={(e) => setEditModalData(d => ({ ...d, regime: e.target.value }))} isDisabled={!!(editModalData.status === 'Completed' && !isAdmin)}>
                       <option value="">Select regime</option>
                       {REGIME_OPTIONS.map(code => (
                         <option key={code} value={code}>
@@ -1717,12 +1919,12 @@ export default function SADDeclaration() {
 
                   <FormControl mt={3}>
                     <FormLabel>Declared Weight (kg)</FormLabel>
-                    <Input type="text" value={formatNumber(editModalData.declared_weight)} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: parseNumberString(e.target.value) }))} />
+                    <Input type="text" value={formatNumber(editModalData.declared_weight)} onChange={(e) => setEditModalData(d => ({ ...d, declared_weight: parseNumberString(e.target.value) }))} isDisabled={!!(editModalData.status === 'Completed' && !isAdmin)} />
                   </FormControl>
 
                   <FormControl mt={3}>
                     <FormLabel>Status</FormLabel>
-                    <Select value={editModalData.status} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))}>
+                    <Select value={editModalData.status} onChange={(e) => setEditModalData(d => ({ ...d, status: e.target.value }))} isDisabled={!!(editModalData.status === 'Completed' && !isAdmin)}>
                       {SAD_STATUS.map(st => <option key={st} value={st}>{st}</option>)}
                     </Select>
                   </FormControl>
@@ -1747,8 +1949,8 @@ export default function SADDeclaration() {
                               </HStack>
 
                               <HStack>
-                                <Button size="sm" onClick={() => { if (d.url) window.open(d.url, '_blank'); else toast({ title: 'No URL', status: 'info' }); }}>Open</Button>
-                                <Button size="sm" variant="ghost" onClick={() => removeDocFromEditModal(i)}>Remove</Button>
+                                <Button size="sm" onClick={() => { if (d.url) window.open(d.url, '_blank'); else toast({ title: 'No URL', status: 'info' }); }} isDisabled={!!(editModalData.status === 'Completed' && !isAdmin)}>Open</Button>
+                                <Button size="sm" variant="ghost" onClick={() => removeDocFromEditModal(i)} isDisabled={!!(editModalData.status === 'Completed' && !isAdmin)}>Remove</Button>
                               </HStack>
                             </HStack>
                           ))}
@@ -1767,7 +1969,13 @@ export default function SADDeclaration() {
                       className="edit-dropzone"
                       onDrop={handleEditDrop}
                       onDragOver={handleEditDragOver}
-                      onClick={() => editFileInputRef.current && editFileInputRef.current.click()}
+                      onClick={() => {
+                        if (editModalData.status === 'Completed' && !isAdmin) {
+                          toast({ title: 'Upload blocked', description: 'Only admins can add files to a Completed SAD.', status: 'warning' });
+                          return;
+                        }
+                        editFileInputRef.current && editFileInputRef.current.click();
+                      }}
                       role="button"
                     >
                       <Box>
@@ -1787,6 +1995,10 @@ export default function SADDeclaration() {
                         multiple
                         style={{ display: 'none' }}
                         onChange={(e) => {
+                          if (editModalData.status === 'Completed' && !isAdmin) {
+                            toast({ title: 'Upload blocked', description: 'Only admins can add files to a Completed SAD.', status: 'warning' });
+                            return;
+                          }
                           const arr = Array.from(e.target.files || []);
                           onEditFilesSelected(arr);
                         }}
@@ -1828,7 +2040,17 @@ export default function SADDeclaration() {
 
           <ModalFooter>
             <Button variant="ghost" onClick={closeEditModal} type="button">Cancel</Button>
-            <Button colorScheme="teal" ml={3} onClick={() => setConfirmSaveOpen(true)} type="button" isLoading={editUploading}>Save changes</Button>
+            <Button
+              colorScheme="teal"
+              ml={3}
+              onClick={() => setConfirmSaveOpen(true)}
+              type="button"
+              isLoading={editUploading}
+              isDisabled={!!(editModalData?.status === 'Completed' && !isAdmin)}
+              title={editModalData?.status === 'Completed' && !isAdmin ? 'Only admins can save changes to a Completed SAD' : 'Save changes'}
+            >
+              Save changes
+            </Button>
           </ModalFooter>
         </ModalContent>
       </Modal>
