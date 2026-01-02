@@ -1,4 +1,3 @@
-// src/pages/Login.jsx
 import { useState, useEffect } from "react";
 import {
   Box,
@@ -17,17 +16,12 @@ import {
   useColorModeValue,
   Text,
   Spinner,
-  Flex,
-  VisuallyHidden,
-  Icon,
-  Center,
 } from "@chakra-ui/react";
 import { useAuth } from "../context/AuthContext";
 import { ViewIcon, ViewOffIcon, SunIcon, MoonIcon } from "@chakra-ui/icons";
 import { motion } from "framer-motion";
 import logo from "../assets/logo.png";
 import { supabase } from "../supabaseClient";
-import { FaSnowflake, FaGift, FaStar, FaLeaf } from "react-icons/fa";
 
 const MotionBox = motion(Box);
 
@@ -72,7 +66,8 @@ function Login() {
     );
   };
 
-  const currentYear = new Date().getFullYear();
+    const currentYear = new Date().getFullYear();
+
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -80,13 +75,15 @@ function Login() {
 
     setIsSubmitting(true);
     try {
-      // Use Supabase client (signInWithPassword)
+      // Use Supabase client (signInWithPassword) — this avoids direct manual fetch to /auth/v1/token
       const { data, error } = await supabase.auth.signInWithPassword({
         email: String(form.email).trim(),
         password: form.password,
       });
 
+      // Handle Supabase SDK errors
       if (error) {
+        // If it looks like a network/CORS issue give a clearer actionable message
         if (isLikelyCorsOrNetworkError(error)) {
           toast({
             title: "Network / CORS error",
@@ -107,9 +104,11 @@ function Login() {
         return;
       }
 
+      // SDK sometimes returns null user for various flows (e.g., MFA or magic link).
       const user = data?.user ?? null;
 
       if (!user) {
+        // If no user but no error, show generic guidance
         toast({
           title: "Login incomplete",
           description:
@@ -121,6 +120,7 @@ function Login() {
         return;
       }
 
+      // success
       toast({
         title: "Login successful",
         status: "success",
@@ -128,24 +128,27 @@ function Login() {
         isClosable: true,
       });
 
+      // call auth context login handler
       try {
         login(user);
       } catch (ctxErr) {
         console.warn("Auth context login handler threw:", ctxErr);
       }
 
+      // remember email if requested
       if (rememberMe) {
         localStorage.setItem("rememberedEmail", String(form.email).trim());
       } else {
         localStorage.removeItem("rememberedEmail");
       }
     } catch (err) {
+      // Unexpected errors (fetch failures, CORS)
       console.error("Unexpected login error:", err);
       if (isLikelyCorsOrNetworkError(err)) {
         toast({
           title: "Network / CORS issue",
           description:
-            "Browser blocked the request (CORS). Whitelist your frontend origin in Supabase Dashboard → Project Settings → API → Allowed URLs, then retry.",
+            "Browser blocked the request (CORS). Whitelist your frontend origin in Supabase Dashboard → Project Settings → API → Allowed URLs, then retry. If you run a proxy/backend, ensure it forwards CORS headers.",
           status: "error",
           duration: 10000,
           isClosable: true,
@@ -164,101 +167,33 @@ function Login() {
     }
   };
 
-  // theme-safe colors (keeps feel across light/dark)
-  const bgGradient = useColorModeValue(
-    "linear(to-tr, #ffefef 0%, #fff9f0 40%, #f0fcf4 100%)",
-    "linear(to-tr, #07192b 0%, #0b2536 40%, #052225 100%)"
+  const bgColor = useColorModeValue(
+    "rgba(255, 255, 255, 0.85)",
+    "rgba(26, 32, 44, 0.85)"
   );
-  const cardBg = useColorModeValue("rgba(255,255,255,0.9)", "rgba(6,10,14,0.78)");
-  const border = useColorModeValue("rgba(200, 200, 200, 0.2)", "rgba(255,255,255,0.06)");
-  const accentColor = useColorModeValue("red.600", "red.400");
-  const accentAlt = useColorModeValue("green.600", "green.300");
-
-  // small decorative snow nodes (rendered absolutely)
-  const Snow = () => (
-    <>
-      {/* 8 decorative snowflakes */}
-      {Array.from({ length: 8 }).map((_, i) => (
-        <Box
-          key={`snow-${i}`}
-          className={`snowflake snow-${i}`}
-          as="span"
-          aria-hidden
-          position="absolute"
-          top={`${-10 - i * 3}%`}
-          left={`${(i * 13) % 100}%`}
-          transform={`translateY(-10vh)`}
-        >
-          <Icon as={FaSnowflake} boxSize={3 + (i % 3)} opacity={0.85} />
-        </Box>
-      ))}
-    </>
+  const boxShadow = useColorModeValue(
+    "0 8px 32px 0 rgba(31, 38, 135, 0.37)",
+    "0 8px 32px 0 rgba(0, 0, 0, 0.7)"
+  );
+  const borderColor = useColorModeValue(
+    "rgba(255, 255, 255, 0.3)",
+    "rgba(255, 255, 255, 0.1)"
   );
 
   return (
     <Box
-      bgGradient={bgGradient}
+      bgGradient={useColorModeValue(
+        "linear(to-tr, teal.100, blue.300)",
+        "linear(to-tr, blue.900, teal.800)"
+      )}
       minH="100vh"
       display="flex"
       justifyContent="center"
       alignItems="center"
       px={4}
       position="relative"
-      fontFamily="'Poppins', Inter, system-ui, -apple-system, 'Segoe UI', Roboto"
-      overflow="hidden"
+      fontFamily="'Poppins', sans-serif"
     >
-      {/* Snow / confetti decorative layer */}
-      <style>
-        {`
-        /* falling snow animation */
-        @keyframes fall {
-          0% { transform: translateY(-10vh) rotate(0deg); opacity: 0; }
-          10% { opacity: 1; }
-          100% { transform: translateY(110vh) rotate(360deg); opacity: 0.9; }
-        }
-        /* twinkle */
-        @keyframes twinkle {
-          0% { opacity: 0.6; transform: scale(0.98); }
-          50% { opacity: 1; transform: scale(1.05); }
-          100% { opacity: 0.6; transform: scale(0.98); }
-        }
-        .snowflake {
-          pointer-events: none;
-          will-change: transform, opacity;
-        }
-        /* distribute durations & delays for variety */
-        .snow-0 { animation: fall 12s linear infinite; left: 6%; animation-delay: 0s; opacity: 0.9; }
-        .snow-1 { animation: fall 14s linear infinite; left: 22%; animation-delay: 1s; opacity: 0.85; }
-        .snow-2 { animation: fall 10s linear infinite; left: 36%; animation-delay: 0.5s; opacity: 0.88; }
-        .snow-3 { animation: fall 13s linear infinite; left: 52%; animation-delay: 0.2s; opacity: 0.8; }
-        .snow-4 { animation: fall 11s linear infinite; left: 68%; animation-delay: 0.7s; opacity: 0.9; }
-        .snow-5 { animation: fall 15s linear infinite; left: 80%; animation-delay: 1.6s; opacity: 0.85; }
-        .snow-6 { animation: fall 13s linear infinite; left: 40%; animation-delay: 2s; opacity: 0.9; }
-        .snow-7 { animation: fall 16s linear infinite; left: 92%; animation-delay: 0.4s; opacity: 0.82; }
-
-        /* little star twinkle near logo */
-        .twinkle-star { animation: twinkle 2.6s ease-in-out infinite; transform-origin: center; }
-
-        /* subtle vignette */
-        .vignette::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          pointer-events: none;
-          background: radial-gradient(ellipse at center, rgba(0,0,0,0) 50%, rgba(0,0,0,0.06) 100%);
-          mix-blend-mode: multiply;
-        }
-
-        /* responsive adjustments */
-        @media (max-width: 480px) {
-          .logo-box { max-height: 92px; }
-        }
-        `}
-      </style>
-
-      <Snow />
-
-      {/* Theme toggle */}
       <IconButton
         aria-label="Toggle color mode"
         icon={colorMode === "light" ? <MoonIcon /> : <SunIcon />}
@@ -266,84 +201,78 @@ function Login() {
         top={6}
         right={6}
         size="md"
-        bg={useColorModeValue("whiteAlpha.900", "blackAlpha.600")}
-        _hover={{ bg: useColorModeValue("whiteAlpha.950", "blackAlpha.700") }}
+        bg={useColorModeValue("whiteAlpha.800", "blackAlpha.600")}
+        _hover={{ bg: useColorModeValue("whiteAlpha.900", "blackAlpha.800") }}
         onClick={toggleColorMode}
         transition="background-color 0.3s"
       />
 
       <MotionBox
-        bg={cardBg}
-        p={{ base: 6, md: 10 }}
+        bg={bgColor}
+        p={10}
         rounded="3xl"
-        boxShadow={useColorModeValue("0 20px 60px rgba(99,102,241,0.08)", "0 18px 50px rgba(2,6,23,0.6)")}
+        boxShadow={boxShadow}
         w="full"
         maxW="md"
         border="1px solid"
-        borderColor={border}
-        backdropFilter="blur(8px) saturate(120%)"
-        initial={{ opacity: 0, y: 20, scale: 0.98 }}
+        borderColor={borderColor}
+        backdropFilter="blur(10px)"
+        initial={{ opacity: 0, y: 30, scale: 0.95 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        transition={{ duration: 0.5, ease: "easeOut" }}
-        position="relative"
-        aria-labelledby="login-heading"
+        transition={{ duration: 0.6, ease: "easeOut" }}
       >
-        {/* Garland + small holly & star */}
-        <Flex justify="center" align="center" mb={4} gap={3} flexDirection="column">
-          <Box position="relative" display="inline-block" className="logo-box">
-            {/* small ribbon on logo (decorative) */}
-            <Box position="absolute" top="-10px" left="-14px" zIndex={5} transform="rotate(-18deg)">
-              <Icon as={FaStar} boxSize={6} color={accentAlt} className="twinkle-star" />
-            </Box>
+        <Box mb={4} display="flex" justifyContent="center" userSelect="none">
+          <Box
+            as="img"
+            src={logo}
+            alt="Nick TC-Scan (Gambia) Ltd Logo"
+            maxH={{ base: "100px", md: "140px" }}
+            objectFit="contain"
+            loading="lazy"
+            draggable={false}
+          />
+        </Box>
 
-            <Box
-              as="img"
-              src={logo}
-              alt="Nick TC-Scan (Gambia) Ltd Logo"
-              maxH={{ base: "78px", md: "110px" }}
-              objectFit="contain"
-              loading="lazy"
-              draggable={false}
-              style={{ filter: colorMode === "dark" ? "brightness(1.02) contrast(1.05)" : undefined }}
-            />
+        <Text
+          mb={6}
+          textAlign="center"
+          fontWeight="medium"
+          color={useColorModeValue("gray.700", "gray.300")}
+          fontSize="lg"
+          userSelect="none"
+        >
+          SmartPort Ai-Powered WBM System
+        </Text>
 
-            {/* small gift badge */}
-            <Box position="absolute" bottom="-8px" right="-8px" bg={accentColor} color="white" borderRadius="full" p={2} boxShadow="sm">
-              <Icon as={FaGift} boxSize={3.5} />
-            </Box>
-          </Box>
-
-          <Box textAlign="center">
-            <Text id="login-heading" fontSize={{ base: "lg", md: "xl" }} fontWeight="700" color={useColorModeValue("gray.700", "gray.100")}>
-              Merry Christmas — Welcome
-            </Text>
-            <Text fontSize="sm" color={useColorModeValue("gray.600", "gray.300")}>
-              Warm wishes from NICK TC-SCAN — safe journeys and peaceful holidays.
-            </Text>
-          </Box>
-        </Flex>
-
-        <VStack spacing={5} align="stretch" as="form" onSubmit={handleSubmit}>
+        <VStack spacing={6} align="stretch" as="form" onSubmit={handleSubmit}>
           <FormControl isInvalid={!!errors.email} isRequired>
-            <FormLabel fontWeight="semibold" color={useColorModeValue("gray.700", "gray.300")}>
+            <FormLabel
+              fontWeight="semibold"
+              color={useColorModeValue("gray.600", "gray.400")}
+            >
               Email
             </FormLabel>
             <Input
               name="email"
               value={form.email}
               onChange={handleChange}
-              placeholder="you@company.com"
+              placeholder="Enter email"
               size="lg"
-              focusBorderColor={accentAlt}
+              focusBorderColor="teal.400"
+              _placeholder={{ opacity: 0.7 }}
               autoComplete="email"
               type="email"
-              bg={useColorModeValue("white", "blackAlpha.300")}
             />
-            {errors.email && <FormErrorMessage>{errors.email}</FormErrorMessage>}
+            {errors.email && (
+              <FormErrorMessage>{errors.email}</FormErrorMessage>
+            )}
           </FormControl>
 
           <FormControl isInvalid={!!errors.password} isRequired>
-            <FormLabel fontWeight="semibold" color={useColorModeValue("gray.700", "gray.300")}>
+            <FormLabel
+              fontWeight="semibold"
+              color={useColorModeValue("gray.600", "gray.400")}
+            >
               Password
             </FormLabel>
             <InputGroup>
@@ -352,76 +281,71 @@ function Login() {
                 type={showPassword ? "text" : "password"}
                 value={form.password}
                 onChange={handleChange}
-                placeholder="••••••••"
+                placeholder="Enter password"
                 size="lg"
-                focusBorderColor={accentAlt}
+                focusBorderColor="teal.400"
+                _placeholder={{ opacity: 0.7 }}
                 autoComplete="current-password"
-                bg={useColorModeValue("white", "blackAlpha.300")}
               />
               <InputRightElement>
-                <IconButton
+                <Button
                   size="sm"
                   variant="ghost"
                   onClick={() => setShowPassword(!showPassword)}
                   aria-label={showPassword ? "Hide password" : "Show password"}
                   _hover={{ bg: "transparent" }}
                 >
-                  {showPassword ? <ViewOffIcon boxSize={5} color={accentAlt} /> : <ViewIcon boxSize={5} color="gray.400" />}
-                </IconButton>
+                  {showPassword ? (
+                    <ViewOffIcon boxSize={5} color="teal.500" />
+                  ) : (
+                    <ViewIcon boxSize={5} color="gray.400" />
+                  )}
+                </Button>
               </InputRightElement>
             </InputGroup>
-            {errors.password && <FormErrorMessage>{errors.password}</FormErrorMessage>}
+            {errors.password && (
+              <FormErrorMessage>{errors.password}</FormErrorMessage>
+            )}
           </FormControl>
 
-          <Flex align="center" justify="space-between">
-            <Checkbox
-              isChecked={rememberMe}
-              onChange={(e) => setRememberMe(e.target.checked)}
-              colorScheme="green"
-              fontWeight="medium"
-            >
-              Remember me
-            </Checkbox>
-
-            <Button variant="link" size="sm" onClick={() => toast({ title: "Forgot password", description: "Use your organization's password reset flow.", status: "info" })}>
-              Forgot password?
-            </Button>
-          </Flex>
+          <Checkbox
+            isChecked={rememberMe}
+            onChange={(e) => setRememberMe(e.target.checked)}
+            colorScheme="teal"
+            fontWeight="medium"
+          >
+            Remember Me
+          </Checkbox>
 
           <Button
-            colorScheme="red"
+            colorScheme="teal"
             size="lg"
             w="full"
             fontWeight="bold"
             boxShadow="lg"
-            _hover={{ bg: "red.600", boxShadow: "xl" }}
-            _active={{ bg: "red.700" }}
+            _hover={{ bg: "teal.600", boxShadow: "xl" }}
+            _active={{ bg: "teal.700" }}
             type="submit"
-            transition="all 0.2s"
+            transition="all 0.3s"
             isLoading={isSubmitting}
-            loadingText="Signing in..."
-            leftIcon={isSubmitting ? <Spinner size="sm" /> : <FaLeaf />}
+            loadingText="Logging in..."
+            leftIcon={isSubmitting ? <Spinner size="sm" /> : undefined}
           >
-            Sign in
+            Log in
           </Button>
 
-          {/* Small decorative message row */}
-          <Center>
-            <Text fontSize="sm" color={useColorModeValue("gray.600", "gray.400")}>
-              <Icon as={FaStar} color={accentAlt} mr={2} /> Season's greetings — stay safe & blessed.
-            </Text>
-          </Center>
+{/* COPYRIGHT FOOTER */}
+      <Text
+        mt={10}
+        mb={4}
+        fontSize="sm"
+        color={useColorModeValue("gray.700", "gray.400")}
+        textAlign="center"
+        userSelect="none"
+      >
+        {currentYear} © NICK TC-SCAN (GAMBIA) LTD. <br /> All rights reserved.
+      </Text>
 
-          {/* COPYRIGHT FOOTER */}
-          <Text
-            mt={2}
-            fontSize="xs"
-            color={useColorModeValue("gray.600", "gray.400")}
-            textAlign="center"
-            userSelect="none"
-          >
-            {currentYear} © NICK TC-SCAN (GAMBIA) LTD. All rights reserved.
-          </Text>
         </VStack>
       </MotionBox>
     </Box>
