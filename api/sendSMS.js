@@ -1,176 +1,267 @@
 // pages/api/sendSMS.js
-// or: src/pages/api/sendSMS.js
-// or for Vercel Serverless: /api/sendSMS.js
-//
-// Environment variables required:
-// - TWILIO_ACCOUNT_SID
-// - TWILIO_AUTH_TOKEN
-// - TWILIO_PHONE_NUMBER  (the Twilio sender number, e.g. +1xxx)
-// Optional:
-// - SENDSMS_ALLOWED_ORIGIN (defaults to 'https://smartport-test.vercel.app')
+/**
+ * sendSMS — Vercel → VPS Proxy → Comium (final, hardened)
+ *
+ * Flow:
+ * Browser (HTTPS)
+ *   → Vercel /api/sendSMS (HTTPS)
+ *     → VPS SMS Proxy (server-to-server, x-proxy-key header)
+ *       → Comium API (internal)
+ *
+ * Required env:
+ *  - SMS_PROXY_BASE (e.g. https://your-proxy.example.com or http://ip:3000)
+ *  - SMS_PROXY_KEY  (the x-proxy-key value accepted by your proxy)
+ * Optional:
+ *  - SENDSMS_API_KEY (optional API key for protecting the Vercel endpoint)
+ *  - DEBUG=true to enable logs
+ */
 
+const ALLOWED_ORIGINS = [
+  'https://weighbridge-gambia.com',
+  'https://smartport-test.vercel.app'
+];
+
+const API_KEY = process.env.SENDSMS_API_KEY || null;
+
+/**
+ * 🔐 SAFETY GUARD (CRITICAL)
+ * - strips trailing slashes
+ * - strips accidental `/send-sms`
+ * - guarantees clean base URL
+ */
+const SMS_PROXY_BASE = (process.env.SMS_PROXY_BASE || '')
+  .trim()
+  .replace(/\/+$/, '')
+  .replace(/\/send-sms$/, '');
+
+const SMS_PROXY_KEY = process.env.SMS_PROXY_KEY || process.env.PROXY_KEY || '';
+const FROM = process.env.COMIUM_FROM || 'NICKTC';
+const DEBUG = String(process.env.DEBUG || '').toLowerCase() === 'true';
+
+const MAX_RETRIES = Number(process.env.SMS_PROXY_RETRIES || 3);
+const RETRY_BASE_MS = Number(process.env.SMS_PROXY_RETRY_BASE_MS || 500);
+const REQUEST_TIMEOUT_MS = Number(process.env.SMS_PROXY_TIMEOUT_MS || 20000);
+
+/* -------------------- Logger -------------------- */
+function log(...args) {
+  if (DEBUG) console.log(new Date().toISOString(), ...args);
+}
+
+/* -------------------- CORS -------------------- */
+function setCorsHeaders(req, res) {
+  const origin = req.headers?.origin || null;
+  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+    return false;
+  }
+  res.setHeader('Access-Control-Allow-Origin', origin || ALLOWED_ORIGINS[0]);
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Content-Type, Authorization, x-api-key'
+  );
+  res.setHeader('Vary', 'Origin');
+  return true;
+}
+
+/* -------------------- Helpers -------------------- */
+function normalizeNumber(input) {
+  if (!input) return '';
+  const list = Array.isArray(input) ? input : String(input).split(',');
+  return list
+    .map(n =>
+      String(n || '')
+        .trim()
+        .replace(/[^\d+]/g, '')
+        .replace(/^\+/, '')
+        .replace(/^00/, '')
+    )
+    .filter(Boolean)
+    .join(',');
+}
+
+function buildAppointmentMessage(a = {}, r = {}) {
+  const lines = [];
+  if (a.appointmentNumber) lines.push(`APPT: ${a.appointmentNumber}`);
+  if (a.weighbridgeNumber) lines.push(`WB Number: ${a.weighbridgeNumber}`);
+  if (a.sadNumber) lines.push(`SAD Number: ${a.sadNumber}`);
+  if (a.pickupDate) lines.push(`Pickup: ${a.pickupDate}`);
+  if (a.truckNumber) lines.push(`Truck: ${a.truckNumber}`);
+  if (a.driverName || r.driverName)
+    lines.push(`Driver: ${a.driverName || r.driverName}`);
+  if (a.ticketUrl) lines.push(`View ticket: ${a.ticketUrl}`);
+
+  return `NICK TC-SCAN (GAMBIA) LTD.:\n${lines.join('\n')}`;
+}
+
+/* -------------------- Proxy POST -------------------- */
+async function postToProxy(payload) {
+  if (!SMS_PROXY_BASE) throw new Error('SMS_PROXY_BASE not configured');
+  if (!SMS_PROXY_KEY) throw new Error('SMS_PROXY_KEY not configured');
+
+  const url = `${SMS_PROXY_BASE}/send-sms`;
+  let attempt = 0;
+
+  while (attempt < MAX_RETRIES) {
+    attempt += 1;
+    let controller;
+
+    try {
+      log(
+        'POST → SMS Proxy (attempt):',
+        attempt,
+        url,
+        payload?.to ? `to=${payload.to}` : ''
+      );
+
+      controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        REQUEST_TIMEOUT_MS
+      );
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-proxy-key': SMS_PROXY_KEY
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      clearTimeout(timer);
+
+      const rawText = await resp.text().catch(() => null);
+      let parsed;
+      try {
+        parsed = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        parsed = { raw: rawText };
+      }
+
+      if (!resp.ok) {
+        log('Proxy non-OK:', resp.status, rawText);
+        return { ok: false, status: resp.status, parsed, rawText };
+      }
+
+      log('Proxy success:', parsed);
+      return { ok: true, status: resp.status, parsed, rawText };
+    } catch (err) {
+      const isLast = attempt >= MAX_RETRIES;
+      log(
+        `Proxy attempt ${attempt} failed:`,
+        err?.message || err,
+        isLast ? 'LAST' : 'retrying'
+      );
+
+      if (isLast) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+
+      const backoff = RETRY_BASE_MS * Math.pow(2, attempt - 1);
+      await new Promise(r => setTimeout(r, backoff));
+    }
+  }
+
+  return { ok: false, error: 'exhausted_retries' };
+}
+
+/* -------------------- Body Reader -------------------- */
+async function readBody(req) {
+  if (req.body && typeof req.body === 'object') return req.body;
+  return new Promise(resolve => {
+    let raw = '';
+    req.on('data', c => (raw += c));
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', () => resolve({}));
+  });
+}
+
+/* -------------------- Handler -------------------- */
 export default async function handler(req, res) {
-  // safer default: use your frontend origin if env not set
-  const DEFAULT_ORIGIN = 'https://smartport-test.vercel.app';
-  const ALLOWED_ORIGIN = process.env.SENDSMS_ALLOWED_ORIGIN || DEFAULT_ORIGIN;
+  if (!setCorsHeaders(req, res)) {
+    return res.status(403).json({ ok: false, error: 'CORS blocked' });
+  }
 
-  // Always include CORS headers
-  res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
-  // allow GET so manual browser visits return a helpful message
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  // If you want credentials (cookies), set Access-Control-Allow-Credentials and handle accordingly.
-
-  // Handle preflight
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
 
-  // Helpful GET handler — useful when someone accidentally loads the .js file in browser
+  if (API_KEY) {
+    const key = String(
+      req.headers['x-api-key'] || req.headers.authorization || ''
+    );
+    if (!key || key !== API_KEY) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized' });
+    }
+  }
+
   if (req.method === 'GET') {
     return res.status(200).json({
       ok: true,
-      info: 'sendSMS endpoint (POST) — This route expects a POST with JSON. Example: POST /api/sendSMS with { to, message } OR { appointment, recipients: { driverPhone } }.',
-      note: 'Do NOT call /api/sendSMS.js in browser for POST — use /api/sendSMS (no .js) as the request path. If you see a 405 it likely means you requested a static file or used a method the endpoint does not accept.',
-      examplePayloads: {
-        simple: { to: '+220770123456', message: 'Appointment APPT1234 — Pickup tomorrow 08:00' },
-        notify: {
-          appointment: { appointmentNumber: '2512010001', pickupDate: '2025-12-08', truckNumber: 'BJL1234' },
-          recipients: { driverPhone: '+220770123456', agentName: 'Agent Ltd' }
-        }
-      }
+      info: 'POST { to, message } or { appointment, recipients }',
+      proxyBase: SMS_PROXY_BASE
     });
   }
 
   if (req.method !== 'POST') {
-    // Return a descriptive 405 for unsupported methods
-    return res.status(405).json({ error: 'Method Not Allowed. Use POST for sending SMS.' });
+    return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
   }
 
-  // POST handling
   try {
-    // Some runtimes (Edge) may not auto-parse JSON into req.body.
-    // Try to use req.body if available, otherwise attempt to parse raw body.
-    let body = req.body;
-    if (!body || Object.keys(body).length === 0) {
-      // attempt to parse raw body as fallback
-      try {
-        // When using Next.js node runtime, req is a stream; reading raw body:
-        body = await new Promise((resolve, reject) => {
-          let raw = '';
-          req.on && req.on('data', (chunk) => { raw += chunk; });
-          req.on && req.on('end', () => {
-            if (!raw) return resolve({});
-            try { return resolve(JSON.parse(raw)); } catch (e) { return resolve({ _raw: raw }); }
-          });
-          req.on && req.on('error', (err) => reject(err));
-        });
-      } catch (e) {
-        // ignore parse error; keep body as {}
-        body = body || {};
-      }
+    const body = await readBody(req);
+
+    const to =
+      body.to ||
+      body.recipients?.driverPhone ||
+      body.recipients?.phone ||
+      null;
+
+    const message =
+      body.message ||
+      body.text ||
+      (body.appointment
+        ? buildAppointmentMessage(body.appointment, body.recipients)
+        : null);
+
+    if (!to || !message) {
+      return res
+        .status(400)
+        .json({ ok: false, error: 'Missing recipient or message' });
     }
 
-    // Accept either:
-    // - { to, message }  OR
-    // - notify body: { appointment: {...}, recipients: { driverPhone, agentName }, pdfUrl }
-    const toRaw = (body && (body.to || (body.recipients && (body.recipients.driverPhone || body.recipients.to)))) || null;
-    const messageRaw = (body && body.message) || null;
+    const payload = {
+      from: body.from || FROM,
+      to: normalizeNumber(to),
+      text: String(message)
+    };
 
-    // Build a reasonable SMS message if full notify object supplied & message not provided
-    let finalMessage = messageRaw;
-    if (!finalMessage && body && body.appointment) {
-      const a = body.appointment;
-      const appt = a.appointmentNumber || a.appointment_number || a.appointmentNo || '';
-      const wb = a.weighbridgeNumber || a.weighbridge_number || a.weighbridge || '';
-      const date = a.pickupDate || a.pickup_date || '';
-      const truck = a.truckNumber || a.truck_number || '';
-      const agent = (a.agentName || a.agent_name || '') || (body.recipients && body.recipients.agentName) || '';
-      // Keep SMS short
-      finalMessage = `Appointment ${appt}${wb ? ` | ${wb}` : ''}\nAgent: ${agent}\nDate: ${date}\nTruck: ${truck}\nReply for details.`;
+    const proxyResp = await postToProxy(payload);
+
+    if (!proxyResp.ok) {
+      console.error('sendSMS proxy error:', proxyResp);
+      return res
+        .status(502)
+        .json({ ok: false, error: 'proxy_error', details: proxyResp });
     }
 
-    if (!toRaw) {
-      return res.status(400).json({ error: "Missing recipient phone (to or recipients.driverPhone)" });
-    }
-    if (!finalMessage) {
-      return res.status(400).json({ error: "Missing message body (message) and no appointment info to build one" });
-    }
-
-    // Normalize number: ensure leading +
-    const to = String(toRaw || '').trim();
-    const toNormalized = to.startsWith('+') ? to : (to.match(/^\d+$/) ? `+${to}` : to);
-
-    // Twilio envs
-    const accountSid = process.env.TWILIO_ACCOUNT_SID;
-    const authToken  = process.env.TWILIO_AUTH_TOKEN;
-    const smsFrom    = process.env.TWILIO_PHONE_NUMBER;
-
-    if (!accountSid || !authToken || !smsFrom) {
-      return res.status(500).json({ error: "Twilio environment variables not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER)" });
-    }
-
-    // Build Basic auth header (works both in Node and Edge runtimes)
-    const basicAuthRaw = `${accountSid}:${authToken}`;
-    let basicAuth = null;
-    try {
-      if (typeof Buffer !== 'undefined' && typeof Buffer.from === 'function') {
-        basicAuth = Buffer.from(basicAuthRaw).toString('base64');
-      } else if (typeof btoa === 'function') {
-        basicAuth = btoa(basicAuthRaw);
-      } else if (typeof globalThis !== 'undefined' && typeof globalThis.btoa === 'function') {
-        basicAuth = globalThis.btoa(basicAuthRaw);
-      }
-    } catch (e) {
-      // ignore - we'll fallback below
-    }
-    if (!basicAuth) {
-      try { basicAuth = Buffer.from(basicAuthRaw).toString('base64'); } catch (e) { /* final fallback */ }
-    }
-
-    if (!basicAuth) {
-      return res.status(500).json({ error: "Could not create Basic auth header for Twilio" });
-    }
-
-    const form = new URLSearchParams();
-    form.append('To', toNormalized);
-    form.append('From', smsFrom);
-    form.append('Body', String(finalMessage));
-
-    const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`;
-
-    const twRes = await fetch(twilioUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${basicAuth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: form.toString(),
-    });
-
-    const twText = await twRes.text().catch(() => null);
-    let twJson = null;
-    try { twJson = twText ? JSON.parse(twText) : null; } catch (e) { twJson = { raw: twText }; }
-
-    if (!twRes.ok) {
-      // Twilio returned an error (bad number, auth problem, etc)
-      // Mirror Twilio's status and response to help debugging in client logs.
-      return res.status(twRes.status || 500).json({
-        ok: false,
-        error: 'Twilio API error',
-        status: twRes.status,
-        response: twJson,
-      });
-    }
-
-    // success
     return res.status(200).json({
       ok: true,
-      sid: twJson?.sid || null,
-      twilio: twJson,
+      provider: 'comium-via-proxy',
+      result: proxyResp.parsed || null
     });
   } catch (err) {
     console.error('sendSMS handler error:', err);
-    return res.status(500).json({ error: 'Internal server error', details: err?.message || String(err) });
+    return res.status(502).json({
+      ok: false,
+      error: 'internal_error',
+      details: err?.message || String(err)
+    });
   }
 }
