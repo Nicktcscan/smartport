@@ -5,7 +5,7 @@ import {
   FormControl, FormLabel, HStack, Stack, Table, Thead, Tbody, Tr, Th, Td,
   useToast, Modal, ModalOverlay, ModalContent, ModalHeader, ModalBody, ModalFooter, ModalCloseButton,
   IconButton, Badge, Divider, VStack, useBreakpointValue, Flex, InputGroup, InputRightElement, RadioGroup, Radio, Tooltip,
-  Image as ChakraImage, Spinner, Progress, Center
+  Image as ChakraImage, Spinner, Progress
 } from '@chakra-ui/react';
 import { AddIcon, DeleteIcon, EditIcon, DownloadIcon, RepeatIcon, SearchIcon, SmallCloseIcon } from '@chakra-ui/icons';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -418,6 +418,160 @@ function AppointmentPdf({ ticket }) {
   );
 }
 
+// ---------- SMS config (client) ----------
+const FALLBACK_API_SENDSMS_PATH = (typeof window !== 'undefined' && window.location && window.location.origin) ? `${window.location.origin}/api/sendSMS` : '/api/sendSMS';
+const PUBLIC_SENDSMS_KEY = (typeof window !== 'undefined' && (window.__env?.SENDSMS_API_KEY || window.__env?.NEXT_PUBLIC_SENDSMS_API_KEY || process.env.NEXT_PUBLIC_SENDSMS_API_KEY || process.env.REACT_APP_SENDSMS_API_KEY)) || null;
+
+// Helper to log when DEBUG set (reads client envs when available)
+const DEBUG_CLIENT = (typeof window !== 'undefined' && (window.__env?.DEBUG === 'true' || process.env.REACT_APP_DEBUG === 'true' || process.env.NEXT_PUBLIC_DEBUG === 'true')) || false;
+function clientLog(...args) { if (DEBUG_CLIENT) console.log('[AgentAppt]', ...args); }
+
+// ---------- Helper: safeUpdateAppointment (prevents empty patch and detects PGRST204) ----------
+async function safeUpdateAppointment(id, updateObj = {}) {
+  if (!id) return { ok: false, error: 'missing_id' };
+  // remove undefined fields
+  const clean = {};
+  Object.keys(updateObj || {}).forEach((k) => {
+    const v = updateObj[k];
+    if (v !== undefined) clean[k] = v;
+  });
+  if (Object.keys(clean).length === 0) return { ok: false, error: 'empty_update' };
+  try {
+    const { data, error } = await supabase.from('appointments').update(clean).eq('id', id).select();
+    if (error) {
+      clientLog('safeUpdateAppointment error', error);
+      return { ok: false, error };
+    }
+    // If no rows returned -> nothing updated (PGRST204-like)
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      return { ok: false, error: 'no_rows_updated' };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    clientLog('safeUpdateAppointment threw', e);
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
+ * sendSmsViaApi(payload)
+ * - POSTs to same-origin serverless endpoint (FALLBACK_API_SENDSMS_PATH)
+ *
+ * Expected payload:
+ *   { to, message } OR { appointment, recipients, message }
+ */
+async function sendSmsViaApi(payload = {}) {
+  const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (PUBLIC_SENDSMS_KEY) headers['x-api-key'] = PUBLIC_SENDSMS_KEY;
+
+  try {
+    clientLog('Posting to serverless sendSMS', FALLBACK_API_SENDSMS_PATH, payload);
+    const resp = await fetch(FALLBACK_API_SENDSMS_PATH, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    const txt = await resp.text().catch(() => null);
+    let json = null;
+    try { json = txt ? JSON.parse(txt) : null; } catch (e) { json = txt || null; }
+
+    if (resp.status === 405) {
+      clientLog('sendSMS endpoint returned 405', txt);
+      return { ok: false, status: 405, error: 'method_not_allowed', data: json || txt };
+    }
+    if (resp.status === 401) {
+      clientLog('sendSMS endpoint returned 401', txt);
+      return { ok: false, status: 401, error: 'unauthorized', data: json || txt };
+    }
+    if (!resp.ok) {
+      clientLog('sendSMS endpoint returned non-ok', resp.status, txt);
+      return { ok: false, status: resp.status, error: (json && json.error) || txt || `HTTP ${resp.status}`, data: json || txt };
+    }
+
+    clientLog('sendSMS endpoint success', resp.status, json || txt);
+    return { ok: true, data: json || txt };
+  } catch (e) {
+    clientLog('sendSmsViaApi fetch failed', e?.message || e);
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+// ---------- Notify with retry/backoff (uses sendSmsViaApi) ----------
+async function notifyWithRetries(notifyBody, maxAttempts = 3, setSmsSending, setSmsAttempts, setSmsResult, toast) {
+  setSmsSending(true);
+  setSmsAttempts(0);
+  setSmsResult(null);
+
+  // Build phone and text for UI display (server will construct message if needed)
+  const appt = notifyBody.appointment || {};
+  const apptNo = appt.appointmentNumber || appt.appointment_number || '';
+  const wbNo = appt.weighbridgeNumber || appt.weighbridge_number || '';
+  const pickup = appt.pickupDate || appt.pickup_date || '';
+  const truck = appt.truckNumber || appt.truck_number || '';
+  const drvName = appt.driverName || appt.driver_name || '';
+  const shortPdfLink = notifyBody.pdfUrl || appt.pdfUrl || appt.pdf_url || '';
+
+  const t1list = (appt.t1s || notifyBody.t1s || appt.t1_records || []).map((r) => {
+    if (!r) return null;
+    return r.sadNo || r.sad_no || r.sad || null;
+  }).filter(Boolean);
+  const uniqueSadList = Array.from(new Set(t1list));
+  const sadLine = uniqueSadList.length ? uniqueSadList.join(', ') : '—';
+
+  const smsText =
+    `NICK TC-SCAN (GAMBIA) LTD.:\n` +
+    `APPT: ${apptNo}\n` +
+    (wbNo ? `WB Number: ${wbNo}\n` : '') +
+    `SAD Number: ${sadLine}\n` +
+    `Pickup: ${pickup}\n` +
+    `Truck: ${truck}\n` +
+    `Driver: ${drvName}` +
+    (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : '');
+
+  const payloadToSend = Object.assign({}, notifyBody, { message: smsText });
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    setSmsAttempts(attempt);
+    toast({
+      status: 'info',
+      title: attempt === 1 ? 'Sending SMS' : `Retrying SMS (attempt ${attempt})`,
+      description: attempt === 1 ? 'Notifying driver — sending SMS now.' : `Attempt ${attempt} to send SMS.`,
+      duration: 2500,
+    });
+
+    try {
+      const resp = await sendSmsViaApi(payloadToSend);
+      if (resp && resp.ok) {
+        setSmsResult({ ok: true, data: resp.data });
+        toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
+        setSmsSending(false);
+        return { ok: true, data: resp.data };
+      } else {
+        const err = resp?.error || resp?.data || `HTTP ${resp?.status || 'error'}`;
+        setSmsResult({ ok: false, error: err, status: resp?.status || null });
+        toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 160), duration: 4000 });
+        const wait = 800 * Math.pow(2, attempt - 1);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+    } catch (e) {
+      clientLog('notifyWithRetries attempt error', e);
+      setSmsResult({ ok: false, error: e?.message || String(e) });
+      toast({ status: 'warning', title: `SMS attempt ${attempt} error`, description: String(e?.message || e), duration: 4000 });
+      const wait = 800 * Math.pow(2, attempt - 1);
+      await new Promise(r => setTimeout(r, wait));
+      continue;
+    }
+  }
+
+  setSmsSending(false);
+  setSmsResult({ ok: false, error: 'All attempts failed' });
+  toast({ status: 'error', title: 'SMS sending failed', description: 'All retry attempts failed. You can retry from the appointment details page.' });
+  return { ok: false, error: 'exhausted' };
+}
+
 // ---------- Main page component ----------
 export default function AgentApptPage() {
   const toast = useToast();
@@ -812,19 +966,15 @@ export default function AgentApptPage() {
         }
 
         if (data) {
-          // found by phone
           const drv = data;
           setFoundDriver(drv);
 
-          // Auto-populate name when driverName is empty (symmetry)
           if (!driverName || String(driverName).trim().length === 0) {
             if (drv.name) setDriverName(drv.name);
             setDriverRegistered(true);
             setDriverCheckStatus('exists');
-            // ensure visible phone shows normalized stored version
             setDriverLicense(drv.phone || normalized);
           } else {
-            // if a name is already typed and doesn't match the record -> block & inform
             if (String((drv.name || '').trim()).toLowerCase() !== String((driverName || '').trim()).toLowerCase()) {
               setDriverRegistered(false);
               setDriverCheckStatus('phone_taken');
@@ -835,14 +985,12 @@ export default function AgentApptPage() {
                 duration: 8000,
               });
             } else {
-              // names match (case-insensitive) -> OK
               setDriverRegistered(true);
               setDriverCheckStatus('exists');
               setDriverLicense(drv.phone || normalized);
             }
           }
         } else {
-          // no driver with that phone
           setFoundDriver(null);
           setDriverRegistered(false);
           setDriverCheckStatus('not_found');
@@ -879,31 +1027,25 @@ export default function AgentApptPage() {
       if (phoneErr) console.warn('ensureDriverRegistered phoneErr', phoneErr);
 
       if (byPhone) {
-        // phone exists
         if (String((byPhone.name || '').trim()).toLowerCase() === name.toLowerCase()) {
           setFoundDriver(byPhone);
           setDriverRegistered(true);
-          // ensure visible phone shows normalized
           setDriverLicense(byPhone.phone || phone);
           return { ok: true, driver: byPhone };
         }
-        // phone used by another driver -> block
         setDriverCheckStatus('phone_taken');
         toast({ status: 'error', title: 'Phone already exists', description: 'This phone number exists for another driver — please use the registered driver.' });
         return { ok: false, reason: 'phone_taken' };
       }
 
-      // no driver by phone; check name
       const { error: nameErr } = await supabase.from('drivers').select('*').ilike('name', name).limit(5);
       if (nameErr) console.warn('ensureDriverRegistered nameErr', nameErr);
 
-      // prepare quick-register modal with normalized phone prefilled
       setRegName(name);
       setRegPhone(phone);
       setRegLicense('');
       setRegPhotoFile(null);
 
-      // open modal and return a Promise that will resolve when registration completes or modal closed
       return await new Promise((resolve) => {
         regPromiseRef.current = resolve;
         setDriverRegModalOpen(true);
@@ -980,7 +1122,6 @@ export default function AgentApptPage() {
         throw error;
       }
 
-      // success: close modal, set driver fields and resolve registration promise if waiting
       const created = data || null;
       setFoundDriver(created);
       setDriverRegistered(true);
@@ -992,7 +1133,6 @@ export default function AgentApptPage() {
 
       setDriverRegModalOpen(false);
 
-      // resolve awaiting promise (if any)
       if (regPromiseRef.current) {
         regPromiseRef.current({ ok: true, driver: created });
         regPromiseRef.current = null;
@@ -1012,7 +1152,6 @@ export default function AgentApptPage() {
   // when modal is closed/cancelled by user
   const handleDriverRegModalClose = () => {
     setDriverRegModalOpen(false);
-    // if someone is awaiting registration, resolve as cancelled
     if (regPromiseRef.current) {
       regPromiseRef.current({ ok: false, reason: 'cancelled' });
       regPromiseRef.current = null;
@@ -1349,145 +1488,15 @@ export default function AgentApptPage() {
     }
   }
 
-  // ---------- NEW: send SMS via your Vercel/Server API ----------
-  // Change this if your API is at a different base path or domain.
-  const API_SENDSMS_PATH = (typeof window !== 'undefined' && window.location && window.location.origin)
-    ? `${window.location.origin}/api/sendSMS`
-    : '/api/sendSMS';
-
-  /**
-   * sendSmsViaApi(payload)
-   * - Accepts either:
-   *   - { to, message }  (simple)
-   *   - full notify object: { appointment: {...}, recipients: { driverPhone, agentName }, pdfUrl, ... }
-   * - Sends a POST JSON to the server endpoint and returns { ok: true, data } or { ok:false, error, status }.
-   */
-  async function sendSmsViaApi(payload = {}) {
-    try {
-      const resp = await fetch(API_SENDSMS_PATH, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-        },
-        credentials: 'same-origin',
-        body: JSON.stringify(payload),
-      });
-
-      if (!resp.ok) {
-        // read text (may be HTML or JSON)
-        const txt = await resp.text().catch(() => null);
-        let reason = txt || `HTTP ${resp.status}`;
-        if (resp.status === 404) reason = `API endpoint not found (404) - ensure /api/sendSMS exists on the server.`;
-        if (resp.status === 405) reason = `Method Not Allowed (405) - ensure /api/sendSMS accepts POST (and not only GET/OPTIONS).`;
-        return { ok: false, status: resp.status, error: reason };
-      }
-
-      let json = null;
-      try { json = await resp.json(); } catch (e) { json = null; }
-      return { ok: true, data: json };
-    } catch (e) {
-      return { ok: false, error: e?.message || String(e) };
-    }
-  }
-
-  // ---------- Notify with retry/backoff (uses sendSmsViaApi) ----------
-  async function notifyWithRetries(notifyBody, maxAttempts = 3) {
-    setSmsSending(true);
-    setSmsAttempts(0);
-    setSmsResult(null);
-
-    // Build phone and text for UI display (server will construct message if given full notifyBody)
-    const to = (notifyBody.recipients && notifyBody.recipients.driverPhone) || '';
-    const appt = notifyBody.appointment || {};
-    const apptNo = appt.appointmentNumber || appt.appointment_number || '';
-    const wbNo = appt.weighbridgeNumber || appt.weighbridge_number || '';
-    const pickup = appt.pickupDate || appt.pickup_date || '';
-    const truck = appt.truckNumber || appt.truck_number || '';
-    const drvName = appt.driverName || appt.driver_name || '';
-    const shortPdfLink = notifyBody.pdfUrl || appt.pdfUrl || appt.pdf_url || '';
-
-    // derive SAD number(s) from appointment t1s (or top-level notifyBody.t1s)
-    const t1list = (appt.t1s || notifyBody.t1s || appt.t1_records || []).map((r) => {
-      // normalize different field names
-      if (!r) return null;
-      return r.sadNo || r.sad_no || r.sad || null;
-    }).filter(Boolean);
-    const uniqueSadList = Array.from(new Set(t1list));
-    const sadLine = uniqueSadList.length ? uniqueSadList.join(', ') : '—';
-
-    // new SMS format requested
-    const smsText =
-      `NICK TC-SCAN (GAMBIA) LTD.:\n` +
-      `APPT: ${apptNo}\n` +
-      (wbNo ? `WB Number: ${wbNo}\n` : '') +
-      `SAD Number: ${sadLine}\n` +
-      `Pickup: ${pickup}\n` +
-      `Truck: ${truck}\n` +
-      `Driver: ${drvName}` +
-      (shortPdfLink ? `\nView ticket: ${shortPdfLink}` : '');
-
-    // For clarity, attach a message copy in the payload so server can use it or ignore it
-    const payloadToSend = Object.assign({}, notifyBody, { message: smsText });
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      setSmsAttempts(attempt);
-      // update toast and small UI indicator
-      toast({
-        status: 'info',
-        title: attempt === 1 ? 'Sending SMS' : `Retrying SMS (attempt ${attempt})`,
-        description: attempt === 1 ? 'Notifying driver — sending SMS now.' : `Attempt ${attempt} to send SMS.`,
-        duration: 2500,
-      });
-
-      try {
-        // Send the full notify body (server builds final message if appointment object present)
-        const resp = await sendSmsViaApi(payloadToSend);
-
-        if (resp && resp.ok) {
-          setSmsResult({ ok: true, data: resp.data });
-          toast({ status: 'success', title: 'SMS sent', description: 'Driver will receive appointment details shortly.' });
-          setSmsSending(false);
-          return { ok: true, data: resp.data };
-        } else {
-          const err = resp?.error || resp?.data || `HTTP ${resp?.status || 'error'}`;
-          // set smsResult with last attempt info so UI shows it after all attempts
-          setSmsResult({ ok: false, error: err, status: resp?.status || null });
-          toast({ status: 'warning', title: `SMS attempt ${attempt} failed`, description: String(err).slice(0, 160), duration: 4000 });
-
-          // exponential backoff before retry
-          const wait = 800 * Math.pow(2, attempt - 1);
-          await new Promise(r => setTimeout(r, wait));
-          continue;
-        }
-      } catch (e) {
-        console.warn('notify attempt error', e);
-        setSmsResult({ ok: false, error: e?.message || String(e) });
-        toast({ status: 'warning', title: `SMS attempt ${attempt} error`, description: String(e?.message || e), duration: 4000 });
-        const wait = 800 * Math.pow(2, attempt - 1);
-        await new Promise(r => setTimeout(r, wait));
-        continue;
-      }
-    }
-
-    setSmsSending(false);
-    setSmsResult({ ok: false, error: 'All attempts failed' });
-    toast({ status: 'error', title: 'SMS sending failed', description: 'All retry attempts failed. You can retry from the appointment details page.' });
-    return { ok: false, error: 'exhausted' };
-  }
-
   // ---------- Modified openConfirm: generate numbers, set preview, but ensure driver registered first ----------
   const openConfirm = async () => {
-    // first run the driver registration/verification step (this will open modal and resolve automatically if needed)
     const drvCheck = await ensureDriverRegistered();
     if (!drvCheck.ok) {
-      // ensureDriverRegistered already opened modal or showed toast with reason — stop
       return;
     }
 
     if (!validateMainForm()) return;
 
-    // final check: ensure none of the selected SADs are Completed
     const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
     const uniqueSads = Array.from(new Set(rawSadList));
     if (uniqueSads.length === 0) {
@@ -1533,11 +1542,10 @@ export default function AgentApptPage() {
     setPreviewWeighbridgeNumber('');
   };
 
-  // ---------- handleCreateAppointment (modified to call notify via Vercel API with retries) ----------
+  // ---------- handleCreateAppointment (modified to call notify via serverless) ----------
   const handleCreateAppointment = async () => {
     if (!validateMainForm()) return;
 
-    // verify all SADs exist and not Completed
     try {
       const rawSadList = (t1s || []).map(r => (r.sadNo || '').trim()).filter(Boolean);
       const uniqueSads = Array.from(new Set(rawSadList));
@@ -1596,9 +1604,9 @@ export default function AgentApptPage() {
       agentName: agentName.trim(),
       agentTin: agentTin.trim(),
       consolidated,
-      truckNumber: normalizedTruckNumber, // store normalized truck number (no spaces, uppercase)
+      truckNumber: normalizedTruckNumber,
       driverName: driverName.trim(),
-      driverLicense: normalizedDriverPhone, // store normalized +220...
+      driverLicense: normalizedDriverPhone,
       regime: '',
       totalDocumentedWeight: '',
       appointmentNumber: previewAppointmentNumber || undefined,
@@ -1610,7 +1618,6 @@ export default function AgentApptPage() {
       const result = await createDirectlyInSupabase(payload);
       const dbAppointment = result.appointment;
 
-      // build printable ticket (includes barcode image)
       const printable = await buildPrintableTicketObject({
         appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
         weighbridgeNumber: dbAppointment.weighbridgeNumber || dbAppointment.weighbridge_number,
@@ -1634,7 +1641,6 @@ export default function AgentApptPage() {
         const asPdf = pdfRender(doc);
         const blob = await asPdf.toBlob();
 
-        // Download client-side for user convenience
         try {
           const filename = `WeighbridgeTicket-${printable.appointmentNumber || Date.now()}.pdf`;
           downloadBlob(blob, filename);
@@ -1642,15 +1648,17 @@ export default function AgentApptPage() {
           console.warn('download client-side failed', e);
         }
 
-        // Try upload to Supabase storage (appointments bucket) and update appointment.pdf_url
         try {
           const { publicUrl, path } = await uploadPdfToStorage(blob, printable.appointmentNumber);
           if (publicUrl && dbAppointment.id) {
             uploadedPdfUrl = publicUrl;
-            await supabase.from('appointments').update({ pdf_url: publicUrl }).eq('id', dbAppointment.id);
+            // use safe updater
+            const upd = await safeUpdateAppointment(dbAppointment.id, { pdf_url: publicUrl, updated_at: new Date().toISOString() });
+            if (!upd.ok) clientLog('PDF update failed', upd);
           } else if (path && dbAppointment.id) {
             uploadedPdfUrl = path;
-            await supabase.from('appointments').update({ pdf_url: path }).eq('id', dbAppointment.id);
+            const upd2 = await safeUpdateAppointment(dbAppointment.id, { pdf_url: path, updated_at: new Date().toISOString() });
+            if (!upd2.ok) clientLog('PDF update failed', upd2);
           }
         } catch (e) {
           console.warn('PDF storage/update failed', e);
@@ -1671,12 +1679,10 @@ export default function AgentApptPage() {
         }]);
       } catch (e) { console.warn('log write failed', e); }
 
-      // Inform user DB created
       toast({ title: 'Appointment created', description: `Appointment saved`, status: 'success' });
 
-      // ---------- NEW: send SMS via server API with retries ----------
+      // ---------- NEW: send SMS via serverless (with retries) ----------
       try {
-        // Build notify body with t1s included so SMS builder can use SAD numbers
         const notifyBody = {
           appointment: {
             appointmentNumber: dbAppointment.appointmentNumber || dbAppointment.appointment_number,
@@ -1699,22 +1705,35 @@ export default function AgentApptPage() {
           }
         };
 
-        // show styling via local state; notifyWithRetries shows toasts
-        const notifyResp = await notifyWithRetries(notifyBody, 3);
+        const notifyResp = await notifyWithRetries(notifyBody, 3, setSmsSending, setSmsAttempts, setSmsResult, toast);
 
         if (notifyResp && notifyResp.ok) {
-          // optionally update appointment with notify status (non-blocking)
-          try {
-            await supabase.from('appointments').update({ last_notification_status: 'sent', last_notification_response: notifyResp.data }).eq('id', dbAppointment.id);
-          } catch (e) { /* ignore update failure */ }
+          // update appointment safely with stringified response
+          const upd = await safeUpdateAppointment(dbAppointment.id, {
+            last_notification_status: 'sent',
+            last_notification_response: JSON.stringify(notifyResp.data || {}),
+            updated_at: new Date().toISOString(),
+          });
+          if (!upd.ok) clientLog('notify status update failed', upd);
         } else {
-          try {
-            await supabase.from('appointments').update({ last_notification_status: 'failed' }).eq('id', dbAppointment.id);
-          } catch (e) {}
+          const updFail = await safeUpdateAppointment(dbAppointment.id, {
+            last_notification_status: 'failed',
+            last_notification_response: JSON.stringify(notifyResp || {}),
+            updated_at: new Date().toISOString(),
+          });
+          if (!updFail.ok) clientLog('notify failed update failed', updFail);
         }
       } catch (notifyErr) {
         console.warn('Notification flow failed', notifyErr);
         toast({ status: 'warning', title: 'Notification error', description: 'Appointment created but sending SMS failed.' });
+        // mark appointment as failed (non-blocking)
+        if (dbAppointment.id) {
+          await safeUpdateAppointment(dbAppointment.id, {
+            last_notification_status: 'failed',
+            last_notification_response: JSON.stringify({ error: notifyErr?.message || String(notifyErr) }),
+            updated_at: new Date().toISOString(),
+          });
+        }
       }
 
       await triggerConfetti(160);
@@ -1826,11 +1845,9 @@ export default function AgentApptPage() {
                   if (terr) throw terr;
                   const apptIds = Array.from(new Set((trows || []).map(r => r.appointment_id).filter(Boolean)));
                   if (apptIds.length) {
-                    // update appointments status to Completed
                     const { error: upErr } = await supabase.from('appointments').update({ status: 'Completed', updated_at: new Date().toISOString() }).in('id', apptIds).neq('status', 'Completed');
                     if (upErr) throw upErr;
 
-                    // log for each appointment
                     const logs = apptIds.map(id => ({
                       appointment_id: id,
                       changed_by: null,
@@ -1852,7 +1869,6 @@ export default function AgentApptPage() {
                 }
               }
 
-              // if this SAD is in the current t1s, mark as blocked client-side
               try {
                 const mySads = new Set((t1s || []).map(x => String(x.sadNo).trim()));
                 if (mySads.has(sadNo) && status === 'completed') {
@@ -1865,7 +1881,6 @@ export default function AgentApptPage() {
 
           sadSubRef.current = ch;
         } else {
-          // legacy realtime
           const s = supabase.from('sad_declarations').on('UPDATE', async (payload) => {
             const newRow = payload?.new;
             if (!newRow) return;
@@ -1964,11 +1979,10 @@ export default function AgentApptPage() {
               value={truckNumber}
               onChange={(e) => setTruckNumber(e.target.value)}
               onBlur={() => {
-                // when user leaves input, normalize in-place so they see final format
                 const norm = normalizeTruckNumber(truckNumber);
                 if (norm) setTruckNumber(norm);
               }}
-              placeholder="Truck Plate / No. e.g. BJL8392H"
+              placeholder="Truck No. e.g. BJL8392H"
             />
           </FormControl>
 
@@ -1977,20 +1991,16 @@ export default function AgentApptPage() {
             <ChakraInput
               value={driverLicense}
               onChange={(e) => {
-                // auto-format while typing for user-friendly display
                 const raw = e.target.value || '';
                 const formatted = formatPhoneForDisplay(raw);
-                // but keep original when formatting fails to avoid overwriting
                 setDriverLicense(formatted || raw);
               }}
               onBlur={() => {
-                // ensure saved display uses normalized (E.164)
                 const norm = normalizePhone(driverLicense);
                 if (norm) setDriverLicense(norm);
               }}
               placeholder="e.g. 7701234 (we save as +220...)"
             />
-            {/* Inline driver check status messages */}
             {driverCheckStatus === 'checking' && <Text color="yellow.600" mt={1}>Checking driver info…</Text>}
             {driverCheckStatus === 'exists' && <Text color="green.600" mt={1}>Driver found, you may proceed now!</Text>}
             {driverCheckStatus === 'not_found' && <Text color="orange.600" mt={1}>Driver not found — you'll be prompted to register this driver when you continue.</Text>}
@@ -2142,7 +2152,7 @@ export default function AgentApptPage() {
       </Modal>
 
       {/* Confirm Modal */}
-      <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered> 
+      <Modal isOpen={isConfirmOpen} onClose={closeConfirm} isCentered>
         <ModalOverlay />
         <ModalContent maxW="lg" borderRadius="lg" className="appt-glass">
           <ModalHeader>Confirm Appointment</ModalHeader>
