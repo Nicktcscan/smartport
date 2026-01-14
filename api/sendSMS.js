@@ -1,46 +1,30 @@
 // pages/api/sendSMS.js
 /**
- * sendSMS — Vercel → VPS Proxy → Comium (final, hardened)
+ * sendSMS — Browser → Vercel API → VPS SMS Proxy → Comium
  *
- * Flow:
- * Browser (HTTPS)
- *   → Vercel /api/sendSMS (HTTPS)
- *     → VPS SMS Proxy (server-to-server, x-proxy-key header)
- *       → Comium API (internal)
+ * Required ENV:
+ *  - SMS_PROXY_BASE   (e.g. http://184.174.39.218:3000)
+ *  - PROXY_KEY        (used as x-proxy-key)
  *
- * Required env:
- *  - SMS_PROXY_BASE (e.g. https://your-proxy.example.com or http://ip:3000)
- *  - SMS_PROXY_KEY  (the x-proxy-key value accepted by your proxy)
  * Optional:
- *  - SENDSMS_API_KEY (optional API key for protecting the Vercel endpoint)
- *  - DEBUG=true to enable logs
+ *  - SENDSMS_API_KEY  (protects this endpoint)
+ *  - DEBUG=true
  */
 
-const ALLOWED_ORIGINS = [
-  'https://weighbridge-gambia.com',
-  'https://smartport-test.vercel.app'
-];
+const DEBUG = String(process.env.DEBUG || '').toLowerCase() === 'true';
 
-const API_KEY = process.env.SENDSMS_API_KEY || null;
-
-/**
- * 🔐 SAFETY GUARD (CRITICAL)
- * - strips trailing slashes
- * - strips accidental `/send-sms`
- * - guarantees clean base URL
- */
+/* -------------------- ENV -------------------- */
 const SMS_PROXY_BASE = (process.env.SMS_PROXY_BASE || '')
   .trim()
   .replace(/\/+$/, '')
   .replace(/\/send-sms$/, '');
 
-const SMS_PROXY_KEY = process.env.SMS_PROXY_KEY || process.env.PROXY_KEY || '';
+const PROXY_KEY = process.env.PROXY_KEY || '';
+const API_KEY = process.env.SENDSMS_API_KEY || null;
 const FROM = process.env.COMIUM_FROM || 'NICKTC';
-const DEBUG = String(process.env.DEBUG || '').toLowerCase() === 'true';
 
-const MAX_RETRIES = Number(process.env.SMS_PROXY_RETRIES || 3);
-const RETRY_BASE_MS = Number(process.env.SMS_PROXY_RETRY_BASE_MS || 500);
-const REQUEST_TIMEOUT_MS = Number(process.env.SMS_PROXY_TIMEOUT_MS || 20000);
+const MAX_RETRIES = 3;
+const TIMEOUT_MS = 20000;
 
 /* -------------------- Logger -------------------- */
 function log(...args) {
@@ -49,27 +33,42 @@ function log(...args) {
 
 /* -------------------- CORS -------------------- */
 function setCorsHeaders(req, res) {
-  const origin = req.headers?.origin || null;
-  if (origin && !ALLOWED_ORIGINS.includes(origin)) {
+  const origin = req.headers.origin;
+
+  // Allow same-origin / server-side
+  if (!origin) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    return true;
+  }
+
+  // Allow production + vercel
+  if (
+    origin === 'https://weighbridge-gambia.com' ||
+    origin === 'https://www.weighbridge-gambia.com' ||
+    origin.endsWith('.vercel.app')
+  ) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
     return false;
   }
-  res.setHeader('Access-Control-Allow-Origin', origin || ALLOWED_ORIGINS[0]);
+
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS, GET');
   res.setHeader(
     'Access-Control-Allow-Headers',
     'Content-Type, Authorization, x-api-key'
   );
   res.setHeader('Vary', 'Origin');
+
   return true;
 }
 
 /* -------------------- Helpers -------------------- */
 function normalizeNumber(input) {
   if (!input) return '';
-  const list = Array.isArray(input) ? input : String(input).split(',');
-  return list
+  return String(input)
+    .split(',')
     .map(n =>
-      String(n || '')
+      n
         .trim()
         .replace(/[^\d+]/g, '')
         .replace(/^\+/, '')
@@ -79,96 +78,9 @@ function normalizeNumber(input) {
     .join(',');
 }
 
-function buildAppointmentMessage(a = {}, r = {}) {
-  const lines = [];
-  if (a.appointmentNumber) lines.push(`APPT: ${a.appointmentNumber}`);
-  if (a.weighbridgeNumber) lines.push(`WB Number: ${a.weighbridgeNumber}`);
-  if (a.sadNumber) lines.push(`SAD Number: ${a.sadNumber}`);
-  if (a.pickupDate) lines.push(`Pickup: ${a.pickupDate}`);
-  if (a.truckNumber) lines.push(`Truck: ${a.truckNumber}`);
-  if (a.driverName || r.driverName)
-    lines.push(`Driver: ${a.driverName || r.driverName}`);
-  if (a.ticketUrl) lines.push(`View ticket: ${a.ticketUrl}`);
-
-  return `NICK TC-SCAN (GAMBIA) LTD.:\n${lines.join('\n')}`;
-}
-
-/* -------------------- Proxy POST -------------------- */
-async function postToProxy(payload) {
-  if (!SMS_PROXY_BASE) throw new Error('SMS_PROXY_BASE not configured');
-  if (!SMS_PROXY_KEY) throw new Error('SMS_PROXY_KEY not configured');
-
-  const url = `${SMS_PROXY_BASE}/send-sms`;
-  let attempt = 0;
-
-  while (attempt < MAX_RETRIES) {
-    attempt += 1;
-    let controller;
-
-    try {
-      log(
-        'POST → SMS Proxy (attempt):',
-        attempt,
-        url,
-        payload?.to ? `to=${payload.to}` : ''
-      );
-
-      controller = new AbortController();
-      const timer = setTimeout(
-        () => controller.abort(),
-        REQUEST_TIMEOUT_MS
-      );
-
-      const resp = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-proxy-key': SMS_PROXY_KEY
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      clearTimeout(timer);
-
-      const rawText = await resp.text().catch(() => null);
-      let parsed;
-      try {
-        parsed = rawText ? JSON.parse(rawText) : null;
-      } catch {
-        parsed = { raw: rawText };
-      }
-
-      if (!resp.ok) {
-        log('Proxy non-OK:', resp.status, rawText);
-        return { ok: false, status: resp.status, parsed, rawText };
-      }
-
-      log('Proxy success:', parsed);
-      return { ok: true, status: resp.status, parsed, rawText };
-    } catch (err) {
-      const isLast = attempt >= MAX_RETRIES;
-      log(
-        `Proxy attempt ${attempt} failed:`,
-        err?.message || err,
-        isLast ? 'LAST' : 'retrying'
-      );
-
-      if (isLast) {
-        return { ok: false, error: err?.message || String(err) };
-      }
-
-      const backoff = RETRY_BASE_MS * Math.pow(2, attempt - 1);
-      await new Promise(r => setTimeout(r, backoff));
-    }
-  }
-
-  return { ok: false, error: 'exhausted_retries' };
-}
-
-/* -------------------- Body Reader -------------------- */
 async function readBody(req) {
   if (req.body && typeof req.body === 'object') return req.body;
+
   return new Promise(resolve => {
     let raw = '';
     req.on('data', c => (raw += c));
@@ -179,8 +91,57 @@ async function readBody(req) {
         resolve({});
       }
     });
-    req.on('error', () => resolve({}));
   });
+}
+
+/* -------------------- Proxy Call -------------------- */
+async function sendViaProxy(payload) {
+  if (!SMS_PROXY_BASE) throw new Error('SMS_PROXY_BASE not set');
+  if (!PROXY_KEY) throw new Error('PROXY_KEY not set');
+
+  const url = `${SMS_PROXY_BASE}/send-sms`;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      log(`Proxy attempt ${attempt}`, url, payload.to);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-proxy-key': PROXY_KEY
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+
+      clearTimeout(timer);
+
+      const text = await resp.text();
+      const json = text ? JSON.parse(text) : null;
+
+      if (!resp.ok) {
+        log('Proxy error:', resp.status, json);
+        return { ok: false, status: resp.status, json };
+      }
+
+      return { ok: true, json };
+    } catch (err) {
+      log(
+        `Proxy failed (${attempt}/${MAX_RETRIES}):`,
+        err.message
+      );
+
+      if (attempt === MAX_RETRIES) {
+        throw err;
+      }
+
+      await new Promise(r => setTimeout(r, 500 * attempt));
+    }
+  }
 }
 
 /* -------------------- Handler -------------------- */
@@ -194,10 +155,12 @@ export default async function handler(req, res) {
   }
 
   if (API_KEY) {
-    const key = String(
-      req.headers['x-api-key'] || req.headers.authorization || ''
-    );
-    if (!key || key !== API_KEY) {
+    const key =
+      req.headers['x-api-key'] ||
+      req.headers.authorization ||
+      '';
+
+    if (key !== API_KEY) {
       return res.status(401).json({ ok: false, error: 'Unauthorized' });
     }
   }
@@ -205,8 +168,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET') {
     return res.status(200).json({
       ok: true,
-      info: 'POST { to, message } or { appointment, recipients }',
-      proxyBase: SMS_PROXY_BASE
+      proxy: SMS_PROXY_BASE
     });
   }
 
@@ -219,21 +181,17 @@ export default async function handler(req, res) {
 
     const to =
       body.to ||
-      body.recipients?.driverPhone ||
+      body.phone ||
       body.recipients?.phone ||
-      null;
+      body.recipients?.driverPhone;
 
-    const message =
-      body.message ||
-      body.text ||
-      (body.appointment
-        ? buildAppointmentMessage(body.appointment, body.recipients)
-        : null);
+    const message = body.message || body.text;
 
     if (!to || !message) {
-      return res
-        .status(400)
-        .json({ ok: false, error: 'Missing recipient or message' });
+      return res.status(400).json({
+        ok: false,
+        error: 'Missing recipient or message'
+      });
     }
 
     const payload = {
@@ -242,26 +200,19 @@ export default async function handler(req, res) {
       text: String(message)
     };
 
-    const proxyResp = await postToProxy(payload);
-
-    if (!proxyResp.ok) {
-      console.error('sendSMS proxy error:', proxyResp);
-      return res
-        .status(502)
-        .json({ ok: false, error: 'proxy_error', details: proxyResp });
-    }
+    const result = await sendViaProxy(payload);
 
     return res.status(200).json({
       ok: true,
-      provider: 'comium-via-proxy',
-      result: proxyResp.parsed || null
+      provider: 'comium',
+      result: result.json
     });
   } catch (err) {
-    console.error('sendSMS handler error:', err);
+    console.error('sendSMS error:', err);
     return res.status(502).json({
       ok: false,
-      error: 'internal_error',
-      details: err?.message || String(err)
+      error: 'SMS delivery failed',
+      details: err.message
     });
   }
 }
