@@ -671,6 +671,8 @@ export default function UsersPage() {
     { value: 'customs', label: 'Customs' },
     { value: 'agent', label: 'Agent' },
     { value: 'finance', label: 'Finance' },
+    { value: 'albayrak', label: 'Albayrak' },
+
   ];
 
   // computed UI states
@@ -788,6 +790,7 @@ export default function UsersPage() {
                         <option value="customs">Customs</option>
                         <option value="agent">Agent</option>
                         <option value="finance">Finance</option>
+                        <option value="albayrak">Albayrak</option>
                       </Select>
                     </Td>
 
@@ -831,7 +834,7 @@ export default function UsersPage() {
               Change role...
             </MenuButton>
             <MenuList>
-              {['admin', 'weighbridge', 'outgate', 'customs', 'agent', 'finance'].map((r) => (
+              {['admin', 'weighbridge', 'outgate', 'customs', 'agent', 'finance', 'albayrak'].map((r) => (
                 <MenuItem key={r} onClick={async () => {
                   if (selectedIds.size === 0) {
                     toast({ title: 'No users selected', status: 'info' });
@@ -895,6 +898,7 @@ export default function UsersPage() {
                   <option value="customs">Customs</option>
                   <option value="agent">Agent</option>
                   <option value="finance">Finance</option>
+                  <option value="albayrak">Albayrak</option>
                 </Select>
                 <FormErrorMessage>{errors.role}</FormErrorMessage>
               </FormControl>
