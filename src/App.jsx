@@ -35,6 +35,7 @@ import OutgateTicketDetails from './pages/OutgateTicketDetails';
 import OutgateSearchTickets from './pages/OutgateSearchTickets';
 import ConfirmExit from './pages/ConfirmExit';
 import OutgateReports from './pages/OutgateReports';
+import Albayrak from './pages/Albayrak';
 
 import OCRComponent from './OCRComponent';
 import AgentDashboard from './pages/AgentDashboard';
@@ -65,6 +66,8 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
         return <Navigate to="/customs" replace />;
       case 'agent':
         return <Navigate to="/agent" replace />;
+      case 'albayrak':
+        return <Navigate to="/albayrak" replace />;
       case 'outgate':
         return <Navigate to="/outgate" replace />;
       case 'weighbridge':
@@ -132,6 +135,8 @@ function App() {
                   <Navigate to="/customs" replace />
                 ) : user.role === 'outgate' ? (
                   <Navigate to="/outgate" replace />
+                ) : user.role === 'albayrak' ? (
+                  <Navigate to="/albayrak" replace />
                 ) : user.role === 'weighbridge' ? (
                   // weighbridge users now land on the weighbridge Dashboard page
                   <Navigate to="/dashboard" replace />
@@ -451,6 +456,20 @@ function App() {
                 </ProtectedRoute>
               }
             />
+
+             <Route
+              path="/albayrak"
+              element={
+                <ProtectedRoute allowedRoles={['albayrak']}>
+                  <Layout>
+                    <Box as="main" p={4} bg="gray.50">
+                      <Albayrak />
+                    </Box>
+                  </Layout>
+                </ProtectedRoute>
+              }
+            />
+
             <Route
               path="/gate-operations"
               element={
