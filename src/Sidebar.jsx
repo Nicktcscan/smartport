@@ -91,6 +91,11 @@ const financeNavItems = [
   { path: '/sads', label: 'SAD Declarations', icon: FaFileInvoice },
 ];
 
+// Albayrak menu
+const albayrakNavItems = [
+  { path: '/albayrak', label: 'Albayrak Dashboard', icon: FaTachometerAlt },
+];
+
 function Sidebar({ isCollapsed, toggleCollapse }) {
   const { user } = useAuth();
 
@@ -102,6 +107,8 @@ function Sidebar({ isCollapsed, toggleCollapse }) {
     navItems = weighbridgeNavItems;
   } else if (user?.role === 'outgate') {
     navItems = outgateNavItems;
+  } else if (user?.role === 'albayrak') {
+    navItems = albayrakNavItems;
   } else if (user?.role === 'customs') {
     navItems = customsNavItems;
   } else if (user?.role === 'agent') {
